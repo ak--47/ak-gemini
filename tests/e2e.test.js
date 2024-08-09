@@ -6,7 +6,7 @@ jest.setTimeout(30_000);
 
 beforeAll(async () => {
 	await import("../function.js");
-	func = getFunction("http-entry");
+	func = getFunction("entry");
 });
 
 

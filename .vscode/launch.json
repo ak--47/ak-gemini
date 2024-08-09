@@ -33,7 +33,13 @@
             "env": {
                 "NODE_ENV": "dev"
             }
-        }
+        },
+		{
+			"command": "npm run fire",
+			"name": "FIRE",
+			"request": "launch",
+			"type": "node-terminal",
+		}
 		
 	]
 }

@@ -3,12 +3,13 @@ import { Storage } from '@google-cloud/storage';
 import { tmpdir } from 'os';
 import { sLog, uid, timer } from 'ak-tools';
 import dotenv from 'dotenv';
+import ai from './components/ai.js';
 dotenv.config();
 
 /**
  * @typedef {Object} Params
- * @property {string} [foo] - Description of foo
- * @property {number} [bar] - Description of bar
+ * @property {string} [input] - user input
+ * @property {string} [template] - the template to use
  */
 
 /** @typedef {'/' | '/foo'} Endpoints  */
@@ -24,7 +25,7 @@ const tmp = NODE_ENV === 'dev' ? './tmp' : tmpdir();
 
 // http entry point
 // ? https://cloud.google.com/functions/docs/writing/write-http-functions
-http('http-entry', async (req, res) => {
+http('entry', async (req, res) => {
 	const runId = uid();
 	const reqData = { url: req.url, method: req.method, headers: req.headers, body: req.body, runId };
 	let response = {};
@@ -44,7 +45,8 @@ http('http-entry', async (req, res) => {
 
 		// @ts-ignore
 		const result = await job(body);
-		sLog(`FINISH: ${req.path} ... ${t.end()}`, result);
+		t.end()
+		sLog(`FINISH: ${req.path} ... ${t.report(false).human}`, result);
 
 		//finished
 		res.status(200);
@@ -57,32 +59,6 @@ http('http-entry', async (req, res) => {
 		response = { error: e };
 	}
 	res.send(JSON.stringify(response));
-});
-
-
-// cloud event entry point
-// ? https://cloud.google.com/functions/docs/writing/write-event-driven-functions
-cloudEvent('event-entry', async (cloudEvent) => {
-	const { data } = cloudEvent;
-	const runId = uid();
-	const reqData = { data, runId };
-	let response = {};
-	const t = timer('job');
-	t.start();
-	sLog(`START`, reqData);
-
-	try {
-		const result = await main(data);
-		sLog(`FINISH ${t.end()}`, { ...result, runId });
-		response = result;
-
-	} catch (e) {
-		console.error(`ERROR! ${e.message || "unknown"}`, e);
-		response = { error: e };
-	}
-
-	return response;
-
 });
 
 async function main(data) {
@@ -105,8 +81,10 @@ function route(path) {
 	switch (path) {
 		case "/":
 			return [main];
-		case "/foo":
-			return [() => { }];
+		case "/dungeon":
+			return [ai];
+		case "/random":
+			return [ai];
 		default:
 			throw new Error(`Invalid path: ${path}`);
 	}

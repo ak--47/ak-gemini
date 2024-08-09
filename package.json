@@ -1,5 +1,5 @@
 {
-  "name": "cloud-function-boilerplate",
+  "name": "ak-gemini",
   "version": "1.0.0",
   "main": "function.js",
   "scripts": {
@@ -12,13 +12,18 @@
     "test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js"
   },
   "type": "module",
-  "keywords": ["cloud function", "template", "serverless"],
+  "keywords": [
+    "cloud function",
+    "template",
+    "serverless"
+  ],
   "author": "ak@mixpanel.com",
   "license": "ISC",
-  "description": "AK's cloud function boilerplate",
+  "description": "AK works with Google Cloud Functions and Generative AI",
   "dependencies": {
     "@google-cloud/functions-framework": "^3.4.2",
     "@google-cloud/storage": "^7.12.0",
+    "@google/generative-ai": "^0.16.0",
     "ak-tools": "^1.0.64",
     "dotenv": "^16.4.5"
   },

@@ -6,3 +6,8 @@ tmp/*
 !tmp/.gitkeep
 logs/*
 !logs/.gitkeep
+.env
+env.yaml
+.env
+.env
+env.yaml

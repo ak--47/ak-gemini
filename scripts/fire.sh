@@ -1,2 +1,2 @@
 #!/bin/bash
-curl -X POST localhost:8080 -H "Content-Type: application/json" -d @sample-event.json
+curl -X POST localhost:8080/random -H "Content-Type: application/json"
