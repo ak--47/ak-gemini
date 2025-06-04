@@ -5,7 +5,7 @@ export default {
 	moduleNameMapper: {	'^(\\.{1,2}/.*)\\.js$': '$1.js'	},
 	coverageDirectory: "/tests/coverage",
 	setupFiles: [
-		"<rootDir>/jest.setup.js"
+		"<rootDir>/tests/jest.setup.js"
 	],
 	verbose: true
 

@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "main": "function.js",
   "scripts": {
-    "scratch": "NODE_ENV=dev nodemon scratch.js",
     "local": "./scripts/local.sh",
     "fire": "./scripts/fire.sh",
     "deploy": "./scripts/deploy.sh",

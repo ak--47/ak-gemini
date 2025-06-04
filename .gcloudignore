@@ -5,6 +5,13 @@ fire.sh
 sample-event.json
 scratch.js
 .vscode
+types.ts
+README.md
+jsconfig.json
+jest.config.js
+jest.setup.js
+.gitignore
+
 
 
 
