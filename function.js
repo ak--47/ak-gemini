@@ -83,6 +83,10 @@ function route(path) {
 			return [main];
 		case "/dungeon":
 			return [ai];
+		case "/schema":
+			return [ai];
+		case "/theme":
+			return [ai];
 		case "/random":
 			return [ai];
 		default:

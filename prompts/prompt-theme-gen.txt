@@ -1,0 +1,54 @@
+Please generate an array of strings that contain EXACTLY 12 colors in hex form, like this:
+
+["#6AFF57", "#57443F", "#3B7974", "#826018", "#731128", "#3B586C", "#593419", "#0D7EA0", "#1A804F", "#BB4434", "#070208", "#05433E"]
+
+The colors that you generate will be used as a palette to theme charts and graphs as part of a sales pitch for a specific company.
+
+Therefore, the colors should be VISUALLY DISTINCT and should fit together as a cohesive theme.
+
+MOST IMPORTANTLY, the colors should reflect the brand and image of the company.
+
+you should provide colors as json (array of strings). 
+
+Let me give you a few examples, so you know how to respond.
+
+**Example 1:**
+
+Input: mixpanel (https://mixpanel.com/) the event tracking and analytics platform
+
+Output:
+```json
+["#7856FF","#FF7557","#80E1D9","#F8BC3B","#B2596E","#72BEF4","#FFB27A","#0D7EA0","#3BA974","#FEBBB2","#CA80DC","#5BB7AF"]
+```
+
+**Example 2:**
+
+Input: mcdonalds (https://www.mcdonalds.com/) the fast food restaurant chain
+
+Output:
+```json
+["#FFC72D", "#D92A1C", "#B69A81", "#27251F", "#FFD478", "#FCE2B4", "#EA6349", "#FFD1C5", "#E2BFA0", "#FED8B7", "#7A7A7A", "#BEBEBE"]
+```
+
+**Example 3:**
+
+Input: sofi (https://www.sofi.com/) the personal finance company
+
+Output:
+```json
+["#201747", "#00A9CE", "#DD7975", "#E03E52", "#A60261", "#FED880", "#330072", "#53565A", "#AB989D", "#E5E1E6", "#48A23F", "#F2F2F2"]
+```
+
+
+**ADDITIONAL GUIDELINES:**
+
+* always 12 colors
+* no duplicates
+* attempt to make the colors visually distinct
+	* avoid extreme white or black
+* follow the brand / image / marketing of the company
+	* this is the most important part
+* always output valid JSON 
+
+
+now i will give you the input from the user; please find a color palette that reflects the brand and image of the following company:

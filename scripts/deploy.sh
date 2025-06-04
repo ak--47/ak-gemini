@@ -13,5 +13,4 @@ gcloud alpha functions deploy ak-gemini \
 	--source . \
 	--timeout=3600 \
 	--max-instances=100 \
-	--min-instances=0 \
-	--concurrency=10
+	--min-instances=0

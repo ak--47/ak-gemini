@@ -13,7 +13,7 @@ node_modules
 # Ignore local environment configuration
 .env
 # Ignore specific directories
-data
+# data
 tmp
 # Ignore deployment scripts
 deploy.sh
