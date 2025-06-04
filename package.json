@@ -23,9 +23,7 @@
   "description": "AK's Generative AI Helper for doing... transforms",
   "dependencies": {
     "@google-cloud/functions-framework": "^4.0.0",
-    "@google-cloud/storage": "^7.16.0",
     "@google/genai": "^1.3.0",
-    "@google/generative-ai": "^0.24.1",
     "ak-tools": "^1.0.64",
     "dotenv": "^16.5.0",
     "pino": "^9.7.0"
