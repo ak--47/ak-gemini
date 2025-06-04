@@ -4,66 +4,38 @@
  * Supports various models, system instructions, chat configurations, and example datasets.
  */
 
+/** 
+ * @typedef {import('./types').SafetySetting} SafetySetting
+ * @typedef {import('./types').ChatConfig} ChatConfig
+ * @typedef {import('./types').TransformationExample} TransformationExample
+ * @typedef {import('./types').ExampleFileContent} ExampleFileContent
+ * @typedef {import('./types').AITransformerOptions} AITransformerOptions
+ * @typedef {import('./types').AsyncValidatorFunction} AsyncValidatorFunction
+ * @typedef {import('./types').AITransformerContext} ExportedAPI
+ * 
+ */
+
+//env
+import dotenv from 'dotenv';
+dotenv.config();
+const { NODE_ENV = "unknown", GEMINI_API_KEY = "" } = process.env;
+if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY environment variable.");
+
+//deps
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import u from 'ak-tools';
-import dotenv from 'dotenv';
 import path from 'path';
 import log from './logger.js';
 
-dotenv.config();
-const { NODE_ENV = "unknown", GEMINI_API_KEY = "" } = process.env;
-
-// --- Configuration ---
-if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY environment variable.");
-
-// TYPES
-/**
- * @typedef {Object} SafetySetting
- * @property {string} category - The harm category
- * @property {string} threshold - The blocking threshold
- */
-
-/**
- * @typedef {Object} ChatConfig
- * @property {string} [responseMimeType] - MIME type for responses
- * @property {number} [temperature] - Controls randomness (0.0 to 1.0)
- * @property {number} [topP] - Controls diversity via nucleus sampling
- * @property {number} [topK] - Controls diversity by limiting top-k tokens
- * @property {string} [systemInstruction] - System instruction for the model
- * @property {SafetySetting[]} [safetySettings] - Safety settings array
- */
-
-/**
- * @typedef {Object} AITransformerOptions
- * @property {string} [modelName='gemini-1.5-pro'] - The Gemini model to use
- * @property {string} [systemInstructions] - Custom system instructions for the model
- * @property {ChatConfig} [chatConfig] - Configuration object for the chat session
- * @property {string} [examplesFile] - Path to JSON file containing transformation examples
- * @property {TransformationExample[]} [exampleData] - Inline examples to seed the transformer
- * @property {string} [sourceKey='PROMPT'] - Key name for source data in examples
- * @property {string} [targetKey='ANSWER'] - Key name for target data in examples
- */
-
-/**
- * @typedef {Object} TransformationExample
- * @property {Object} [CONTEXT] - optional context for the transformation
- * @property {Object} [PROMPT] - what the user provides as input
- * @property {Object} [ANSWER] - what the model should return as output
- */
-
-/**
- * @typedef {Object} ExampleFileContent
- * @property {TransformationExample[]} examples - Array of transformation examples
- */
 
 
-// Default safety settings
+
+// defaults
 const DEFAULT_SAFETY_SETTINGS = [
 	{ category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 	{ category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
 ];
 
-// Default system instructions
 const DEFAULT_SYSTEM_INSTRUCTIONS = `
 You are an expert JSON transformation engine. Your task is to accurately convert data payloads from one format to another.
 
@@ -78,7 +50,6 @@ Always respond ONLY with a valid JSON object that strictly adheres to the expect
 Do not include any additional text, explanations, or formatting before or after the JSON object.
 `;
 
-// Default chat configuration
 const DEFAULT_CHAT_CONFIG = {
 	responseMimeType: 'application/json',
 	temperature: 0.2,
@@ -88,81 +59,109 @@ const DEFAULT_CHAT_CONFIG = {
 	safetySettings: DEFAULT_SAFETY_SETTINGS
 };
 
-
-
 /**
- * Generic AI Transformer class for converting data between formats using Google's Gemini AI
+ * main export class for AI Transformer
+ * @class AITransformer
+ * @description A class that provides methods to initialize, seed, transform, and manage AI-based transformations using Google Gemini API.
+ * @implements {ExportedAPI}
  */
+// @ts-ignore
 export default class AITransformer {
 	/**
-	 * Creates a new AI Transformer instance
-	 * @param {AITransformerOptions} [options={}] - Configuration options for the transformer
+	 * @param {AITransformerOptions} [options={}] - Configuration options for the transformer	
+	 * 
 	 */
 	constructor(options = {}) {
-		// ? https://ai.google.dev/gemini-api/docs/models
-		this.modelName = options.modelName || 'gemini-2.0-flash';
-		this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
-
-		// Build chat config, making sure systemInstruction uses the custom instructions
-		this.chatConfig = {
-			...DEFAULT_CHAT_CONFIG,
-			...options.chatConfig,
-			systemInstruction: this.systemInstructions
-		};
-
-		// response schema is optional, but if provided, it should be a valid JSON schema
-		// todo: ^ check this
-		if (options.responseSchema) {
-			this.chatConfig.responseSchema = options.responseSchema;
-		}
-
-		// examples file is optional, but if provided, it should contain valid PROMPT and ANSWER keys
-		this.examplesFile = options.examplesFile || null;
-		this.exampleData = options.exampleData || null; // can be used instead of examplesFile
-		this.promptKey = options.sourceKey || 'PROMPT';
-		this.answerKey = options.targetKey || 'ANSWER';
-		this.contextKey = options.contextKey || null; // context is optional
-		if (this.promptKey === this.answerKey) {
-			throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
-		}
-		log.debug(`[AK-GEMINI]: Creating AI Transformer with model: ${this.modelName}`);
-
-		this.genAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-		this.chat = null;
+		this.modelName = "";
+		this.promptKey = "";
+		this.answerKey = "";
+		this.contextKey = "";
+		this.maxRetries = 3;
+		this.retryDelay = 1000;
+		this.systemInstructions = "";
+		this.chatConfig = {};
+		AITransformFactory.call(this, options);
+		
+		//external API
+		this.init = initChat.bind(this);
+		this.seed = seedWithExamples.bind(this);
+		this.message = transformJSON.bind(this);
+		this.rebuild = rebuildPayload.bind(this);
+		this.reset = resetChat.bind(this);
+		this.getHistory = getChatHistory.bind(this);
+		this.transformWithValidation = transformWithValidation.bind(this);		
 	}
-
-	init = initChat;
-	seed = seedWithExamples;
-	message = transformJSON;
-	rebuild = rebuildPayload;
-	reset = resetChat;
-	getHistory = getChatHistory;
-
 }
 
+/**
+ * factory function to create an AI Transformer instance
+ * @param {AITransformerOptions} [options={}] - Configuration options for the transformer
+ * @returns {void} - An instance of AITransformer with initialized properties and methods
+ */
+function AITransformFactory(options = {}) {
+	// ? https://ai.google.dev/gemini-api/docs/models
+	this.modelName = options.modelName || 'gemini-2.0-flash';
+	this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
 
+	// Build chat config, making sure systemInstruction uses the custom instructions
+	this.chatConfig = {
+		...DEFAULT_CHAT_CONFIG,
+		...options.chatConfig,
+		systemInstruction: this.systemInstructions
+	};
+
+	// response schema is optional, but if provided, it should be a valid JSON schema
+	if (options.responseSchema) {
+		this.chatConfig.responseSchema = options.responseSchema;
+	}
+
+	// examples file is optional, but if provided, it should contain valid PROMPT and ANSWER keys
+	this.examplesFile = options.examplesFile || null;
+	this.exampleData = options.exampleData || null; // can be used instead of examplesFile
+
+	// Use configurable keys with fallbacks
+	this.promptKey = options.sourceKey || 'PROMPT';
+	this.answerKey = options.targetKey || 'ANSWER';
+	this.contextKey = options.contextKey || 'CONTEXT'; // Now configurable
+
+	// Retry configuration
+	this.maxRetries = options.maxRetries || 3;
+	this.retryDelay = options.retryDelay || 1000;
+
+	if (this.promptKey === this.answerKey) {
+		throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
+	}
+
+	log.debug(`Creating AI Transformer with model: ${this.modelName}`);
+	log.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+
+	this.genAIClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+	this.chat = null;	
+}
 
 /**
-	 * Initializes the chat session with the specified model and configurations.
-	 * @returns {Promise<void>}
-	 */
+ * Initializes the chat session with the specified model and configurations.
+ * @this {ExportedAPI}
+ * @returns {Promise<void>}
+ */
 async function initChat() {
 	if (this.chat) return;
 
-	log.debug(`[AK-GEMINI]: Initializing Gemini chat session with model: ${this.modelName}...`);
+	log.debug(`Initializing Gemini chat session with model: ${this.modelName}...`);
 
-	this.chat = await this.genAI.chats.create({
+	this.chat = await this.genAIClient.chats.create({
 		model: this.modelName,
 		// @ts-ignore
 		config: this.chatConfig,
 		history: [],
 	});
 
-	log.debug("[AK-GEMINI]: Gemini chat session initialized.");
+	log.debug("Gemini chat session initialized.");
 }
 
 /**
  * Seeds the chat session with example transformations.
+ * @this {ExportedAPI}
  * @param {TransformationExample[]} [examples] - An array of transformation examples.
  * @returns {Promise<void>}
  */
@@ -171,41 +170,59 @@ async function seedWithExamples(examples) {
 
 	if (!examples || !Array.isArray(examples) || examples.length === 0) {
 		if (this.examplesFile) {
-			log.debug(`[AK-GEMINI]: No examples provided, loading from file: ${this.examplesFile}`);
+			log.debug(`No examples provided, loading from file: ${this.examplesFile}`);
 			examples = await u.load(path.resolve(this.examplesFile), true);
 		} else {
-			log.debug("[AK-GEMINI]: No examples provided and no examples file specified. Skipping seeding.");
+			log.debug("No examples provided and no examples file specified. Skipping seeding.");
 			return;
 		}
 	}
 
-	log.debug(`[AK-GEMINI]: Seeding chat with ${examples.length} transformation examples...`);
+	log.debug(`Seeding chat with ${examples.length} transformation examples...`);
 	const historyToAdd = [];
 
 	for (const example of examples) {
-		let { CONTEXT = "", PROMPT = "", ANSWER = "" } = example; // how to ensure we have the right keys that the user provided?
+		// Use the configurable keys from constructor
+		const contextValue = example[this.contextKey] || "";
+		const promptValue = example[this.promptKey] || "";
+		const answerValue = example[this.answerKey] || "";
 
-		if (CONTEXT && u.isJSON(CONTEXT)) CONTEXT = JSON.stringify(CONTEXT, null, 2);
-		if (CONTEXT) historyToAdd.push({ role: 'system', parts: [{ text: CONTEXT }] }); // is this the right way to add additional context for an example? or should it be @ the end AFTER the response?
+		// Add context as user message with special formatting to make it part of the example flow
+		if (contextValue) {
+			let contextText = u.isJSON(contextValue) ? JSON.stringify(contextValue, null, 2) : contextValue;
+			// Prefix context to make it clear it's contextual information
+			historyToAdd.push({
+				role: 'user',
+				parts: [{ text: `Context: ${contextText}` }]
+			});
+			// Add a brief model acknowledgment
+			historyToAdd.push({
+				role: 'model',
+				parts: [{ text: "I understand the context." }]
+			});
+		}
 
-		if (PROMPT && u.isJSON(PROMPT)) PROMPT = JSON.stringify(PROMPT, null, 2);
-		if (PROMPT) historyToAdd.push({ role: 'user', parts: [{ text: PROMPT }] });
+		if (promptValue) {
+			let promptText = u.isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
+			historyToAdd.push({ role: 'user', parts: [{ text: promptText }] });
+		}
 
-		if (ANSWER && u.isJSON(ANSWER)) ANSWER = JSON.stringify(ANSWER, null, 2);
-		if (ANSWER) historyToAdd.push({ role: 'model', parts: [{ text: ANSWER }] });
-
+		if (answerValue) {
+			let answerText = u.isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : answerValue;
+			historyToAdd.push({ role: 'model', parts: [{ text: answerText }] });
+		}
 	}
 
 	const currentHistory = this.chat.getHistory();
 
-	this.chat = await this.genAI.chats.create({
+	this.chat = await this.genAIClient.chats.create({
 		model: this.modelName,
 		// @ts-ignore
 		config: this.chatConfig,
 		history: [...currentHistory, ...historyToAdd],
 	});
 
-	log.debug("[AK-GEMINI]: Transformation examples seeded successfully.");
+	log.debug("Transformation examples seeded successfully.");
 }
 
 /**
@@ -224,6 +241,7 @@ async function transformJSON(sourcePayload) {
 	if (sourcePayload && u.isJSON(sourcePayload)) actualPayload = JSON.stringify(sourcePayload, null, 2);
 	else if (typeof sourcePayload === 'string') actualPayload = sourcePayload;
 	else throw new Error("Invalid source payload. Must be a JSON object or a valid JSON string.");
+
 	try {
 		result = await this.chat.sendMessage({ message: actualPayload });
 	} catch (error) {
@@ -242,6 +260,56 @@ async function transformJSON(sourcePayload) {
 }
 
 /**
+ * Transforms payload with automatic validation and retry logic
+ * @param {Object} sourcePayload - The source payload to transform
+ * @param {AsyncValidatorFunction} validatorFn - Async function that validates the transformed payload
+ * @param {Object} [options] - Options for the validation process
+ * @param {number} [options.maxRetries] - Override default max retries
+ * @param {number} [options.retryDelay] - Override default retry delay
+ * @returns {Promise<Object>} - The validated transformed payload
+ * @throws {Error} If transformation or validation fails after all retries
+ */
+async function transformWithValidation(sourcePayload, validatorFn, options = {}) {
+	const maxRetries = options.maxRetries ?? this.maxRetries;
+	const retryDelay = options.retryDelay ?? this.retryDelay;
+
+	let lastPayload = null;
+	let lastError = null;
+
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		try {
+			// First attempt uses normal transformation, subsequent attempts use rebuild
+			const transformedPayload = attempt === 0
+				? await this.message(sourcePayload)
+				: await this.rebuild(lastPayload, lastError.message);
+
+			// Validate the transformed payload
+			const validatedPayload = await validatorFn(transformedPayload);
+
+			log.debug(`Transformation and validation succeeded on attempt ${attempt + 1}`);
+			return validatedPayload;
+
+		} catch (error) {
+			lastError = error;
+
+			if (attempt === 0) {
+				// First attempt failed - could be transformation or validation error
+				lastPayload = await this.message(sourcePayload).catch(() => null);
+			}
+
+			if (attempt < maxRetries) {
+				const delay = retryDelay * Math.pow(2, attempt); // Exponential backoff
+				log.warn(`Attempt ${attempt + 1} failed, retrying in ${delay}ms...`, error.message);
+				await new Promise(res => setTimeout(res, delay));
+			} else {
+				log.error(`All ${maxRetries + 1} attempts failed`);
+				throw new Error(`Transformation with validation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
+			}
+		}
+	}
+}
+
+/**
  * Rebuilds a payload based on server error feedback
  * @param {Object} lastPayload - The payload that failed validation
  * @param {string} serverError - The error message from the server
@@ -249,7 +317,7 @@ async function transformJSON(sourcePayload) {
  * @throws {Error} If the rebuild process fails.
  */
 async function rebuildPayload(lastPayload, serverError) {
-	await this.initChat();
+	await this.init();
 
 	const prompt = `
 The previous JSON payload (below) failed validation.
@@ -257,6 +325,7 @@ The server's error message is quoted afterward.
 
 ---------------- BAD PAYLOAD ----------------
 ${JSON.stringify(lastPayload, null, 2)}
+
 ---------------- SERVER ERROR ----------------
 ${serverError}
 
@@ -281,12 +350,13 @@ Respond with JSON only – no comments or explanations.
 
 /**
  * Resets the current chat session, clearing all history and examples
+ * @this {ExportedAPI}
  * @returns {Promise<void>}
  */
 async function resetChat() {
 	if (this.chat) {
 		log.debug("Resetting Gemini chat session...");
-		this.chat = await this.genAI.chats.create({
+		this.chat = await this.genAIClient.chats.create({
 			model: this.modelName,
 			// @ts-ignore
 			config: this.chatConfig,
@@ -310,31 +380,6 @@ function getChatHistory() {
 	return this.chat.getHistory();
 }
 
-/**
- * Utility function for retry logic with exponential backoff
- * @param {Function} fn - The function to retry
- * @param {number} [retries=3] - Number of retry attempts
- * @param {number} [delay=1000] - Initial delay in milliseconds
- * @returns {Promise<*>} - The result of the function call
- * @throws {Error} If all retry attempts fail
- */
-async function withRetry(fn, retries = 3, delay = 1000) {
-	for (let i = 0; i < retries; i++) {
-		try {
-			return await fn();
-		} catch (error) {
-			if (i < retries - 1) {
-				log.warn(`Attempt ${i + 1} failed, retrying in ${delay / 1000}s...`, error.message);
-				await new Promise(res => setTimeout(res, delay));
-				delay *= 2; // Exponential backoff
-			} else {
-				throw error; // Re-throw if all retries fail
-			}
-		}
-	}
-}
-
-
 
 if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 	log.info("RUNNING AI Transformer as standalone script...");
@@ -343,28 +388,56 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 			try {
 				log.info("Initializing AI Transformer...");
 				const transformer = new AITransformer({
-					modelName: 'gemini-2.5-flash-preview-05-20',
-					// systemInstructions: DEFAULT_SYSTEM_INSTRUCTIONS,
-					// examplesFile: './examples.json', // Path to your examples file
-					// sourceKey: 'PROMPT',
-					// targetKey: 'ANSWER'
+					modelName: 'gemini-2.0-flash',
+					sourceKey: 'INPUT', // Custom source key
+					targetKey: 'OUTPUT', // Custom target key
+					contextKey: 'CONTEXT', // Custom context key
+					maxRetries: 2,
+
 				});
 
+				const examples = [
+					{
+						CONTEXT: "Generate professional profiles with emoji representations",
+						INPUT: { "name": "Alice" },
+						OUTPUT: { "name": "Alice", "profession": "data scientist", "life_as_told_by_emoji": ["🔬", "💡", "📊", "🧠", "🌟"] }
+					},
+					{
+						INPUT: { "name": "Bob" },
+						OUTPUT: { "name": "Bob", "profession": "product manager", "life_as_told_by_emoji": ["📋", "🤝", "🚀", "💬", "🎯"] }
+					},
+					{
+						INPUT: { "name": "Eve" },
+						OUTPUT: { "name": "Even", "profession": "security analyst", "life_as_told_by_emoji": ["🕵️‍♀️", "🔒", "💻", "👀", "⚡️"] }
+					},
+				];
+
 				await transformer.init();
-				await transformer.seed([
-					{
-						PROMPT: { "name": "Alice" }, ANSWER: { "profession": "data scientist", "life_as_told_by_emoji": ["🔬", "💡", "📊", "🧠", "🌟"] }
-					},
-					{
-						PROMPT: { "name": "Bob" }, ANSWER: { "profession": "product manager", "life_as_told_by_emoji": ["📋", "🤝", "🚀", "💬", "🎯"] }
-					},
-					{
-						PROMPT: { "name": "Eve" }, ANSWER: { "profession": "security analyst", "life_as_told_by_emoji": ["🕵️‍♀️", "🔒", "💻", "👀", "⚡️"] }
-					},
-				]);
+				await transformer.seed(examples);
 				log.info("AI Transformer initialized and seeded with examples.");
-				const response = await transformer.message({ "name": "AK" });
-				log.info("Payload Transformed", response);
+
+				// Test normal transformation
+				const normalResponse = await transformer.message({ "name": "AK" });
+				log.info("Normal Payload Transformed", normalResponse);
+
+				// Test transformation with validation
+				const mockValidator = async (payload) => {
+					// Simulate validation logic
+					if (!payload.profession || !payload.life_as_told_by_emoji) {
+						throw new Error("Missing required fields: profession or life_as_told_by_emoji");
+					}
+					if (!Array.isArray(payload.life_as_told_by_emoji)) {
+						throw new Error("life_as_told_by_emoji must be an array");
+					}
+					return payload; // Return the payload if validation passes
+				};
+
+				const validatedResponse = await transformer.transformWithValidation(
+					{ "name": "Lynn" },
+					mockValidator
+				);
+				log.info("Validated Payload Transformed", validatedResponse);
+
 				if (NODE_ENV === 'dev') debugger;
 			} catch (error) {
 				log.error("Error in AI Transformer script:", error);
