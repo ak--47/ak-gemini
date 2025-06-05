@@ -18,8 +18,9 @@
 //env
 import dotenv from 'dotenv';
 dotenv.config();
-const { NODE_ENV = "unknown", GEMINI_API_KEY = "" } = process.env;
-if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY environment variable.");
+const { NODE_ENV = "unknown", GEMINI_API_KEY } = process.env;
+
+
 
 //deps
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
@@ -80,8 +81,9 @@ export default class AITransformer {
 		this.retryDelay = 1000;
 		this.systemInstructions = "";
 		this.chatConfig = {};
+		this.apiKey = GEMINI_API_KEY;
 		AITransformFactory.call(this, options);
-		
+
 		//external API
 		this.init = initChat.bind(this);
 		this.seed = seedWithExamples.bind(this);
@@ -89,7 +91,7 @@ export default class AITransformer {
 		this.rebuild = rebuildPayload.bind(this);
 		this.reset = resetChat.bind(this);
 		this.getHistory = getChatHistory.bind(this);
-		this.transformWithValidation = transformWithValidation.bind(this);		
+		this.transformWithValidation = transformWithValidation.bind(this);
 	}
 }
 
@@ -103,6 +105,8 @@ function AITransformFactory(options = {}) {
 	this.modelName = options.modelName || 'gemini-2.0-flash';
 	this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
 
+	this.apiKey = options.apiKey || GEMINI_API_KEY;
+	if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
 	// Build chat config, making sure systemInstruction uses the custom instructions
 	this.chatConfig = {
 		...DEFAULT_CHAT_CONFIG,
@@ -135,8 +139,8 @@ function AITransformFactory(options = {}) {
 	log.debug(`Creating AI Transformer with model: ${this.modelName}`);
 	log.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
 
-	this.genAIClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-	this.chat = null;	
+	this.genAIClient = new GoogleGenAI({ apiKey: this.apiKey });
+	this.chat = null;
 }
 
 /**

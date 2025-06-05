@@ -36,6 +36,8 @@ Set your `GEMINI_API_KEY` environment variable:
 export GEMINI_API_KEY=sk-your-gemini-api-key
 ```
 
+or pass it directly in the constructor options.
+
 ---
 
 ### 2. **Basic Example**

@@ -1,6 +1,10 @@
 #!/bin/bash
 
-# http deploy
+set -euo pipefail
+
+cp package.json package.deploy.json
+jq '.main = "function.js"' package.deploy.json > package.json
+
 gcloud alpha functions deploy ak-gemini \
 	--gen2 \
 	--no-allow-unauthenticated \
@@ -14,3 +18,6 @@ gcloud alpha functions deploy ak-gemini \
 	--timeout=3600 \
 	--max-instances=100 \
 	--min-instances=0
+
+# Restore original package.json
+mv package.deploy.json package.json

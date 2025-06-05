@@ -58,6 +58,7 @@ export interface AITransformerOptions {
   retryDelay?: number; // Initial retry delay in milliseconds
   // ? https://ai.google.dev/gemini-api/docs/structured-output
   responseSchema?: Object; // Schema for validating model responses 
+  apiKey?: string; // API key for Google GenAI
 }
 
 // Async validator function type
