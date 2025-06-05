@@ -1,0 +1,33 @@
+{
+	"compilerOptions": {
+		"checkJs": true,
+		"allowJs": true,
+		"maxNodeModuleJsDepth": 1,
+		"target": "ESNext",
+		"module": "ESNext",
+		"moduleResolution": "Node",
+		"strict": false,
+		"noImplicitAny": false,
+		"strictNullChecks": false,
+		"allowUnreachableCode": false,
+		"allowSyntheticDefaultImports": true,
+		"resolveJsonModule": true,
+		"baseUrl": ".",
+		"paths": {
+			"*": [
+				"*",
+				"src/*"
+			]
+		}
+	},
+	"exclude": [
+		"node_modules",
+		"dist",
+		"build",
+		"coverage"
+	],
+	"include": [
+		"**/*.js",
+		"**/*.mjs"
+	]
+}

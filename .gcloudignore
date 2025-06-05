@@ -5,6 +5,13 @@ fire.sh
 sample-event.json
 scratch.js
 .vscode
+types.ts
+README.md
+jsconfig.json
+jest.config.js
+jest.setup.js
+.gitignore
+
 
 
 
@@ -13,7 +20,7 @@ node_modules
 # Ignore local environment configuration
 .env
 # Ignore specific directories
-data
+# data
 tmp
 # Ignore deployment scripts
 deploy.sh

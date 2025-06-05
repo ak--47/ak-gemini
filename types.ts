@@ -1,0 +1,65 @@
+import type { GoogleGenAI } from '@google/genai';
+
+export interface SafetySetting {
+  category: string; // The harm category
+  threshold: string; // The blocking threshold
+}
+
+export interface ChatConfig {
+  responseMimeType?: string; // MIME type for responses
+  temperature?: number; // Controls randomness (0.0 to 1.0)
+  topP?: number; // Controls diversity via nucleus sampling
+  topK?: number; // Controls diversity by limiting top-k tokens
+  systemInstruction?: string; // System instruction for the model
+  safetySettings?: SafetySetting[]; // Safety settings array
+  responseSchema?: Object; // Schema for validating model responses
+}
+
+export interface AITransformerContext {
+  modelName?: string;
+  systemInstructions?: string;
+  chatConfig?: ChatConfig;
+  genAI?: any;
+  chat?: any;
+  examplesFile?: string | null;
+  exampleData?: TransformationExample[] | null;
+  promptKey?: string;
+  answerKey?: string;
+  contextKey?: string;
+  maxRetries?: number;
+  retryDelay?: number;
+  init: () => Promise<void>; // Initialization function
+  seed: () => Promise<void>; // Function to seed the transformer with examples  
+  message: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send messages to the model
+  genAIClient?: GoogleGenAI; // Google GenAI client instance
+  
+}
+
+export interface TransformationExample {
+  CONTEXT?: Record<string, unknown>; // optional context for the transformation
+  PROMPT?: Record<string, unknown>; // what the user provides as input
+  ANSWER?: Record<string, unknown>; // what the model should return as output
+}
+
+export interface ExampleFileContent {
+  examples: TransformationExample[];
+}
+
+export interface AITransformerOptions {
+  modelName?: string; // The Gemini model to use
+  systemInstructions?: string; // Custom system instructions for the model
+  chatConfig?: ChatConfig; // Configuration object for the chat session
+  examplesFile?: string; // Path to JSON file containing transformation examples
+  exampleData?: TransformationExample[]; // Inline examples to seed the transformer
+  sourceKey?: string; // Key name for source data in examples
+  targetKey?: string; // Key name for target data in examples
+  contextKey?: string; // Key name for context data in examples
+  maxRetries?: number; // Maximum retry attempts for auto-retry functionality
+  retryDelay?: number; // Initial retry delay in milliseconds
+  // ? https://ai.google.dev/gemini-api/docs/structured-output
+  responseSchema?: Object; // Schema for validating model responses 
+  apiKey?: string; // API key for Google GenAI
+}
+
+// Async validator function type
+export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
