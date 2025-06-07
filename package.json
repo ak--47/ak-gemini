@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... transforms",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -36,7 +36,7 @@
 		"update-deps": "npx npm-check-updates -u && npm install",
 		"prune": "rm -rf tmp/*",
 		"test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js",
-		"build:cjs": "esbuild index.js --platform=node --format=cjs --outfile=index.cjs"
+		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs"
 	},
 	"type": "module",
 	"keywords": [
