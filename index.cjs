@@ -23457,7 +23457,8 @@ var require_pino = __commonJS({
 // index.js
 var index_exports = {};
 __export(index_exports, {
-  default: () => AITransformer
+  default: () => AITransformer,
+  log: () => logger_default
 });
 module.exports = __toCommonJS(index_exports);
 var import_dotenv = __toESM(require_main(), 1);
@@ -41359,6 +41360,9 @@ var logger_default = logger;
 var import_meta = {};
 import_dotenv.default.config();
 var { NODE_ENV = "unknown", GEMINI_API_KEY } = process.env;
+if (NODE_ENV === "dev") logger_default.level = "debug";
+if (NODE_ENV === "test") logger_default.level = "warn";
+if (NODE_ENV.startsWith("prod")) logger_default.level = "error";
 var DEFAULT_SAFETY_SETTINGS = [
   { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
   { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
@@ -41650,6 +41654,10 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
     }
   })();
 }
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  log
+});
 /*! Bundled license information:
 
 safe-buffer/index.js:

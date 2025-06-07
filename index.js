@@ -27,7 +27,11 @@ import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import u from 'ak-tools';
 import path from 'path';
 import log from './logger.js';
+export { log };
 
+if (NODE_ENV === 'dev') log.level = 'debug';
+if (NODE_ENV === 'test') log.level = 'warn';
+if (NODE_ENV.startsWith('prod')) log.level = 'error';
 
 
 
