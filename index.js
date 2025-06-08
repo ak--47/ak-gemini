@@ -96,6 +96,7 @@ export default class AITransformer {
 		this.reset = resetChat.bind(this);
 		this.getHistory = getChatHistory.bind(this);
 		this.transformWithValidation = transformWithValidation.bind(this);
+		this.estimate = estimateTokenUsage.bind(this);
 	}
 }
 
@@ -143,7 +144,8 @@ function AITransformFactory(options = {}) {
 	log.debug(`Creating AI Transformer with model: ${this.modelName}`);
 	log.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
 
-	this.genAIClient = new GoogleGenAI({ apiKey: this.apiKey });
+	const ai = new GoogleGenAI({ apiKey: this.apiKey });
+	this.genAIClient = ai;
 	this.chat = null;
 }
 
@@ -221,7 +223,7 @@ async function seedWithExamples(examples) {
 		}
 	}
 
-	const currentHistory = this.chat.getHistory();
+	const currentHistory = this?.chat?.getHistory() || [];
 
 	this.chat = await this.genAIClient.chats.create({
 		model: this.modelName,
@@ -315,6 +317,47 @@ async function transformWithValidation(sourcePayload, validatorFn, options = {})
 			}
 		}
 	}
+}
+
+
+/**
+ * Estimate total token usage if you were to send a new payload as the next message.
+ * Considers system instructions, current chat history (including examples), and the new message.
+ * @param {object|string} nextPayload - The next user message to be sent (object or string)
+ * @returns {Promise<{ totalTokens: number, ... }>} - The result of Gemini's countTokens API
+ */
+async function estimateTokenUsage(nextPayload) {
+	// Compose the conversation contents, Gemini-style
+	const contents = [];
+
+	// (1) System instructions (if applicable)
+	if (this.systemInstructions) {
+		// Add as a 'system' part; adjust role if Gemini supports
+		contents.push({ parts: [{ text: this.systemInstructions }] });
+	}
+
+	// (2) All current chat history (seeded examples + real user/model turns)
+	if (this.chat && typeof this.chat.getHistory === "function") {
+		const history = this.chat.getHistory();
+		if (Array.isArray(history) && history.length > 0) {
+			contents.push(...history);
+		}
+	}
+
+	// (3) The next user message
+	const nextMessage = typeof nextPayload === "string"
+		? nextPayload
+		: JSON.stringify(nextPayload, null, 2);
+
+	contents.push({ parts: [{ text: nextMessage }] });
+
+	// Call Gemini's token estimator
+	const resp = await this.genAIClient.models.countTokens({
+		model: this.modelName,
+		contents,
+	});
+
+	return resp; // includes totalTokens, possibly breakdown
 }
 
 /**

@@ -7,12 +7,13 @@ Use this to power LLM-driven data pipelines, JSON mapping, or any automated AI t
 
 ## Features
 
-* **Model-Agnostic**: Configure for any Gemini model (`gemini-2.0-flash` by default)
-* **Declarative Examples**: Seed transformations using example mappings, with support for custom keys (`PROMPT`, `ANSWER`, `CONTEXT`, or your own)
-* **Automatic Validation & Repair**: Validate outputs with your own async function; auto-repair failed payloads with LLM feedback loop (exponential backoff, fully configurable)
-* **Strong TypeScript/JSDoc Typings**: All public APIs fully typed (see `/types`)
-* **Minimal API Surface**: Dead simple, no ceremony—init, seed, transform, validate.
-* **Robust Logging**: Pluggable logger for all steps, easy debugging
+* **Model-Agnostic:** Use any Gemini model (`gemini-2.0-flash` by default)
+* **Declarative Few-shot Examples:** Seed transformations using example mappings, with support for custom keys (`PROMPT`, `ANSWER`, `CONTEXT`, or your own)
+* **Automatic Validation & Repair:** Validate outputs with your own async function; auto-repair failed payloads with LLM feedback loop (exponential backoff, fully configurable)
+* **Token Counting & Safety:** Preview the *exact* Gemini token consumption for any operation—including all examples, instructions, and your input—before sending, so you can avoid window errors and manage costs.
+* **Strong TypeScript/JSDoc Typings:** All public APIs fully typed (see `/types`)
+* **Minimal API Surface:** Dead simple, no ceremony—init, seed, transform, validate.
+* **Robust Logging:** Pluggable logger for all steps, easy debugging
 
 ---
 
@@ -43,7 +44,7 @@ or pass it directly in the constructor options.
 ### 2. **Basic Example**
 
 ```js
-import AITransformer from 'ai-transformer';
+import AITransformer from 'ak-gemini';
 
 const transformer = new AITransformer({
   modelName: 'gemini-2.0-flash',    // or your preferred Gemini model
@@ -72,7 +73,22 @@ console.log(result);
 
 ---
 
-### 3. **Automatic Validation & Self-Healing**
+### 3. **Token Window Safety/Preview**
+
+Before calling `.message()` or `.seed()`, you can preview the exact token usage that will be sent to Gemini—*including* your system instructions, examples, and user input. This is vital for avoiding window errors and managing context size:
+
+```js
+const { totalTokens, breakdown } = await transformer.estimateTokenUsage({ name: "Bob" });
+console.log(`Total tokens: ${totalTokens}`);
+console.log(breakdown); // See per-section token counts
+
+// Optional: abort or trim if over limit
+if (totalTokens > 32000) throw new Error("Request too large for selected Gemini model");
+```
+
+---
+
+### 4. **Automatic Validation & Self-Healing**
 
 You can pass a custom async validator—if it fails, the transformer will attempt to self-correct using LLM feedback, retrying up to `maxRetries` times:
 
@@ -127,7 +143,12 @@ You can omit `examples` to use the `examplesFile` (if provided).
 
 #### `await transformer.message(sourcePayload)`
 
-Transforms input JSON to output JSON using the seeded examples and system instructions.
+Transforms input JSON to output JSON using the seeded examples and system instructions. Throws if estimated token window would be exceeded.
+
+#### `await transformer.estimateTokenUsage(sourcePayload)`
+
+Returns `{ totalTokens, breakdown }` for the *full request* that would be sent to Gemini (system instructions + all examples + your sourcePayload as the new prompt).
+Lets you preview token window safety and abort/trim as needed.
 
 #### `await transformer.transformWithValidation(sourcePayload, validatorFn, options?)`
 
@@ -187,10 +208,19 @@ const result = await transformer.transformWithValidation(
 
 ---
 
+## Token Window Management & Error Handling
+
+* Throws on missing `GEMINI_API_KEY`
+* `.message()` and `.seed()` will *estimate* and prevent calls that would exceed Gemini's model window
+* All API and parsing errors surfaced as `Error` with context
+* Validator and retry failures include the number of attempts and last error
+
+---
+
 ## Testing
 
 * **Jest test suite included**
-* Mocks Google Gemini, logger, ak-tools
+* Real API integration tests as well as local unit tests
 * 100% coverage for all error cases, configuration options, edge cases
 
 Run tests with:
@@ -200,13 +230,3 @@ npm test
 ```
 
 ---
-
-## Error Handling
-
-* Throws on missing `GEMINI_API_KEY`
-* All API and parsing errors surfaced as `Error` with context
-* Validator and retry failures include the number of attempts and last error
-
----
-
-
