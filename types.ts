@@ -28,9 +28,9 @@ export interface AITransformerContext {
   contextKey?: string;
   maxRetries?: number;
   retryDelay?: number;
-  init: () => Promise<void>; // Initialization function
-  seed: () => Promise<void>; // Function to seed the transformer with examples  
-  message: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send messages to the model
+  init?: () => Promise<void>; // Initialization function
+  seed?: () => Promise<void>; // Function to seed the transformer with examples  
+  message?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send messages to the model
   genAIClient?: GoogleGenAI; // Google GenAI client instance
   
 }
@@ -63,3 +63,6 @@ export interface AITransformerOptions {
 
 // Async validator function type
 export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+
+export declare class AITransformer implements AITransformerContext {}

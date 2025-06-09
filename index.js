@@ -99,7 +99,7 @@ export default class AITransformer {
 		this.estimate = estimateTokenUsage.bind(this);
 	}
 }
-
+export { AITransformer };
 /**
  * factory function to create an AI Transformer instance
  * @param {AITransformerOptions} [options={}] - Configuration options for the transformer
