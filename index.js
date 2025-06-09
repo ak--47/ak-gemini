@@ -65,8 +65,15 @@ const DEFAULT_CHAT_CONFIG = {
 };
 
 /**
+ * @typedef {import('./types').AITransformer}
+ */
+
+
+
+/**
  * main export class for AI Transformer
  * @class AITransformer
+ * @type {AITransformer}
  * @description A class that provides methods to initialize, seed, transform, and manage AI-based transformations using Google Gemini API.
  * @implements {ExportedAPI}
  */

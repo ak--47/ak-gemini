@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... transforms",
-	"version": "1.0.51",
+	"version": "1.0.52",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -10,7 +10,7 @@
 		"types.ts",
 		"logger.js"
 	],
-	"types": "types.ts",
+	"types": "types.d.ts",
 	"exports": {
 		".": {
 			"import": "./index.js",
