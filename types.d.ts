@@ -26,6 +26,7 @@ export interface AITransformerContext {
   promptKey?: string;
   answerKey?: string;
   contextKey?: string;
+  explanationKey?: string;
   maxRetries?: number;
   retryDelay?: number;
   init?: () => Promise<void>; // Initialization function
@@ -54,11 +55,18 @@ export interface AITransformerOptions {
   sourceKey?: string; // Key name for source data in examples
   targetKey?: string; // Key name for target data in examples
   contextKey?: string; // Key name for context data in examples
+  explanationKey?: string; // Key name for explanation data in examples
   maxRetries?: number; // Maximum retry attempts for auto-retry functionality
   retryDelay?: number; // Initial retry delay in milliseconds
   // ? https://ai.google.dev/gemini-api/docs/structured-output
   responseSchema?: Object; // Schema for validating model responses 
   apiKey?: string; // API key for Google GenAI
+  onlyJSON?: boolean; // If true, only JSON responses are allowed
+  asyncValidator?: AsyncValidatorFunction; // Optional async validator function for response validation
+  promptKey?: string; // Key for the prompt in examples
+  answerKey?: string; // Key for the answer in examples
+  contextKey?: string; // Key for the context in examples
+  explanationKey?: string; // Key for the explanation in examples
 }
 
 // Async validator function type
