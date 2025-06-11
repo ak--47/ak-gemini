@@ -307,8 +307,8 @@ You are a helpful assistant. For each question, reply with a short, direct answe
 	beforeAll(async () => {
 		transformer = new AITransformer({
 			...BASE_OPTIONS,
-			sourceKey: 'prompt',
-			targetKey: 'answer',
+			promptKey: 'prompt',
+			answerKey: 'answer',
 			onlyJSON: false, // Allow plain text answers
 			systemInstructions,
 		});
@@ -317,6 +317,7 @@ You are a helpful assistant. For each question, reply with a short, direct answe
 	beforeEach(async () => { await transformer.reset(); });
 
 	it('should seed chat with plain text Q&A examples', async () => {
+		await transformer.init();
 		await transformer.seed(unstructuredExamples);
 		const history = transformer.getHistory();
 		expect(history.length).toBe(4);

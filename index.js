@@ -215,7 +215,7 @@ async function seedWithExamples(examples) {
 			try {
 				examples = await u.load(path.resolve(this.examplesFile), true);
 			}
-			catch (err) {				
+			catch (err) {
 				throw new Error(`Could not load examples from file: ${this.examplesFile}. Please check the file path and format.`);
 			}
 		} else {
@@ -276,6 +276,8 @@ async function seedWithExamples(examples) {
 	});
 
 	log.debug("Transformation examples seeded successfully.");
+
+	return this.chat.getHistory(); // Return the updated chat history for reference
 }
 
 /**
