@@ -77,7 +77,7 @@ export interface AITransformerOptions {
 }
 
 // Async validator function type
-export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<unknown>;
 
 
 export declare class AITransformer implements AITransformerContext {}

@@ -106,12 +106,10 @@ class AITransformer {
 		this.rawMessage = rawMessage.bind(this);
 
 		// The public `.message()` method uses the GLOBAL validator
-		this.message = (payload, opts = {}) => {
-			return prepareAndValidateMessage.call(this, payload, opts, this.asyncValidator);
-		};
+		this.message = (payload, opts = {}, validatorFn = null) => {
 
-		// The public `.messageAndValidate()` uses the ON-DEMAND validator
-		this.messageAndValidate = prepareAndValidateMessage.bind(this);
+			return prepareAndValidateMessage.call(this, payload, opts, validatorFn || this.asyncValidator);
+		};
 
 		this.rebuild = rebuildPayload.bind(this);
 		this.reset = resetChat.bind(this);
@@ -133,7 +131,7 @@ function AITransformFactory(options = {}) {
 	this.modelName = options.modelName || 'gemini-2.0-flash';
 	this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
 
-	this.apiKey = options.apiKey || GEMINI_API_KEY;
+	this.apiKey = options.apiKey !== undefined && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
 	if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
 	// Build chat config, making sure systemInstruction uses the custom instructions
 	this.chatConfig = {
@@ -152,8 +150,8 @@ function AITransformFactory(options = {}) {
 	this.exampleData = options.exampleData || null; // can be used instead of examplesFile
 
 	// Use configurable keys with fallbacks
-	this.promptKey = options.sourceKey || 'PROMPT';
-	this.answerKey = options.targetKey || 'ANSWER';
+	this.promptKey = options.promptKey || 'PROMPT';
+	this.answerKey = options.answerKey || 'ANSWER';
 	this.contextKey = options.contextKey || 'CONTEXT'; // Optional key for context
 	this.explanationKey = options.explanationKey || 'EXPLANATION'; // Optional key for explanations
 	this.systemInstructionsKey = options.systemInstructionsKey || 'SYSTEM'; // Optional key for system instructions
@@ -214,7 +212,12 @@ async function seedWithExamples(examples) {
 	if (!examples || !Array.isArray(examples) || examples.length === 0) {
 		if (this.examplesFile) {
 			log.debug(`No examples provided, loading from file: ${this.examplesFile}`);
-			examples = await u.load(path.resolve(this.examplesFile), true);
+			try {
+				examples = await u.load(path.resolve(this.examplesFile), true);
+			}
+			catch (err) {				
+				throw new Error(`Could not load examples from file: ${this.examplesFile}. Please check the file path and format.`);
+			}
 		} else {
 			log.debug("No examples provided and no examples file specified. Skipping seeding.");
 			return;
@@ -378,6 +381,47 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
 	}
 }
 
+/**
+ * Rebuilds a payload based on server error feedback
+ * @param {Object} lastPayload - The payload that failed validation
+ * @param {string} serverError - The error message from the server
+ * @returns {Promise<Object>} - A new corrected payload
+ * @throws {Error} If the rebuild process fails.
+ */
+async function rebuildPayload(lastPayload, serverError) {
+	await this.init(); // Ensure chat is initialized
+	const prompt = `
+The previous JSON payload (below) failed validation.
+The server's error message is quoted afterward.
+
+---------------- BAD PAYLOAD ----------------
+${JSON.stringify(lastPayload, null, 2)}
+
+
+---------------- SERVER ERROR ----------------
+${serverError}
+
+Please return a NEW JSON payload that corrects the issue.
+Respond with JSON only – no comments or explanations.
+`;
+
+	let result;
+	try {
+		result = await this.chat.sendMessage({ message: prompt });
+	} catch (err) {
+		throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
+	}
+
+	try {
+		const text = result.text ?? result.response ?? '';
+		return typeof text === 'object' ? text : JSON.parse(text);
+	} catch (parseErr) {
+		throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
+	}
+}
+
+
+
 
 /**
  * Estimate total token usage if you were to send a new payload as the next message.
@@ -419,45 +463,6 @@ async function estimateTokenUsage(nextPayload) {
 	return resp; // includes totalTokens, possibly breakdown
 }
 
-/**
- * Rebuilds a payload based on server error feedback
- * @param {Object} lastPayload - The payload that failed validation
- * @param {string} serverError - The error message from the server
- * @returns {Promise<Object>} - A new corrected payload
- * @throws {Error} If the rebuild process fails.
- */
-async function rebuildPayload(lastPayload, serverError) {
-	await this.init();
-
-	const prompt = `
-The previous JSON payload (below) failed validation.
-The server's error message is quoted afterward.
-
----------------- BAD PAYLOAD ----------------
-${JSON.stringify(lastPayload, null, 2)}
-
-
----------------- SERVER ERROR ----------------
-${serverError}
-
-Please return a NEW JSON payload that corrects the issue.
-Respond with JSON only – no comments or explanations.
-`;
-
-	let result;
-	try {
-		result = await this.chat.sendMessage({ message: prompt });
-	} catch (err) {
-		throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
-	}
-
-	try {
-		const text = result.text ?? result.response ?? '';
-		return typeof text === 'object' ? text : JSON.parse(text);
-	} catch (parseErr) {
-		throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
-	}
-}
 
 /**
  * Resets the current chat session, clearing all history and examples
