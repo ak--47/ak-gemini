@@ -88,6 +88,7 @@ class AITransformer {
 		this.answerKey = "";
 		this.contextKey = "";
 		this.explanationKey = "";
+		this.systemInstructionKey = "";
 		this.maxRetries = 3;
 		this.retryDelay = 1000;
 		this.systemInstructions = "";
@@ -100,11 +101,22 @@ class AITransformer {
 		//external API
 		this.init = initChat.bind(this);
 		this.seed = seedWithExamples.bind(this);
-		this.message = sendModelUserPrompt.bind(this);
+
+		// Internal "raw" message sender
+		this.rawMessage = rawMessage.bind(this);
+
+		// The public `.message()` method uses the GLOBAL validator
+		this.message = (payload, opts = {}) => {
+			return prepareAndValidateMessage.call(this, payload, opts, this.asyncValidator);
+		};
+
+		// The public `.messageAndValidate()` uses the ON-DEMAND validator
+		this.messageAndValidate = prepareAndValidateMessage.bind(this);
+
 		this.rebuild = rebuildPayload.bind(this);
 		this.reset = resetChat.bind(this);
 		this.getHistory = getChatHistory.bind(this);
-		this.messageAndValidate = transformAndValidate.bind(this);
+		this.messageAndValidate = prepareAndValidateMessage.bind(this);
 		this.estimate = estimateTokenUsage.bind(this);
 	}
 }
@@ -144,6 +156,7 @@ function AITransformFactory(options = {}) {
 	this.answerKey = options.targetKey || 'ANSWER';
 	this.contextKey = options.contextKey || 'CONTEXT'; // Optional key for context
 	this.explanationKey = options.explanationKey || 'EXPLANATION'; // Optional key for explanations
+	this.systemInstructionsKey = options.systemInstructionsKey || 'SYSTEM'; // Optional key for system instructions
 
 	// Retry configuration
 	this.maxRetries = options.maxRetries || 3;
@@ -169,11 +182,12 @@ function AITransformFactory(options = {}) {
 
 /**
  * Initializes the chat session with the specified model and configurations.
+ * @param {boolean} [force=false] - If true, forces reinitialization of the chat session.
  * @this {ExportedAPI}
  * @returns {Promise<void>}
  */
-async function initChat() {
-	if (this.chat) return;
+async function initChat(force = false) {
+	if (this.chat && !force) return;
 
 	log.debug(`Initializing Gemini chat session with model: ${this.modelName}...`);
 
@@ -191,6 +205,7 @@ async function initChat() {
  * Seeds the chat session with example transformations.
  * @this {ExportedAPI}
  * @param {TransformationExample[]} [examples] - An array of transformation examples.
+ * @this {ExportedAPI}
  * @returns {Promise<void>}
  */
 async function seedWithExamples(examples) {
@@ -204,6 +219,13 @@ async function seedWithExamples(examples) {
 			log.debug("No examples provided and no examples file specified. Skipping seeding.");
 			return;
 		}
+	}
+
+	if (examples?.slice().pop()[this.systemInstructionsKey]) {
+		log.debug(`Found system instructions in examples; reinitializing chat with new instructions.`);
+		this.systemInstructions = examples.slice().pop()[this.systemInstructionsKey];
+		this.chatConfig.systemInstruction = this.systemInstructions;
+		await this.init(true); // Reinitialize chat with new system instructions
 	}
 
 	log.debug(`Seeding chat with ${examples.length} transformation examples...`);
@@ -259,117 +281,99 @@ async function seedWithExamples(examples) {
  * @returns {Promise<Object>} - The transformed target payload (as a JavaScript object).
  * @throws {Error} If the transformation fails or returns invalid JSON.
  */
-async function sendModelUserPrompt(sourcePayload) {
+/**
+ * (Internal) Sends a single prompt to the model and parses the response.
+ * No validation or retry logic.
+ * @this {ExportedAPI}
+ * @param {Object|string} sourcePayload - The source payload.
+ * @returns {Promise<Object>} - The transformed payload.
+ */
+async function rawMessage(sourcePayload) {
 	if (!this.chat) {
-		throw new Error("Chat session not initialized. Call init() or seed() first.");
+		throw new Error("Chat session not initialized.");
 	}
 
-	let result;
-	let actualPayload;
+	const actualPayload = typeof sourcePayload === 'string'
+		? sourcePayload
+		: JSON.stringify(sourcePayload, null, 2);
 
-	// Prepare the payload
-	if (sourcePayload && isJSON(sourcePayload)) {
-		actualPayload = JSON.stringify(sourcePayload, null, 2);
-	} else if (typeof sourcePayload === 'string') {
-		actualPayload = sourcePayload;
-	} else {
-		throw new Error("Invalid source payload. Must be a JSON object or string.");
-	}
-
-	// Send to model
 	try {
-		result = await this.chat.sendMessage({ message: actualPayload });
-	} catch (error) {
-		console.error("Error with Gemini API:", error);
-		throw new Error(`Transformation failed: ${error.message}`);
-	}
-
-	// Extract and parse JSON from model response
-	try {
+		const result = await this.chat.sendMessage({ message: actualPayload });
 		const modelResponse = result.text;
-		const extractedJSON = extractJSON(modelResponse);
-		// look for a 'data' key in the response
-		let finalData;
-		if (extractedJSON && typeof extractedJSON === 'object' && !Array.isArray(extractedJSON)) {
-			if (extractedJSON.data) {
-				finalData = extractedJSON.data;
-			}
-			finalData = extractedJSON;
-		}
+		const extractedJSON = extractJSON(modelResponse); // Assuming extractJSON is defined
 
-		if (this.asyncValidator) {
-			try {
-				const validationResult = await this.asyncValidator(finalData);
-				if (validationResult === null || validationResult === undefined || validationResult === false) {
-					throw new Error("Validation function returned a falsy value.");
-				}
-			}
-			catch (validationError) {
-				throw new Error(`Custom Validation failed: ${validationError.message}`);
-				// Attempt to rebuild the payload based on the error
-			}
+		// Unwrap the 'data' property if it exists
+		if (extractedJSON?.data) {
+			return extractedJSON.data;
 		}
+		return extractedJSON;
 
-		return finalData || extractedJSON || result.text || result.response || '';
-
-	} catch (parseError) {
-		if (this.onlyJSON) {
-			console.error("Error parsing Gemini response:", parseError);
-			throw new Error(`Invalid JSON response from Gemini: ${parseError.message}`);
+	} catch (error) {
+		if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
+			throw new Error(`Invalid JSON response from Gemini: ${error.message}`);
 		}
-		else {
-			log.warn("Non-JSON response received from Gemini", parseError.message);
-			return result.text || result.response || '';
-		}
+		// For other API errors, just re-throw
+		throw new Error(`Transformation failed: ${error.message}`);
 	}
 }
 
 /**
- * Transforms payload with automatic validation and retry logic
- * @param {Object} sourcePayload - The source payload to transform
- * @param {AsyncValidatorFunction} validatorFn - Async function that validates the transformed payload
- * @param {Object} [options] - Options for the validation process
- * @param {number} [options.maxRetries] - Override default max retries
- * @param {number} [options.retryDelay] - Override default retry delay
- * @returns {Promise<Object>} - The validated transformed payload
- * @throws {Error} If transformation or validation fails after all retries
+ * (Engine) Transforms a payload with validation and automatic retry logic.
+ * @this {ExportedAPI}
+ * @param {Object} sourcePayload - The source payload to transform.
+ * @param {Object} [options] - Options for the validation process.
+ * @param {AsyncValidatorFunction | null} validatorFn - The specific validator to use for this run.
+ * @returns {Promise<Object>} - The validated transformed payload.
  */
-async function transformAndValidate(sourcePayload, validatorFn, options = {}) {
+async function prepareAndValidateMessage(sourcePayload, options = {}, validatorFn = null) {
+	if (!this.chat) {
+		throw new Error("Chat session not initialized. Please call init() first.");
+	}
 	const maxRetries = options.maxRetries ?? this.maxRetries;
 	const retryDelay = options.retryDelay ?? this.retryDelay;
 
-	let lastPayload = null;
 	let lastError = null;
+	let lastPayload = null; // Store the payload that caused the validation error
+
+	// Prepare the payload
+	if (sourcePayload && isJSON(sourcePayload)) {
+		lastPayload = JSON.stringify(sourcePayload, null, 2);
+	} else if (typeof sourcePayload === 'string') {
+		lastPayload = sourcePayload;
+	} else {
+		throw new Error("Invalid source payload. Must be a JSON object or string.");
+	}
 
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		try {
-			// First attempt uses normal transformation, subsequent attempts use rebuild
-			const transformedPayload = attempt === 0
-				? await this.message(sourcePayload)
+			// Step 1: Get the transformed payload
+			const transformedPayload = (attempt === 0)
+				? await this.rawMessage(lastPayload) // Use the new raw method
 				: await this.rebuild(lastPayload, lastError.message);
 
-			// Validate the transformed payload
-			const validatedPayload = await validatorFn(transformedPayload);
+			lastPayload = transformedPayload; // Always update lastPayload *before* validation
 
-			log.debug(`Transformation and validation succeeded on attempt ${attempt + 1}`);
-			return validatedPayload;
+			// Step 2: Validate if a validator is provided
+			if (validatorFn) {
+				await validatorFn(transformedPayload); // Validator throws on failure
+			}
+
+			// Step 3: Success!
+			log.debug(`Transformation succeeded on attempt ${attempt + 1}`);
+			return transformedPayload;
 
 		} catch (error) {
 			lastError = error;
+			log.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
 
-			if (attempt === 0) {
-				// First attempt failed - could be transformation or validation error
-				lastPayload = await this.message(sourcePayload).catch(() => null);
+			if (attempt >= maxRetries) {
+				log.error(`All ${maxRetries + 1} attempts failed.`);
+				throw new Error(`Transformation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
 			}
 
-			if (attempt < maxRetries) {
-				const delay = retryDelay * Math.pow(2, attempt); // Exponential backoff
-				log.warn(`Attempt ${attempt + 1} failed, retrying in ${delay}ms...`, error.message);
-				await new Promise(res => setTimeout(res, delay));
-			} else {
-				log.error(`All ${maxRetries + 1} attempts failed`);
-				throw new Error(`Transformation with validation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
-			}
+			// Wait before retrying
+			const delay = retryDelay * Math.pow(2, attempt);
+			await new Promise(res => setTimeout(res, delay));
 		}
 	}
 }

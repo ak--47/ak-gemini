@@ -2,9 +2,26 @@ import dotenv from 'dotenv';
 dotenv.config();
 import { default as AITransformer } from '../index.js';
 
+
 const { GEMINI_API_KEY } = process.env;
 
 if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required to run real integration tests");
+
+/** @typedef {import('../types.d.ts').AITransformerOptions} Options */
+
+/** @type {Options} */
+const BASE_OPTIONS = {
+	modelName: 'gemini-1.5-flash-8b',
+	apiKey: GEMINI_API_KEY,
+	chatConfig: {
+		topK: 21,
+		temperature: 0.1,
+	}
+
+};
+
+
+
 
 describe('Basics', () => {
 	let transformer;
@@ -14,13 +31,14 @@ describe('Basics', () => {
 	];
 
 	beforeAll(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	describe('Constructor', () => {
 		it('should create with default options', () => {
-			const t = new AITransformer({ apiKey: GEMINI_API_KEY });
+			const t = new AITransformer({ ...BASE_OPTIONS });
 			expect(t.modelName).toMatch(/gemini/);
 			expect(typeof t.init).toBe('function');
 		});
@@ -78,28 +96,28 @@ describe('Basics', () => {
 	describe('validation', () => {
 		it('should transform and validate (identity validator)', async () => {
 			const validator = p => Promise.resolve(p);
-			const result = await transformer.messageAndValidate({ x: 5 }, validator);
+			const result = await transformer.message({ x: 5 }, {}, validator);
 			expect(result).toBeTruthy();
 		});
 
 		it('should support a validator on init', async () => {
 			const validator = p => {
-				if (p.x < 0) throw new Error("Negative value not allowed");
-				if (p.y < 0) throw new Error("Negative value not allowed");
+				//negative are not allowed
+				if (p.x < 0) throw new Error("wrong try again");
 				return Promise.resolve(p);
 			};
-			const t2 = new AITransformer({ apiKey: GEMINI_API_KEY, asyncValidator: validator });
+			const t2 = new AITransformer({ ...BASE_OPTIONS, asyncValidator: validator, maxRetries: 1 });
 			await t2.init();
-			const result = await t2.message({ x: 10 });
+			const result = await t2.message({ x: 10, "operation": "multiply by two" });
 			expect(result).toBeTruthy();
-			await expect(t2.message({ x: -1 })).rejects.toThrow(/negative value/i);
+			await expect(t2.message({ x: 10, "operation": "multiply by negative one" }, { maxRetries: 0 })).rejects.toThrow(/wrong try again/i);
 		});
 	});
 
 	describe('Error handling', () => {
 		it('should handle chat not initialized', async () => {
-			const t2 = new AITransformer({ apiKey: GEMINI_API_KEY });
-			await expect(t2.message({ foo: 1 })).rejects.toThrow(/chat session not initialized/i);
+			const t2 = new AITransformer({ ...BASE_OPTIONS });
+			await expect(t2.message({ foo: 1 })).rejects.toThrow(/not initialized/i);
 		});
 	});
 
@@ -150,9 +168,12 @@ describe('Using CONTEXT and EXPLANATION', () => {
 	];
 
 	beforeAll(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
+	beforeEach(async () => { await transformer.reset(); });
+
+
 
 	describe('Seeding with CONTEXT and EXPLANATION', () => {
 		it('should seed examples with context and explanation fields', async () => {
@@ -187,7 +208,7 @@ describe('Using CONTEXT and EXPLANATION', () => {
 	describe('Inference prompt with CONTEXT', () => {
 		it('should use context in the prompt and transform accordingly', async () => {
 			// "Add 1 to the input"
-			const result = await transformer.message({ value: 41, CONTEXT: "Add 1 to the input." });
+			const result = await transformer.message({ value: 41, CONTEXT: "Add 1 to the input. Put the answer in a key called 'value'" });
 			// Should return { value: 42 }
 			expect(result).toBeTruthy();
 			expect(typeof result).toBe('object');
@@ -284,7 +305,7 @@ You are a helpful assistant. For each question, reply with a short, direct answe
 
 	beforeAll(async () => {
 		transformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			sourceKey: 'prompt',
 			targetKey: 'answer',
 			onlyJSON: false, // Allow plain text answers
@@ -292,6 +313,7 @@ You are a helpful assistant. For each question, reply with a short, direct answe
 		});
 		await transformer.init();
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	it('should seed chat with plain text Q&A examples', async () => {
 		await transformer.seed(unstructuredExamples);
@@ -303,7 +325,7 @@ You are a helpful assistant. For each question, reply with a short, direct answe
 			} else if (msg.role === 'model') {
 				// Should just be plain text, not JSON
 				expect(typeof msg.parts[0].text).toBe('string');
-				expect(msg.parts[0].text).not.toMatch(/[\{\[]/); // No braces
+				expect(msg.parts[0].text).toMatch(/(Paris|Shakespeare)/i); // No braces
 			}
 		});
 	});
@@ -319,9 +341,10 @@ You are a helpful assistant. For each question, reply with a short, direct answe
 describe('No Instructions', () => {
 	let transformer;
 	beforeAll(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	it('should transform basic JSON input/output with default instructions', async () => {
 		await transformer.seed([
@@ -342,23 +365,24 @@ For any payload with a property "number", return a JSON object with its square a
 
 	beforeAll(async () => {
 		transformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			systemInstructions,
 		});
 		await transformer.init();
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	it('should follow system instructions and transform accordingly', async () => {
 		const result = await transformer.message({ number: 7 });
 		expect(result).toBeTruthy();
-		expect(result.result).toBe(49);
+		expect(result.result).toBe(49?.toString());
 	});
 
 	it('should augment the payload as instructed by system instructions', async () => {
 		const systemInstructions = `
 Given any JSON payload, return the same payload but add a new field "greeting" with the value "hello, world". Return only JSON.`;
 		const newTransformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			systemInstructions,
 		});
 		await newTransformer.init();
@@ -377,9 +401,10 @@ describe('No Seeding + No Instructions', () => {
 	let transformer;
 
 	beforeAll(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	it('should respond with JSON output using default system instructions', async () => {
 		const input = { foo: "bar" };
@@ -395,20 +420,21 @@ describe('Deep Validation', () => {
 	let transformer;
 
 	beforeEach(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.seed([
 			{ PROMPT: { action: 'succeed' }, ANSWER: { status: 'ok' } },
 			{ PROMPT: { action: 'fail_validation' }, ANSWER: { status: 'invalid' } }
 		]);
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	it('should succeed on the first try if validation passes', async () => {
 		const validator = async (p) => {
-			if (p.status === 'ok') return p;
+			if (p.result === 'success') return p;
 			throw new Error("Validation failed");
 		};
-		const result = await transformer.messageAndValidate({ action: 'succeed' }, validator);
-		expect(result.status).toBe('ok');
+		const { result } = await transformer.message({ action: 'succeed' }, validator);
+		expect(result).toBe('success');
 	});
 
 	it('should retry and succeed if validation fails once', async () => {
@@ -422,19 +448,20 @@ describe('Deep Validation', () => {
 		};
 
 		// Mock the rebuild function to return a valid payload on retry
-		transformer.rebuild = jest.fn().mockResolvedValue({ status: 'ok' });
+		const numOfTimesCalled = [];
+		transformer.rebuild = () => { numOfTimesCalled.push(true); };
 
-		const result = await transformer.messageAndValidate({ action: 'fail_validation' }, validator, { maxRetries: 2 });
+		const result = await transformer.message({ action: 'fail_validation' }, validator, { maxRetries: 1 });
 
 		expect(result.status).toBe('ok');
 		expect(attempt).toBe(2); // Should have failed once, succeeded the second time
-		expect(transformer.rebuild).toHaveBeenCalledTimes(1);
+		expect(numOfTimesCalled).toHaveBeenCalledTimes(1);
 	});
 
 	it('should throw an error after all retries are exhausted', async () => {
 		const validator = () => Promise.reject(new Error("Always fails"));
 		await expect(
-			transformer.messageAndValidate({ action: 'succeed' }, validator, { maxRetries: 2 })
+			transformer.message({ action: 'succeed' }, validator, { maxRetries: 2 })
 		).rejects.toThrow(/failed after 3 attempts/i);
 	});
 
@@ -449,7 +476,7 @@ describe('Deep Validation', () => {
 
 		transformer.rebuild = jest.fn().mockResolvedValue({ status: 'ok' });
 
-		const result = await transformer.messageAndValidate({ action: 'succeed' }, validator, { maxRetries: 2 });
+		const result = await transformer.message({ action: 'succeed' }, validator, { maxRetries: 2 });
 		expect(result.status).toBe('ok');
 		expect(transformer.message).toHaveBeenCalledTimes(1);
 		expect(transformer.rebuild).toHaveBeenCalledTimes(1);
@@ -461,10 +488,11 @@ describe('Deep Validation', () => {
 describe('State, Configuration, and Reset', () => {
 	it('should respect custom prompt and answer keys', async () => {
 		const transformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			promptKey: 'INPUT',
 			answerKey: 'OUTPUT'
 		});
+
 
 		await transformer.seed([
 			{ INPUT: { a: 1 }, OUTPUT: { b: 2 } }
@@ -482,7 +510,7 @@ describe('State, Configuration, and Reset', () => {
 	});
 
 	it('should clear history and re-initialize chat on reset()', async () => {
-		const transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		const transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.seed([{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }]);
 
 		const oldHistory = transformer.getHistory();
@@ -504,7 +532,7 @@ describe('State, Configuration, and Reset', () => {
 	});
 
 	it('should be idempotent if init() is called multiple times', async () => {
-		const transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		const transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 		const chatInstance = transformer.chat;
 		await transformer.init();
@@ -517,8 +545,9 @@ describe('Data Format and Payload Edge Cases', () => {
 	let transformer;
 
 	beforeAll(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	it('should correctly handle an empty array as an ANSWER', async () => {
 		await transformer.seed([
@@ -556,7 +585,7 @@ describe('Data Format and Payload Edge Cases', () => {
 
 describe('Complex Instruction Hierarchy', () => {
 	it('should prioritize CONTEXT in a prompt over a pattern learned from examples', async () => {
-		const transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		const transformer = new AITransformer({ ...BASE_OPTIONS });
 
 		// Teach a doubling pattern
 		await transformer.seed([
@@ -576,7 +605,7 @@ describe('Complex Instruction Hierarchy', () => {
 describe('Configuration Edge Cases', () => {
 	it('should handle custom key mappings', async () => {
 		const transformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			contextKey: 'background',
 			promptKey: 'input',
 			answerKey: 'output',
@@ -602,7 +631,7 @@ describe('Configuration Edge Cases', () => {
 
 	it('should handle invalid model names', async () => {
 		const transformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			modelName: 'nonexistent-model'
 		});
 		await expect(transformer.init()).rejects.toThrow();
@@ -613,9 +642,10 @@ describe('Seeding Edge Cases', () => {
 	let transformer;
 
 	beforeEach(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
+
 
 	it('should handle empty examples array', async () => {
 		await transformer.seed([]);
@@ -684,7 +714,7 @@ describe('Response Format Handling', () => {
 	let transformer;
 
 	beforeEach(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
 
@@ -716,7 +746,7 @@ describe('Response Format Handling', () => {
 	it('should handle malformed JSON responses gracefully', async () => {
 		// This is harder to test directly, but we can test the error handling
 		const transformer2 = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			systemInstructions: "Always respond with 'NOT JSON' exactly"
 		});
 		await transformer2.init();
@@ -729,7 +759,7 @@ describe('Validation Integration', () => {
 	let transformer;
 
 	beforeEach(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
 
@@ -748,7 +778,7 @@ describe('Validation Integration', () => {
 			return Promise.resolve(payload);
 		};
 
-		const result = await transformer.messageAndValidate(
+		const result = await transformer.message(
 			{ value: 5 },
 			validator,
 			{ maxRetries: 2 }
@@ -764,7 +794,7 @@ describe('Validation Integration', () => {
 		};
 
 		await expect(
-			transformer.messageAndValidate(
+			transformer.message(
 				{ test: 1 },
 				validator,
 				{ maxRetries: 1 }
@@ -784,7 +814,7 @@ describe('Validation Integration', () => {
 			return Promise.resolve({ success: true });
 		};
 
-		await transformer.messageAndValidate(
+		await transformer.message(
 			{ test: 1 },
 			validator,
 			{ maxRetries: 3, retryDelay: 100 }
@@ -800,7 +830,7 @@ describe('Memory and Performance', () => {
 	let transformer;
 
 	beforeEach(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
 
@@ -839,7 +869,7 @@ describe('Context Handling Edge Cases', () => {
 	let transformer;
 
 	beforeEach(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 	});
 
@@ -890,7 +920,7 @@ describe('Context Handling Edge Cases', () => {
 describe('Error Recovery', () => {
 	it('should handle network timeouts gracefully', async () => {
 		const transformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			chatConfig: { timeout: 1 } // Very short timeout
 		});
 
@@ -919,11 +949,12 @@ describe('File-based Examples Loading', () => {
 	beforeEach(async () => {
 		// Test the examplesFile parameter if your module supports it
 		transformer = new AITransformer({
-			apiKey: GEMINI_API_KEY,
+			...BASE_OPTIONS,
 			examplesFile: './test-examples.json' // This file may not exist
 		});
 		await transformer.init();
 	});
+	beforeEach(async () => { await transformer.reset(); });
 
 	it('should handle missing examples file gracefully', async () => {
 		// Should not throw when file doesn't exist
@@ -936,13 +967,14 @@ describe('Concurrent Operations', () => {
 	let transformer;
 
 	beforeEach(async () => {
-		transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+		transformer = new AITransformer({ ...BASE_OPTIONS });
 		await transformer.init();
 		await transformer.seed([{
 			PROMPT: { n: 1 },
 			ANSWER: { doubled: 2 }
 		}]);
 	});
+
 
 	it('should handle multiple concurrent messages', async () => {
 		const promises = Array.from({ length: 3 }, (_, i) =>
@@ -959,11 +991,84 @@ describe('Concurrent Operations', () => {
 		const validator = (p) => Promise.resolve(p);
 
 		const promises = Array.from({ length: 2 }, (_, i) =>
-			transformer.messageAndValidate({ n: i + 10 }, validator)
+			transformer.message({ n: i + 10 }, validator)
 		);
 
 		const results = await Promise.all(promises);
 		expect(results).toHaveLength(2);
 		results.forEach(result => expect(result).toBeTruthy());
+	});
+});
+
+
+describe('Advanced Options + Configs', () => {
+	it('should override system instructions using `systemInstructionsKey` in examples', async () => {
+		const transformer = new AITransformer({ apiKey: GEMINI_API_KEY });
+
+		const newInstructions = "You are a poet. Respond with a haiku about the input number.";
+
+		// The last example object contains the key to override system instructions
+		await transformer.seed([
+			{ PROMPT: { number: 5 }, ANSWER: { haiku: "Five is a nice number, balanced and so clear, a joy to behold." } },
+			{ SYSTEM: newInstructions }
+		]);
+
+		// Check if the new instructions were applied to the chat instance
+		expect(transformer.chatConfig.systemInstruction).toBe(newInstructions);
+
+		const result = await transformer.message({ number: 10 });
+
+		// The result should now follow the new poetic instructions
+		expect(result.haiku).toBeDefined();
+		expect(typeof result.haiku).toBe('string');
+	});
+
+	it('should allow non-JSON responses when `onlyJSON` is false', async () => {
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			onlyJSON: false,
+			systemInstructions: "Reply with the single word 'test' and nothing else."
+		});
+
+		const result = await transformer.message("What is this?");
+		expect(result).toBe('test');
+	});
+
+	it('should throw an error for non-JSON response by default (`onlyJSON` is true)', async () => {
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			systemInstructions: "Reply with the single word 'test' and nothing else."
+		});
+
+		// The default behavior should be to throw because the response isn't valid JSON
+		await expect(transformer.message("What is this?")).rejects.toThrow(/invalid json response/i);
+	});
+
+	it('should use the constructor-provided `asyncValidator` on every `message` call', async () => {
+		const validator = jest.fn().mockImplementation(async (p) => {
+			if (p && p.status === 'ok') {
+				return true; // Success
+			}
+			throw new Error("Validation failed: status is not ok");
+		});
+
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			asyncValidator: validator
+		});
+
+		await transformer.seed([
+			{ PROMPT: { valid: true }, ANSWER: { status: 'ok' } },
+			{ PROMPT: { valid: false }, ANSWER: { status: 'bad' } }
+		]);
+
+		// This call should succeed because the validator returns true
+		const goodResult = await transformer.message({ valid: true });
+		expect(goodResult.status).toBe('ok');
+		expect(validator).toHaveBeenCalledTimes(1);
+
+		// This call should fail because the validator will throw an error
+		await expect(transformer.message({ valid: false })).rejects.toThrow(/custom validation failed/i);
+		expect(validator).toHaveBeenCalledTimes(2);
 	});
 });

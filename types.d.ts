@@ -13,6 +13,7 @@ export interface ChatConfig {
   systemInstruction?: string; // System instruction for the model
   safetySettings?: SafetySetting[]; // Safety settings array
   responseSchema?: Object; // Schema for validating model responses
+  [key: string]: any; // Additional properties for flexibility
 }
 
 export interface AITransformerContext {
@@ -27,12 +28,16 @@ export interface AITransformerContext {
   answerKey?: string;
   contextKey?: string;
   explanationKey?: string;
+  systemInstructionsKey?: string;
   maxRetries?: number;
   retryDelay?: number;
   init?: () => Promise<void>; // Initialization function
   seed?: () => Promise<void>; // Function to seed the transformer with examples  
   message?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send messages to the model
+  rebuild?: () => Promise<Record<string, unknown>; // Function to rebuild the transformer
+  rawMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
   genAIClient?: GoogleGenAI; // Google GenAI client instance
+  onlyJSON?: boolean; // If true, only JSON responses are allowed
   
 }
 
@@ -47,6 +52,7 @@ export interface ExampleFileContent {
 }
 
 export interface AITransformerOptions {
+	// ? https://ai.google.dev/gemini-api/docs/models
   modelName?: string; // The Gemini model to use
   systemInstructions?: string; // Custom system instructions for the model
   chatConfig?: ChatConfig; // Configuration object for the chat session
@@ -56,6 +62,7 @@ export interface AITransformerOptions {
   targetKey?: string; // Key name for target data in examples
   contextKey?: string; // Key name for context data in examples
   explanationKey?: string; // Key name for explanation data in examples
+  systemInstructionsKey?: string; // Key for system instructions in examples
   maxRetries?: number; // Maximum retry attempts for auto-retry functionality
   retryDelay?: number; // Initial retry delay in milliseconds
   // ? https://ai.google.dev/gemini-api/docs/structured-output
