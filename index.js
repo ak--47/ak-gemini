@@ -52,7 +52,7 @@ When presented with new Source JSON, apply the learned transformation rules to p
 
 Always respond ONLY with a valid JSON object that strictly adheres to the expected output format.
 
-Do not include any additional text, explanations, or formatting before or after the JSON object.
+Do not include any additional text, explanations, or formatting before or after the JSON object. 
 `;
 
 const DEFAULT_CHAT_CONFIG = {
@@ -65,7 +65,7 @@ const DEFAULT_CHAT_CONFIG = {
 };
 
 /**
- * @typedef {import('./types').AITransformer}
+ * @typedef {import('./types').AITransformer} AITransformerUtility
  */
 
 
@@ -73,12 +73,11 @@ const DEFAULT_CHAT_CONFIG = {
 /**
  * main export class for AI Transformer
  * @class AITransformer
- * @type {AITransformer}
+ * @type {AITransformerUtility}
  * @description A class that provides methods to initialize, seed, transform, and manage AI-based transformations using Google Gemini API.
  * @implements {ExportedAPI}
  */
-// @ts-ignore
-export default class AITransformer {
+class AITransformer {
 	/**
 	 * @param {AITransformerOptions} [options={}] - Configuration options for the transformer	
 	 * 
@@ -88,25 +87,40 @@ export default class AITransformer {
 		this.promptKey = "";
 		this.answerKey = "";
 		this.contextKey = "";
+		this.explanationKey = "";
+		this.systemInstructionKey = "";
 		this.maxRetries = 3;
 		this.retryDelay = 1000;
 		this.systemInstructions = "";
 		this.chatConfig = {};
 		this.apiKey = GEMINI_API_KEY;
+		this.onlyJSON = true; // always return JSON
+		this.asyncValidator = null; // for transformWithValidation
 		AITransformFactory.call(this, options);
 
 		//external API
 		this.init = initChat.bind(this);
 		this.seed = seedWithExamples.bind(this);
-		this.message = transformJSON.bind(this);
+
+		// Internal "raw" message sender
+		this.rawMessage = rawMessage.bind(this);
+
+		// The public `.message()` method uses the GLOBAL validator
+		this.message = (payload, opts = {}, validatorFn = null) => {
+
+			return prepareAndValidateMessage.call(this, payload, opts, validatorFn || this.asyncValidator);
+		};
+
 		this.rebuild = rebuildPayload.bind(this);
 		this.reset = resetChat.bind(this);
 		this.getHistory = getChatHistory.bind(this);
-		this.transformWithValidation = transformWithValidation.bind(this);
+		this.messageAndValidate = prepareAndValidateMessage.bind(this);
 		this.estimate = estimateTokenUsage.bind(this);
 	}
 }
-export { AITransformer };
+
+export default AITransformer;
+
 /**
  * factory function to create an AI Transformer instance
  * @param {AITransformerOptions} [options={}] - Configuration options for the transformer
@@ -117,7 +131,7 @@ function AITransformFactory(options = {}) {
 	this.modelName = options.modelName || 'gemini-2.0-flash';
 	this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
 
-	this.apiKey = options.apiKey || GEMINI_API_KEY;
+	this.apiKey = options.apiKey !== undefined && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
 	if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
 	// Build chat config, making sure systemInstruction uses the custom instructions
 	this.chatConfig = {
@@ -136,13 +150,21 @@ function AITransformFactory(options = {}) {
 	this.exampleData = options.exampleData || null; // can be used instead of examplesFile
 
 	// Use configurable keys with fallbacks
-	this.promptKey = options.sourceKey || 'PROMPT';
-	this.answerKey = options.targetKey || 'ANSWER';
-	this.contextKey = options.contextKey || 'CONTEXT'; // Now configurable
+	this.promptKey = options.promptKey || 'PROMPT';
+	this.answerKey = options.answerKey || 'ANSWER';
+	this.contextKey = options.contextKey || 'CONTEXT'; // Optional key for context
+	this.explanationKey = options.explanationKey || 'EXPLANATION'; // Optional key for explanations
+	this.systemInstructionsKey = options.systemInstructionsKey || 'SYSTEM'; // Optional key for system instructions
 
 	// Retry configuration
 	this.maxRetries = options.maxRetries || 3;
 	this.retryDelay = options.retryDelay || 1000;
+
+	//allow async validation function
+	this.asyncValidator = options.asyncValidator || null; // Function to validate transformed payloads
+
+	//are we forcing json responses only?
+	this.onlyJSON = options.onlyJSON !== undefined ? options.onlyJSON : true; // If true, only return JSON responses
 
 	if (this.promptKey === this.answerKey) {
 		throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
@@ -158,11 +180,12 @@ function AITransformFactory(options = {}) {
 
 /**
  * Initializes the chat session with the specified model and configurations.
+ * @param {boolean} [force=false] - If true, forces reinitialization of the chat session.
  * @this {ExportedAPI}
  * @returns {Promise<void>}
  */
-async function initChat() {
-	if (this.chat) return;
+async function initChat(force = false) {
+	if (this.chat && !force) return;
 
 	log.debug(`Initializing Gemini chat session with model: ${this.modelName}...`);
 
@@ -180,6 +203,7 @@ async function initChat() {
  * Seeds the chat session with example transformations.
  * @this {ExportedAPI}
  * @param {TransformationExample[]} [examples] - An array of transformation examples.
+ * @this {ExportedAPI}
  * @returns {Promise<void>}
  */
 async function seedWithExamples(examples) {
@@ -188,11 +212,23 @@ async function seedWithExamples(examples) {
 	if (!examples || !Array.isArray(examples) || examples.length === 0) {
 		if (this.examplesFile) {
 			log.debug(`No examples provided, loading from file: ${this.examplesFile}`);
-			examples = await u.load(path.resolve(this.examplesFile), true);
+			try {
+				examples = await u.load(path.resolve(this.examplesFile), true);
+			}
+			catch (err) {
+				throw new Error(`Could not load examples from file: ${this.examplesFile}. Please check the file path and format.`);
+			}
 		} else {
 			log.debug("No examples provided and no examples file specified. Skipping seeding.");
 			return;
 		}
+	}
+
+	if (examples?.slice().pop()[this.systemInstructionsKey]) {
+		log.debug(`Found system instructions in examples; reinitializing chat with new instructions.`);
+		this.systemInstructions = examples.slice().pop()[this.systemInstructionsKey];
+		this.chatConfig.systemInstruction = this.systemInstructions;
+		await this.init(true); // Reinitialize chat with new system instructions
 	}
 
 	log.debug(`Seeding chat with ${examples.length} transformation examples...`);
@@ -203,31 +239,31 @@ async function seedWithExamples(examples) {
 		const contextValue = example[this.contextKey] || "";
 		const promptValue = example[this.promptKey] || "";
 		const answerValue = example[this.answerKey] || "";
+		const explanationValue = example[this.explanationKey] || "";
+		let userText = "";
+		let modelResponse = {};
 
 		// Add context as user message with special formatting to make it part of the example flow
 		if (contextValue) {
-			let contextText = u.isJSON(contextValue) ? JSON.stringify(contextValue, null, 2) : contextValue;
+			let contextText = isJSON(contextValue) ? JSON.stringify(contextValue, null, 2) : contextValue;
 			// Prefix context to make it clear it's contextual information
-			historyToAdd.push({
-				role: 'user',
-				parts: [{ text: `Context: ${contextText}` }]
-			});
-			// Add a brief model acknowledgment
-			historyToAdd.push({
-				role: 'model',
-				parts: [{ text: "I understand the context." }]
-			});
+			userText += `CONTEXT:\n${contextText}\n\n`;
 		}
 
 		if (promptValue) {
-			let promptText = u.isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
-			historyToAdd.push({ role: 'user', parts: [{ text: promptText }] });
+			let promptText = isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
+			userText += promptText;
 		}
 
-		if (answerValue) {
-			let answerText = u.isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : answerValue;
-			historyToAdd.push({ role: 'model', parts: [{ text: answerText }] });
+		if (answerValue) modelResponse.data = answerValue;
+		if (explanationValue) modelResponse.explanation = explanationValue;
+		const modelText = JSON.stringify(modelResponse, null, 2);
+
+		if (userText.trim().length && modelText.trim().length > 0) {
+			historyToAdd.push({ role: 'user', parts: [{ text: userText.trim() }] });
+			historyToAdd.push({ role: 'model', parts: [{ text: modelText.trim() }] });
 		}
+
 	}
 
 	const currentHistory = this?.chat?.getHistory() || [];
@@ -240,6 +276,8 @@ async function seedWithExamples(examples) {
 	});
 
 	log.debug("Transformation examples seeded successfully.");
+
+	return this.chat.getHistory(); // Return the updated chat history for reference
 }
 
 /**
@@ -248,90 +286,150 @@ async function seedWithExamples(examples) {
  * @returns {Promise<Object>} - The transformed target payload (as a JavaScript object).
  * @throws {Error} If the transformation fails or returns invalid JSON.
  */
-async function transformJSON(sourcePayload) {
+/**
+ * (Internal) Sends a single prompt to the model and parses the response.
+ * No validation or retry logic.
+ * @this {ExportedAPI}
+ * @param {Object|string} sourcePayload - The source payload.
+ * @returns {Promise<Object>} - The transformed payload.
+ */
+async function rawMessage(sourcePayload) {
 	if (!this.chat) {
-		throw new Error("Chat session not initialized. Call initChat() or seedWithExamples() first.");
+		throw new Error("Chat session not initialized.");
 	}
 
-	let result;
-	let actualPayload;
-	if (sourcePayload && u.isJSON(sourcePayload)) actualPayload = JSON.stringify(sourcePayload, null, 2);
-	else if (typeof sourcePayload === 'string') actualPayload = sourcePayload;
-	else throw new Error("Invalid source payload. Must be a JSON object or a valid JSON string.");
+	const actualPayload = typeof sourcePayload === 'string'
+		? sourcePayload
+		: JSON.stringify(sourcePayload, null, 2);
 
 	try {
-		result = await this.chat.sendMessage({ message: actualPayload });
-	} catch (error) {
-		log.error("Error with Gemini API:", error);
-		throw new Error(`Transformation failed: ${error.message}`);
-	}
-
-	try {
+		const result = await this.chat.sendMessage({ message: actualPayload });
 		const modelResponse = result.text;
-		const parsedResponse = JSON.parse(modelResponse);
-		return parsedResponse;
-	} catch (parseError) {
-		log.error("Error parsing Gemini response:", parseError);
-		throw new Error(`Invalid JSON response from Gemini: ${parseError.message}`);
+		const extractedJSON = extractJSON(modelResponse); // Assuming extractJSON is defined
+
+		// Unwrap the 'data' property if it exists
+		if (extractedJSON?.data) {
+			return extractedJSON.data;
+		}
+		return extractedJSON;
+
+	} catch (error) {
+		if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
+			throw new Error(`Invalid JSON response from Gemini: ${error.message}`);
+		}
+		// For other API errors, just re-throw
+		throw new Error(`Transformation failed: ${error.message}`);
 	}
 }
 
 /**
- * Transforms payload with automatic validation and retry logic
- * @param {Object} sourcePayload - The source payload to transform
- * @param {AsyncValidatorFunction} validatorFn - Async function that validates the transformed payload
- * @param {Object} [options] - Options for the validation process
- * @param {number} [options.maxRetries] - Override default max retries
- * @param {number} [options.retryDelay] - Override default retry delay
- * @returns {Promise<Object>} - The validated transformed payload
- * @throws {Error} If transformation or validation fails after all retries
+ * (Engine) Transforms a payload with validation and automatic retry logic.
+ * @this {ExportedAPI}
+ * @param {Object} sourcePayload - The source payload to transform.
+ * @param {Object} [options] - Options for the validation process.
+ * @param {AsyncValidatorFunction | null} validatorFn - The specific validator to use for this run.
+ * @returns {Promise<Object>} - The validated transformed payload.
  */
-async function transformWithValidation(sourcePayload, validatorFn, options = {}) {
+async function prepareAndValidateMessage(sourcePayload, options = {}, validatorFn = null) {
+	if (!this.chat) {
+		throw new Error("Chat session not initialized. Please call init() first.");
+	}
 	const maxRetries = options.maxRetries ?? this.maxRetries;
 	const retryDelay = options.retryDelay ?? this.retryDelay;
 
-	let lastPayload = null;
 	let lastError = null;
+	let lastPayload = null; // Store the payload that caused the validation error
+
+	// Prepare the payload
+	if (sourcePayload && isJSON(sourcePayload)) {
+		lastPayload = JSON.stringify(sourcePayload, null, 2);
+	} else if (typeof sourcePayload === 'string') {
+		lastPayload = sourcePayload;
+	} else {
+		throw new Error("Invalid source payload. Must be a JSON object or string.");
+	}
 
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		try {
-			// First attempt uses normal transformation, subsequent attempts use rebuild
-			const transformedPayload = attempt === 0
-				? await this.message(sourcePayload)
+			// Step 1: Get the transformed payload
+			const transformedPayload = (attempt === 0)
+				? await this.rawMessage(lastPayload) // Use the new raw method
 				: await this.rebuild(lastPayload, lastError.message);
 
-			// Validate the transformed payload
-			const validatedPayload = await validatorFn(transformedPayload);
+			lastPayload = transformedPayload; // Always update lastPayload *before* validation
 
-			log.debug(`Transformation and validation succeeded on attempt ${attempt + 1}`);
-			return validatedPayload;
+			// Step 2: Validate if a validator is provided
+			if (validatorFn) {
+				await validatorFn(transformedPayload); // Validator throws on failure
+			}
+
+			// Step 3: Success!
+			log.debug(`Transformation succeeded on attempt ${attempt + 1}`);
+			return transformedPayload;
 
 		} catch (error) {
 			lastError = error;
+			log.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
 
-			if (attempt === 0) {
-				// First attempt failed - could be transformation or validation error
-				lastPayload = await this.message(sourcePayload).catch(() => null);
+			if (attempt >= maxRetries) {
+				log.error(`All ${maxRetries + 1} attempts failed.`);
+				throw new Error(`Transformation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
 			}
 
-			if (attempt < maxRetries) {
-				const delay = retryDelay * Math.pow(2, attempt); // Exponential backoff
-				log.warn(`Attempt ${attempt + 1} failed, retrying in ${delay}ms...`, error.message);
-				await new Promise(res => setTimeout(res, delay));
-			} else {
-				log.error(`All ${maxRetries + 1} attempts failed`);
-				throw new Error(`Transformation with validation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
-			}
+			// Wait before retrying
+			const delay = retryDelay * Math.pow(2, attempt);
+			await new Promise(res => setTimeout(res, delay));
 		}
 	}
 }
+
+/**
+ * Rebuilds a payload based on server error feedback
+ * @param {Object} lastPayload - The payload that failed validation
+ * @param {string} serverError - The error message from the server
+ * @returns {Promise<Object>} - A new corrected payload
+ * @throws {Error} If the rebuild process fails.
+ */
+async function rebuildPayload(lastPayload, serverError) {
+	await this.init(); // Ensure chat is initialized
+	const prompt = `
+The previous JSON payload (below) failed validation.
+The server's error message is quoted afterward.
+
+---------------- BAD PAYLOAD ----------------
+${JSON.stringify(lastPayload, null, 2)}
+
+
+---------------- SERVER ERROR ----------------
+${serverError}
+
+Please return a NEW JSON payload that corrects the issue.
+Respond with JSON only – no comments or explanations.
+`;
+
+	let result;
+	try {
+		result = await this.chat.sendMessage({ message: prompt });
+	} catch (err) {
+		throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
+	}
+
+	try {
+		const text = result.text ?? result.response ?? '';
+		return typeof text === 'object' ? text : JSON.parse(text);
+	} catch (parseErr) {
+		throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
+	}
+}
+
+
 
 
 /**
  * Estimate total token usage if you were to send a new payload as the next message.
  * Considers system instructions, current chat history (including examples), and the new message.
  * @param {object|string} nextPayload - The next user message to be sent (object or string)
- * @returns {Promise<{ totalTokens: number, ... }>} - The result of Gemini's countTokens API
+ * @returns {Promise<{ totalTokens: number }>} - The result of Gemini's countTokens API
  */
 async function estimateTokenUsage(nextPayload) {
 	// Compose the conversation contents, Gemini-style
@@ -367,44 +465,6 @@ async function estimateTokenUsage(nextPayload) {
 	return resp; // includes totalTokens, possibly breakdown
 }
 
-/**
- * Rebuilds a payload based on server error feedback
- * @param {Object} lastPayload - The payload that failed validation
- * @param {string} serverError - The error message from the server
- * @returns {Promise<Object>} - A new corrected payload
- * @throws {Error} If the rebuild process fails.
- */
-async function rebuildPayload(lastPayload, serverError) {
-	await this.init();
-
-	const prompt = `
-The previous JSON payload (below) failed validation.
-The server's error message is quoted afterward.
-
----------------- BAD PAYLOAD ----------------
-${JSON.stringify(lastPayload, null, 2)}
-
----------------- SERVER ERROR ----------------
-${serverError}
-
-Please return a NEW JSON payload that corrects the issue.
-Respond with JSON only – no comments or explanations.
-`;
-
-	let result;
-	try {
-		result = await this.chat.sendMessage({ message: prompt });
-	} catch (err) {
-		throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
-	}
-
-	try {
-		const text = result.text ?? result.response ?? '';
-		return typeof text === 'object' ? text : JSON.parse(text);
-	} catch (parseErr) {
-		throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
-	}
-}
 
 /**
  * Resets the current chat session, clearing all history and examples
@@ -438,6 +498,170 @@ function getChatHistory() {
 	return this.chat.getHistory();
 }
 
+
+/*
+----
+HELPERS
+----
+*/
+
+function isJSON(data) {
+	try {
+		const attempt = JSON.stringify(data);
+		if (attempt?.startsWith('{') || attempt?.startsWith('[')) {
+			if (attempt?.endsWith('}') || attempt?.endsWith(']')) {
+				return true;
+			}
+		}
+		return false;
+	} catch (e) {
+		return false;
+	}
+}
+
+function isJSONStr(string) {
+	if (typeof string !== 'string') return false;
+	try {
+		const result = JSON.parse(string);
+		const type = Object.prototype.toString.call(result);
+		return type === '[object Object]' || type === '[object Array]';
+	} catch (err) {
+		return false;
+	}
+}
+
+function extractJSON(text) {
+	if (!text || typeof text !== 'string') {
+		throw new Error('No text provided for JSON extraction');
+	}
+
+	// Strategy 1: Try parsing the entire response as JSON
+	if (isJSONStr(text.trim())) {
+		return JSON.parse(text.trim());
+	}
+
+	// Strategy 2: Look for JSON code blocks (```json...``` or ```...```)
+	const codeBlockPatterns = [
+		/```json\s*\n?([\s\S]*?)\n?\s*```/gi,
+		/```\s*\n?([\s\S]*?)\n?\s*```/gi
+	];
+
+	for (const pattern of codeBlockPatterns) {
+		const matches = text.match(pattern);
+		if (matches) {
+			for (const match of matches) {
+				const jsonContent = match.replace(/```json\s*\n?/gi, '').replace(/```\s*\n?/gi, '').trim();
+				if (isJSONStr(jsonContent)) {
+					return JSON.parse(jsonContent);
+				}
+			}
+		}
+	}
+
+	// Strategy 3: Look for JSON objects/arrays using bracket matching
+	const jsonPatterns = [
+		// Match complete JSON objects
+		/\{[\s\S]*\}/g,
+		// Match complete JSON arrays
+		/\[[\s\S]*\]/g
+	];
+
+	for (const pattern of jsonPatterns) {
+		const matches = text.match(pattern);
+		if (matches) {
+			for (const match of matches) {
+				const candidate = match.trim();
+				if (isJSONStr(candidate)) {
+					return JSON.parse(candidate);
+				}
+			}
+		}
+	}
+
+	// Strategy 4: Advanced bracket matching for nested structures
+	const advancedExtract = findCompleteJSONStructures(text);
+	if (advancedExtract.length > 0) {
+		// Return the first valid JSON structure found
+		for (const candidate of advancedExtract) {
+			if (isJSONStr(candidate)) {
+				return JSON.parse(candidate);
+			}
+		}
+	}
+
+	// Strategy 5: Clean up common formatting issues and retry
+	const cleanedText = text
+		.replace(/^\s*Sure,?\s*here\s+is\s+your?\s+.*?[:\n]/gi, '') // Remove conversational intros
+		.replace(/^\s*Here\s+is\s+the\s+.*?[:\n]/gi, '')
+		.replace(/^\s*The\s+.*?is\s*[:\n]/gi, '')
+		.replace(/\/\*[\s\S]*?\*\//g, '') // Remove /* comments */
+		.replace(/\/\/.*$/gm, '') // Remove // comments
+		.trim();
+
+	if (isJSONStr(cleanedText)) {
+		return JSON.parse(cleanedText);
+	}
+
+	// If all else fails, throw an error with helpful information
+	throw new Error(`Could not extract valid JSON from model response. Response preview: ${text.substring(0, 200)}...`);
+}
+
+function findCompleteJSONStructures(text) {
+	const results = [];
+	const startChars = ['{', '['];
+
+	for (let i = 0; i < text.length; i++) {
+		if (startChars.includes(text[i])) {
+			const extracted = extractCompleteStructure(text, i);
+			if (extracted) {
+				results.push(extracted);
+			}
+		}
+	}
+
+	return results;
+}
+
+
+function extractCompleteStructure(text, startPos) {
+	const startChar = text[startPos];
+	const endChar = startChar === '{' ? '}' : ']';
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+
+	for (let i = startPos; i < text.length; i++) {
+		const char = text[i];
+
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+
+		if (char === '\\' && inString) {
+			escaped = true;
+			continue;
+		}
+
+		if (char === '"' && !escaped) {
+			inString = !inString;
+			continue;
+		}
+
+		if (!inString) {
+			if (char === startChar) {
+				depth++;
+			} else if (char === endChar) {
+				depth--;
+				if (depth === 0) {
+					return text.substring(startPos, i + 1);
+				}
+			}
+		}
+	}
+
+	return null; // Incomplete structure
+}
 
 if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 	log.info("RUNNING AI Transformer as standalone script...");
@@ -490,7 +714,7 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 					return payload; // Return the payload if validation passes
 				};
 
-				const validatedResponse = await transformer.transformWithValidation(
+				const validatedResponse = await transformer.messageAndValidate(
 					{ "name": "Lynn" },
 					mockValidator
 				);
