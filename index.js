@@ -224,9 +224,10 @@ async function seedWithExamples(examples) {
 		}
 	}
 
-	if (examples?.slice().pop()[this.systemInstructionsKey]) {
+	const instructionExample = examples.find(ex => ex[this.systemInstructionsKey]);
+	if (instructionExample) {
 		log.debug(`Found system instructions in examples; reinitializing chat with new instructions.`);
-		this.systemInstructions = examples.slice().pop()[this.systemInstructionsKey];
+		this.systemInstructions = instructionExample[this.systemInstructionsKey];
 		this.chatConfig.systemInstruction = this.systemInstructions;
 		await this.init(true); // Reinitialize chat with new system instructions
 	}

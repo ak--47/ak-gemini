@@ -1,6 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import { default as AITransformer } from '../index.js';
+import path from 'path';
+import fs from 'fs';
 
 
 const { GEMINI_API_KEY } = process.env;
@@ -1107,4 +1109,244 @@ describe('Advanced Options + Configs', () => {
 		await expect(transformer.message({ valid: false }, { maxRetries: 1 })).rejects.toThrow(/custom validation failed/i);
 		expect(numTimesCalled.length).toBe(3);
 	});
+});
+
+
+describe('File-based Examples', () => {
+    const examplesFilePath = path.resolve('./tests/examples.json');
+    const examplesContent = [
+        {
+            "systemInstructions": "You are a helpful assistant who likes to rhyme whenever you can.",
+            "userInput": "What is the weather like today?",
+            "assistantResponse": { "rhyme": "The weather today is sunny and bright, with a gentle breeze that feels just right." },
+            "meta": "The user is asking about the weather, and the assistant responds in a rhyming manner.",
+            "explanationOfResponse": "The assistant provides a poetic response to the user's question about the weather."
+        },
+        {
+            "userInput": "Can you tell me a joke?",
+            "assistantResponse": { "joke": "Why did the scarecrow win an award? Because he was outstanding in his field!" },
+            "meta": "The user is asking for a joke.",
+            "explanationOfResponse": "The assistant delivers a pun."
+        },
+        {
+            "userInput": "What is the capital of France?",
+            "assistantResponse": { "rhyme": "The capital of France, oh so grand, is Paris, a treasure in the land." },
+            "meta": "The user is asking for the capital of France.",
+            "explanationOfResponse": "The assistant provides a factual, rhyming answer."
+        }
+    ];
+
+    // Create the dummy examples file before tests run
+    beforeAll(() => {
+        // Create a 'tests' directory if it doesn't exist
+        if (!fs.existsSync(path.dirname(examplesFilePath))) {
+            fs.mkdirSync(path.dirname(examplesFilePath));
+        }
+        fs.writeFileSync(examplesFilePath, JSON.stringify(examplesContent, null, 4));
+    });
+
+    // Clean up the dummy file after all tests are done
+    afterAll(() => {
+        fs.unlinkSync(examplesFilePath);
+    });
+
+    it('should load basic prompts and answers from the file', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            examplesFile: examplesFilePath,
+            promptKey: 'userInput',
+            answerKey: 'assistantResponse'
+        });
+
+        await transformer.seed();
+        const history = transformer.getHistory();
+
+        expect(history.length).toBe(6); // 3 examples * 2 messages each
+        const modelResponse = JSON.parse(history[1].parts[0].text);
+        expect(modelResponse.data.rhyme).toBe("The weather today is sunny and bright, with a gentle breeze that feels just right.");
+    });
+
+    it('should correctly use the CONTEXT key from the file', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            examplesFile: examplesFilePath,
+            promptKey: 'userInput',
+            answerKey: 'assistantResponse',
+            contextKey: 'meta' // Map CONTEXT to the 'meta' field
+        });
+
+        await transformer.seed();
+        const history = transformer.getHistory();
+        const userMessage = history[2].parts[0].text; // The second example's user message
+
+        expect(userMessage).toMatch(/CONTEXT:/);
+        expect(userMessage).toMatch(/The user is asking for a joke/);
+    });
+    
+    it('should correctly use the EXPLANATION key from the file', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            examplesFile: examplesFilePath,
+            promptKey: 'userInput',
+            answerKey: 'assistantResponse',
+            explanationKey: 'explanationOfResponse' // Map EXPLANATION
+        });
+
+        await transformer.seed();
+        const history = transformer.getHistory();
+        const modelMessage = JSON.parse(history[5].parts[0].text); // Third example's model message
+
+        expect(modelMessage.explanation).toBe("The assistant provides a factual, rhyming answer.");
+    });
+    
+    it('should override system instructions from the file and follow them', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            examplesFile: examplesFilePath,
+            promptKey: 'userInput',
+            answerKey: 'assistantResponse',
+            systemInstructionsKey: 'systemInstructions' // Map SYSTEM
+        });
+        
+        // Seeding should detect and apply the new instructions
+        await transformer.seed();
+
+        // 1. Verify that the transformer's internal config was updated
+        const expectedInstructions = "You are a helpful assistant who likes to rhyme whenever you can.";
+        expect(transformer.chatConfig.systemInstruction).toBe(expectedInstructions);
+
+        // 2. Verify that the model now follows the new instructions
+        const result = await transformer.message("How does a computer work?");
+        expect(typeof result.explanation).toBe('string');
+        expect(result.explanation.length).toBeGreaterThan(10);
+    });
+
+    it('should throw a helpful error if the examples file does not exist', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            examplesFile: './non-existent-file.json'
+        });
+        
+        // Using await/expect with rejects for async functions
+        await expect(transformer.seed()).rejects.toThrow(/Could not load examples from file/);
+    });
+});
+
+
+describe('Response Schema', () => {
+
+    it('should conform to a simple responseSchema', async () => {
+        const simpleSchema = {
+            type: 'object',
+            properties: {
+                user_id: { type: 'number' },
+                username: { type: 'string' },
+                is_active: { type: 'boolean' }
+            },
+            required: ['user_id', 'username']
+        };
+
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            responseSchema: simpleSchema,
+            systemInstructions: "Extract user details from the provided text."
+        });
+
+        await transformer.init();
+
+        const result = await transformer.message("The user is jsmith (id: 123). They are an active user.");
+        
+        // Assertions to check schema conformance
+        expect(result).toHaveProperty('user_id', 123);
+        expect(result).toHaveProperty('username', 'jsmith');
+        expect(result).toHaveProperty('is_active', true);
+        expect(result.extra_field).toBeUndefined(); // Should not have extra fields
+    });
+
+    it('should prioritize responseSchema over conflicting few-shot examples', async () => {
+        // The few-shot examples teach the model to return a simple { "output": ... } structure.
+        const conflictingExamples = [
+            { PROMPT: { name: "Alice" }, ANSWER: { output: "User: Alice" } },
+            { PROMPT: { name: "Bob" }, ANSWER: { output: "User: Bob" } }
+        ];
+
+        // But the schema *requires* a different, more complex structure.
+        const requiredSchema = {
+            type: 'object',
+            properties: {
+                status: { type: 'string', enum: ['success', 'error'] },
+                data: { 
+                    type: 'object',
+                    properties: {
+                        name_processed: { type: 'string' }
+                    },
+                    required: ['name_processed']
+                }
+            },
+            required: ['status', 'data']
+        };
+        
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            responseSchema: requiredSchema,
+            systemInstructions: "Process the user's name."
+        });
+
+        await transformer.seed(conflictingExamples);
+        const result = await transformer.message({ name: "Charlie" });
+
+        // The test passes if the output follows the `requiredSchema`, NOT the examples.
+        expect(result.output).toBeUndefined(); // Should NOT have the key from the examples.
+        expect(result).toHaveProperty('name_processed');
+		expect(result.name_processed).toBe('Charlie'); // Should process the name correctly
+    });
+
+    it('should handle a complex nested schema with arrays and objects', async () => {
+        const complexSchema = {
+            type: 'object',
+            properties: {
+                orderId: { type: 'string' },
+                customer: {
+                    type: 'object',
+                    properties: {
+                        name: { type: 'string' },
+                        contact: { type: 'string' },
+                    },
+                    required: ['name']
+                },
+                items: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            productId: { type: 'string' },
+                            quantity: { type: 'number' }
+                        },
+                        required: ['productId', 'quantity']
+                    }
+                }
+            },
+            required: ['orderId', 'customer', 'items']
+        };
+
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            responseSchema: complexSchema,
+            systemInstructions: "Parse the order details from the unstructured text."
+        });
+
+        await transformer.init();
+
+        const prompt = "Customer Jane Doe (jane@example.com) ordered 2 of product SKU-123 and 1 of SKU-456. Her order ID is ABC-999.";
+        const result = await transformer.message(prompt);
+        
+        // Assertions for the complex structure
+        expect(result.orderId).toBe('ABC-999');
+        expect(result.customer.name).toBe('Jane Doe');
+        expect(result.customer.contact).toBe('jane@example.com');
+        expect(Array.isArray(result.items)).toBe(true);
+        expect(result.items.length).toBe(2);
+        expect(result.items).toContainEqual({ productId: 'SKU-123', quantity: 2 });
+        expect(result.items).toContainEqual({ productId: 'SKU-456', quantity: 1 });
+    });
 });

@@ -29,8 +29,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // index.js
 var index_exports = {};
 __export(index_exports, {
-  AITransformer: () => AITransformer,
-  default: () => AITransformer,
+  default: () => index_default,
   log: () => logger_default
 });
 module.exports = __toCommonJS(index_exports);
@@ -76,7 +75,7 @@ When presented with new Source JSON, apply the learned transformation rules to p
 
 Always respond ONLY with a valid JSON object that strictly adheres to the expected output format.
 
-Do not include any additional text, explanations, or formatting before or after the JSON object.
+Do not include any additional text, explanations, or formatting before or after the JSON object. 
 `;
 var DEFAULT_CHAT_CONFIG = {
   responseMimeType: "application/json",
@@ -96,26 +95,34 @@ var AITransformer = class {
     this.promptKey = "";
     this.answerKey = "";
     this.contextKey = "";
+    this.explanationKey = "";
+    this.systemInstructionKey = "";
     this.maxRetries = 3;
     this.retryDelay = 1e3;
     this.systemInstructions = "";
     this.chatConfig = {};
     this.apiKey = GEMINI_API_KEY;
+    this.onlyJSON = true;
+    this.asyncValidator = null;
     AITransformFactory.call(this, options);
     this.init = initChat.bind(this);
     this.seed = seedWithExamples.bind(this);
-    this.message = transformJSON.bind(this);
+    this.rawMessage = rawMessage.bind(this);
+    this.message = (payload, opts = {}, validatorFn = null) => {
+      return prepareAndValidateMessage.call(this, payload, opts, validatorFn || this.asyncValidator);
+    };
     this.rebuild = rebuildPayload.bind(this);
     this.reset = resetChat.bind(this);
     this.getHistory = getChatHistory.bind(this);
-    this.transformWithValidation = transformWithValidation.bind(this);
+    this.messageAndValidate = prepareAndValidateMessage.bind(this);
     this.estimate = estimateTokenUsage.bind(this);
   }
 };
+var index_default = AITransformer;
 function AITransformFactory(options = {}) {
   this.modelName = options.modelName || "gemini-2.0-flash";
   this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
-  this.apiKey = options.apiKey || GEMINI_API_KEY;
+  this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
   if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
   this.chatConfig = {
     ...DEFAULT_CHAT_CONFIG,
@@ -127,11 +134,15 @@ function AITransformFactory(options = {}) {
   }
   this.examplesFile = options.examplesFile || null;
   this.exampleData = options.exampleData || null;
-  this.promptKey = options.sourceKey || "PROMPT";
-  this.answerKey = options.targetKey || "ANSWER";
+  this.promptKey = options.promptKey || "PROMPT";
+  this.answerKey = options.answerKey || "ANSWER";
   this.contextKey = options.contextKey || "CONTEXT";
+  this.explanationKey = options.explanationKey || "EXPLANATION";
+  this.systemInstructionsKey = options.systemInstructionsKey || "SYSTEM";
   this.maxRetries = options.maxRetries || 3;
   this.retryDelay = options.retryDelay || 1e3;
+  this.asyncValidator = options.asyncValidator || null;
+  this.onlyJSON = options.onlyJSON !== void 0 ? options.onlyJSON : true;
   if (this.promptKey === this.answerKey) {
     throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
   }
@@ -141,8 +152,8 @@ function AITransformFactory(options = {}) {
   this.genAIClient = ai;
   this.chat = null;
 }
-async function initChat() {
-  if (this.chat) return;
+async function initChat(force = false) {
+  if (this.chat && !force) return;
   logger_default.debug(`Initializing Gemini chat session with model: ${this.modelName}...`);
   this.chat = await this.genAIClient.chats.create({
     model: this.modelName,
@@ -157,11 +168,21 @@ async function seedWithExamples(examples) {
   if (!examples || !Array.isArray(examples) || examples.length === 0) {
     if (this.examplesFile) {
       logger_default.debug(`No examples provided, loading from file: ${this.examplesFile}`);
-      examples = await import_ak_tools.default.load(import_path.default.resolve(this.examplesFile), true);
+      try {
+        examples = await import_ak_tools.default.load(import_path.default.resolve(this.examplesFile), true);
+      } catch (err) {
+        throw new Error(`Could not load examples from file: ${this.examplesFile}. Please check the file path and format.`);
+      }
     } else {
       logger_default.debug("No examples provided and no examples file specified. Skipping seeding.");
       return;
     }
+  }
+  if (examples?.slice().pop()[this.systemInstructionsKey]) {
+    logger_default.debug(`Found system instructions in examples; reinitializing chat with new instructions.`);
+    this.systemInstructions = examples.slice().pop()[this.systemInstructionsKey];
+    this.chatConfig.systemInstruction = this.systemInstructions;
+    await this.init(true);
   }
   logger_default.debug(`Seeding chat with ${examples.length} transformation examples...`);
   const historyToAdd = [];
@@ -169,24 +190,26 @@ async function seedWithExamples(examples) {
     const contextValue = example[this.contextKey] || "";
     const promptValue = example[this.promptKey] || "";
     const answerValue = example[this.answerKey] || "";
+    const explanationValue = example[this.explanationKey] || "";
+    let userText = "";
+    let modelResponse = {};
     if (contextValue) {
-      let contextText = import_ak_tools.default.isJSON(contextValue) ? JSON.stringify(contextValue, null, 2) : contextValue;
-      historyToAdd.push({
-        role: "user",
-        parts: [{ text: `Context: ${contextText}` }]
-      });
-      historyToAdd.push({
-        role: "model",
-        parts: [{ text: "I understand the context." }]
-      });
+      let contextText = isJSON(contextValue) ? JSON.stringify(contextValue, null, 2) : contextValue;
+      userText += `CONTEXT:
+${contextText}
+
+`;
     }
     if (promptValue) {
-      let promptText = import_ak_tools.default.isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
-      historyToAdd.push({ role: "user", parts: [{ text: promptText }] });
+      let promptText = isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
+      userText += promptText;
     }
-    if (answerValue) {
-      let answerText = import_ak_tools.default.isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : answerValue;
-      historyToAdd.push({ role: "model", parts: [{ text: answerText }] });
+    if (answerValue) modelResponse.data = answerValue;
+    if (explanationValue) modelResponse.explanation = explanationValue;
+    const modelText = JSON.stringify(modelResponse, null, 2);
+    if (userText.trim().length && modelText.trim().length > 0) {
+      historyToAdd.push({ role: "user", parts: [{ text: userText.trim() }] });
+      historyToAdd.push({ role: "model", parts: [{ text: modelText.trim() }] });
     }
   }
   const currentHistory = this?.chat?.getHistory() || [];
@@ -197,56 +220,91 @@ async function seedWithExamples(examples) {
     history: [...currentHistory, ...historyToAdd]
   });
   logger_default.debug("Transformation examples seeded successfully.");
+  return this.chat.getHistory();
 }
-async function transformJSON(sourcePayload) {
+async function rawMessage(sourcePayload) {
   if (!this.chat) {
-    throw new Error("Chat session not initialized. Call initChat() or seedWithExamples() first.");
+    throw new Error("Chat session not initialized.");
   }
-  let result;
-  let actualPayload;
-  if (sourcePayload && import_ak_tools.default.isJSON(sourcePayload)) actualPayload = JSON.stringify(sourcePayload, null, 2);
-  else if (typeof sourcePayload === "string") actualPayload = sourcePayload;
-  else throw new Error("Invalid source payload. Must be a JSON object or a valid JSON string.");
+  const actualPayload = typeof sourcePayload === "string" ? sourcePayload : JSON.stringify(sourcePayload, null, 2);
   try {
-    result = await this.chat.sendMessage({ message: actualPayload });
+    const result = await this.chat.sendMessage({ message: actualPayload });
+    const modelResponse = result.text;
+    const extractedJSON = extractJSON(modelResponse);
+    if (extractedJSON?.data) {
+      return extractedJSON.data;
+    }
+    return extractedJSON;
   } catch (error) {
-    logger_default.error("Error with Gemini API:", error);
+    if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
+      throw new Error(`Invalid JSON response from Gemini: ${error.message}`);
+    }
     throw new Error(`Transformation failed: ${error.message}`);
   }
-  try {
-    const modelResponse = result.text;
-    const parsedResponse = JSON.parse(modelResponse);
-    return parsedResponse;
-  } catch (parseError) {
-    logger_default.error("Error parsing Gemini response:", parseError);
-    throw new Error(`Invalid JSON response from Gemini: ${parseError.message}`);
-  }
 }
-async function transformWithValidation(sourcePayload, validatorFn, options = {}) {
+async function prepareAndValidateMessage(sourcePayload, options = {}, validatorFn = null) {
+  if (!this.chat) {
+    throw new Error("Chat session not initialized. Please call init() first.");
+  }
   const maxRetries = options.maxRetries ?? this.maxRetries;
   const retryDelay = options.retryDelay ?? this.retryDelay;
-  let lastPayload = null;
   let lastError = null;
+  let lastPayload = null;
+  if (sourcePayload && isJSON(sourcePayload)) {
+    lastPayload = JSON.stringify(sourcePayload, null, 2);
+  } else if (typeof sourcePayload === "string") {
+    lastPayload = sourcePayload;
+  } else {
+    throw new Error("Invalid source payload. Must be a JSON object or string.");
+  }
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const transformedPayload = attempt === 0 ? await this.message(sourcePayload) : await this.rebuild(lastPayload, lastError.message);
-      const validatedPayload = await validatorFn(transformedPayload);
-      logger_default.debug(`Transformation and validation succeeded on attempt ${attempt + 1}`);
-      return validatedPayload;
+      const transformedPayload = attempt === 0 ? await this.rawMessage(lastPayload) : await this.rebuild(lastPayload, lastError.message);
+      lastPayload = transformedPayload;
+      if (validatorFn) {
+        await validatorFn(transformedPayload);
+      }
+      logger_default.debug(`Transformation succeeded on attempt ${attempt + 1}`);
+      return transformedPayload;
     } catch (error) {
       lastError = error;
-      if (attempt === 0) {
-        lastPayload = await this.message(sourcePayload).catch(() => null);
+      logger_default.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
+      if (attempt >= maxRetries) {
+        logger_default.error(`All ${maxRetries + 1} attempts failed.`);
+        throw new Error(`Transformation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
       }
-      if (attempt < maxRetries) {
-        const delay = retryDelay * Math.pow(2, attempt);
-        logger_default.warn(`Attempt ${attempt + 1} failed, retrying in ${delay}ms...`, error.message);
-        await new Promise((res) => setTimeout(res, delay));
-      } else {
-        logger_default.error(`All ${maxRetries + 1} attempts failed`);
-        throw new Error(`Transformation with validation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
-      }
+      const delay = retryDelay * Math.pow(2, attempt);
+      await new Promise((res) => setTimeout(res, delay));
     }
+  }
+}
+async function rebuildPayload(lastPayload, serverError) {
+  await this.init();
+  const prompt = `
+The previous JSON payload (below) failed validation.
+The server's error message is quoted afterward.
+
+---------------- BAD PAYLOAD ----------------
+${JSON.stringify(lastPayload, null, 2)}
+
+
+---------------- SERVER ERROR ----------------
+${serverError}
+
+Please return a NEW JSON payload that corrects the issue.
+Respond with JSON only \u2013 no comments or explanations.
+`;
+  let result;
+  try {
+    result = await this.chat.sendMessage({ message: prompt });
+  } catch (err) {
+    throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
+  }
+  try {
+    const text = result.text ?? result.response ?? "";
+    return typeof text === "object" ? text : JSON.parse(text);
+  } catch (parseErr) {
+    throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
   }
 }
 async function estimateTokenUsage(nextPayload) {
@@ -268,34 +326,6 @@ async function estimateTokenUsage(nextPayload) {
   });
   return resp;
 }
-async function rebuildPayload(lastPayload, serverError) {
-  await this.init();
-  const prompt = `
-The previous JSON payload (below) failed validation.
-The server's error message is quoted afterward.
-
----------------- BAD PAYLOAD ----------------
-${JSON.stringify(lastPayload, null, 2)}
-
----------------- SERVER ERROR ----------------
-${serverError}
-
-Please return a NEW JSON payload that corrects the issue.
-Respond with JSON only \u2013 no comments or explanations.
-`;
-  let result;
-  try {
-    result = await this.chat.sendMessage({ message: prompt });
-  } catch (err) {
-    throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
-  }
-  try {
-    const text = result.text ?? result.response ?? "";
-    return typeof text === "object" ? text : JSON.parse(text);
-  } catch (parseErr) {
-    throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
-  }
-}
 async function resetChat() {
   if (this.chat) {
     logger_default.debug("Resetting Gemini chat session...");
@@ -316,6 +346,128 @@ function getChatHistory() {
     return [];
   }
   return this.chat.getHistory();
+}
+function isJSON(data) {
+  try {
+    const attempt = JSON.stringify(data);
+    if (attempt?.startsWith("{") || attempt?.startsWith("[")) {
+      if (attempt?.endsWith("}") || attempt?.endsWith("]")) {
+        return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+function isJSONStr(string) {
+  if (typeof string !== "string") return false;
+  try {
+    const result = JSON.parse(string);
+    const type = Object.prototype.toString.call(result);
+    return type === "[object Object]" || type === "[object Array]";
+  } catch (err) {
+    return false;
+  }
+}
+function extractJSON(text) {
+  if (!text || typeof text !== "string") {
+    throw new Error("No text provided for JSON extraction");
+  }
+  if (isJSONStr(text.trim())) {
+    return JSON.parse(text.trim());
+  }
+  const codeBlockPatterns = [
+    /```json\s*\n?([\s\S]*?)\n?\s*```/gi,
+    /```\s*\n?([\s\S]*?)\n?\s*```/gi
+  ];
+  for (const pattern of codeBlockPatterns) {
+    const matches = text.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        const jsonContent = match.replace(/```json\s*\n?/gi, "").replace(/```\s*\n?/gi, "").trim();
+        if (isJSONStr(jsonContent)) {
+          return JSON.parse(jsonContent);
+        }
+      }
+    }
+  }
+  const jsonPatterns = [
+    // Match complete JSON objects
+    /\{[\s\S]*\}/g,
+    // Match complete JSON arrays
+    /\[[\s\S]*\]/g
+  ];
+  for (const pattern of jsonPatterns) {
+    const matches = text.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        const candidate = match.trim();
+        if (isJSONStr(candidate)) {
+          return JSON.parse(candidate);
+        }
+      }
+    }
+  }
+  const advancedExtract = findCompleteJSONStructures(text);
+  if (advancedExtract.length > 0) {
+    for (const candidate of advancedExtract) {
+      if (isJSONStr(candidate)) {
+        return JSON.parse(candidate);
+      }
+    }
+  }
+  const cleanedText = text.replace(/^\s*Sure,?\s*here\s+is\s+your?\s+.*?[:\n]/gi, "").replace(/^\s*Here\s+is\s+the\s+.*?[:\n]/gi, "").replace(/^\s*The\s+.*?is\s*[:\n]/gi, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "").trim();
+  if (isJSONStr(cleanedText)) {
+    return JSON.parse(cleanedText);
+  }
+  throw new Error(`Could not extract valid JSON from model response. Response preview: ${text.substring(0, 200)}...`);
+}
+function findCompleteJSONStructures(text) {
+  const results = [];
+  const startChars = ["{", "["];
+  for (let i = 0; i < text.length; i++) {
+    if (startChars.includes(text[i])) {
+      const extracted = extractCompleteStructure(text, i);
+      if (extracted) {
+        results.push(extracted);
+      }
+    }
+  }
+  return results;
+}
+function extractCompleteStructure(text, startPos) {
+  const startChar = text[startPos];
+  const endChar = startChar === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startPos; i < text.length; i++) {
+    const char = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+    if (char === '"' && !escaped) {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (char === startChar) {
+        depth++;
+      } else if (char === endChar) {
+        depth--;
+        if (depth === 0) {
+          return text.substring(startPos, i + 1);
+        }
+      }
+    }
+  }
+  return null;
 }
 if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
   logger_default.info("RUNNING AI Transformer as standalone script...");
@@ -361,7 +513,7 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
         }
         return payload;
       };
-      const validatedResponse = await transformer.transformWithValidation(
+      const validatedResponse = await transformer.messageAndValidate(
         { "name": "Lynn" },
         mockValidator
       );
@@ -375,6 +527,5 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  AITransformer,
   log
 });
