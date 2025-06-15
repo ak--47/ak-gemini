@@ -7,14 +7,20 @@
 	"files": [
 		"index.js",
 		"index.cjs",
-		"types.ts",
+		"types.d.ts",
 		"logger.js"
 	],
 	"types": "types.d.ts",
 	"exports": {
 		".": {
-			"import": "./index.js",
-			"require": "./index.cjs"
+			"import": {
+				"types": "./types.d.ts",
+				"default": "./index.js"
+			},
+			"require": {
+				"types": "./types.d.ts",
+				"default": "./index.cjs"
+			}
 		}
 	},
 	"repository": {

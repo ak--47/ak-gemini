@@ -1350,3 +1350,443 @@ describe('Response Schema', () => {
         expect(result.items).toContainEqual({ productId: 'SKU-456', quantity: 1 });
     });
 });
+
+
+describe('Missing Test Coverage - Constructor Validation', () => {
+    it('should throw error when promptKey and answerKey are identical', () => {
+        expect(() => new AITransformer({
+            ...BASE_OPTIONS,
+            promptKey: 'SAME',
+            answerKey: 'SAME'
+        })).toThrow(/source and target keys cannot be the same/i);
+    });
+
+    it('should handle exampleData constructor option', async () => {
+        const inlineExamples = [
+            { PROMPT: { input: 'test' }, ANSWER: { output: 'result' } }
+        ];
+        
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            exampleData: inlineExamples
+        });
+        
+        await transformer.init();
+        await transformer.seed(); // Should use exampleData
+        
+        const history = transformer.getHistory();
+        expect(history.length).toBe(2);
+    });
+
+    it('should validate custom retryDelay and maxRetries', () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            maxRetries: 5,
+            retryDelay: 2000
+        });
+        
+        expect(transformer.maxRetries).toBe(5);
+        expect(transformer.retryDelay).toBe(2000);
+    });
+
+    it('should handle responseSchema configuration', async () => {
+        const schema = {
+            type: 'object',
+            properties: {
+                result: { type: 'string' }
+            },
+            required: ['result']
+        };
+        
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            responseSchema: schema
+        });
+        
+        await transformer.init();
+        expect(transformer.chatConfig.responseSchema).toEqual(schema);
+    });
+});
+
+
+describe('Missing Test Coverage - Initialization Edge Cases', () => {
+    it('should handle init with force=true parameter', async () => {
+        const transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+        const firstChat = transformer.chat;
+        
+        await transformer.init(true); // Force reinit
+        expect(transformer.chat).not.toBe(firstChat);
+    });
+
+    it('should handle invalid API key during init', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            apiKey: 'invalid-key'
+        });
+        
+        await expect(transformer.init()).rejects.toThrow();
+    });
+});
+
+
+describe('Missing Test Coverage - Message Processing', () => {
+    let transformer;
+    
+    beforeEach(async () => {
+        transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+    });
+
+    it('should handle array payloads', async () => {
+        await transformer.seed([
+            { PROMPT: [1, 2, 3], ANSWER: [2, 4, 6] }
+        ]);
+        
+        const result = await transformer.message([4, 5, 6]);
+        expect(Array.isArray(result)).toBe(true);
+    });
+
+    it('should handle primitive payloads', async () => {
+        await transformer.seed([
+            { PROMPT: "hello", ANSWER: "HELLO" }
+        ]);
+        
+        const result = await transformer.message("world");
+        expect(typeof result).toBe('string');
+    });
+
+    it('should handle complex nested objects', async () => {
+        const complexExample = {
+            PROMPT: {
+                user: { 
+                    profile: { name: "John", settings: { theme: "dark", lang: "en" } },
+                    data: [1, 2, { nested: true }]
+                }
+            },
+            ANSWER: {
+                processed: true,
+                user_name: "John",
+                theme_preference: "dark"
+            }
+        };
+        
+        await transformer.seed([complexExample]);
+        
+        const result = await transformer.message({
+            user: { 
+                profile: { name: "Jane", settings: { theme: "light", lang: "es" } },
+                data: [4, 5, { nested: false }]
+            }
+        });
+        
+        expect(result.processed).toBe(true);
+        expect(result.user_name).toBe('Jane');
+    });
+});
+
+
+describe('Missing Test Coverage - Error Handling', () => {
+    let transformer;
+    
+    beforeEach(async () => {
+        transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+    });
+
+    it('should handle JSON parsing errors gracefully', async () => {
+        // This test mocks a scenario where extractJSON fails
+        const originalRawMessage = transformer.rawMessage;
+        transformer.rawMessage = async () => {
+            throw new Error('Could not extract valid JSON from model response');
+        };
+        
+        try {
+            await transformer.message({ test: 'malformed' }, { maxRetries: 0 });
+            expect(true).toBe(false); // Should not reach here
+        } catch (error) {
+            expect(error.message).toMatch(/invalid json response/i);
+        }
+        
+        transformer.rawMessage = originalRawMessage;
+    });
+
+    it('should handle validator throwing non-Error objects', async () => {
+        const validator = () => {
+            throw "String error"; // Non-Error object
+        };
+        
+        await expect(
+            transformer.message({ test: 1 }, { maxRetries: 0 }, validator)
+        ).rejects.toThrow();
+    });
+});
+
+
+describe('Missing Test Coverage - Configuration Options', () => {
+    it('should handle all chatConfig properties', async () => {
+        const customConfig = {
+            temperature: 0.7,
+            topP: 0.8,
+            topK: 40,
+            responseMimeType: 'application/json'
+        };
+        
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            chatConfig: customConfig
+        });
+        
+        await transformer.init();
+        
+        expect(transformer.chatConfig.temperature).toBe(0.7);
+        expect(transformer.chatConfig.topP).toBe(0.8);
+        expect(transformer.chatConfig.topK).toBe(40);
+        expect(transformer.chatConfig.responseMimeType).toBe('application/json');
+    });
+
+    it('should handle custom key mappings with special characters', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            promptKey: 'input_data',
+            answerKey: 'output_result',
+            contextKey: 'ctx_info'
+        });
+        
+        await transformer.init();
+        
+        expect(transformer.promptKey).toBe('input_data');
+        expect(transformer.answerKey).toBe('output_result');
+        expect(transformer.contextKey).toBe('ctx_info');
+    });
+});
+
+
+describe('Missing Test Coverage - Validation System', () => {
+    let transformer;
+    
+    beforeEach(async () => {
+        transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+        await transformer.seed([
+            { PROMPT: { value: 1 }, ANSWER: { result: 2 } }
+        ]);
+    });
+
+    it('should handle validator that modifies payload', async () => {
+        const modifyingValidator = async (payload) => {
+            payload.modified = true;
+            return payload;
+        };
+        
+        const result = await transformer.message(
+            { value: 5 },
+            { maxRetries: 0 },
+            modifyingValidator
+        );
+        
+        expect(result.modified).toBe(true);
+    });
+
+    it('should handle validator with different return types', async () => {
+        const validators = [
+            async (p) => p, // Return payload
+            async (p) => true, // Return boolean
+            async (p) => null, // Return null
+            async (p) => undefined // Return undefined
+        ];
+        
+        for (const validator of validators) {
+            const result = await transformer.message(
+                { value: 3 },
+                { maxRetries: 0 },
+                validator
+            );
+            expect(result).toBeTruthy();
+        }
+    });
+});
+
+
+describe('Missing Test Coverage - Edge Cases', () => {
+    let transformer;
+    
+    beforeEach(async () => {
+        transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+    });
+
+    it('should handle null vs undefined in payloads', async () => {
+        await transformer.seed([
+            { PROMPT: { value: null }, ANSWER: { result: 'null_input' } },
+            { PROMPT: { value: undefined }, ANSWER: { result: 'undefined_input' } }
+        ]);
+        
+        const nullResult = await transformer.message({ value: null });
+        const undefinedResult = await transformer.message({ value: undefined });
+        
+        expect(nullResult).toBeTruthy();
+        expect(undefinedResult).toBeTruthy();
+    });
+
+    it('should handle boolean and number payload types', async () => {
+        await transformer.seed([
+            { PROMPT: true, ANSWER: { bool_result: true } },
+            { PROMPT: 42, ANSWER: { num_result: 84 } }
+        ]);
+        
+        const boolResult = await transformer.message(false);
+        const numResult = await transformer.message(21);
+        
+        expect(boolResult).toBeTruthy();
+        expect(numResult).toBeTruthy();
+    });
+
+    it('should handle Unicode and special characters', async () => {
+        const unicodeExample = {
+            PROMPT: { text: "Hello 世界 🌍 émojis" },
+            ANSWER: { processed: "Hello 世界 🌍 émojis - processed" }
+        };
+        
+        await transformer.seed([unicodeExample]);
+        
+        const result = await transformer.message({ text: "Testing 测试 🚀 special chars" });
+        expect(result).toBeTruthy();
+    });
+
+    it('should handle empty strings in various fields', async () => {
+        const emptyExamples = [
+            { PROMPT: { text: "" }, ANSWER: { result: "empty_input" } },
+            { PROMPT: { text: "test" }, ANSWER: { result: "" } }
+        ];
+        
+        await transformer.seed(emptyExamples);
+        
+        const result = await transformer.message({ text: "" });
+        expect(result).toBeTruthy();
+    });
+});
+
+
+describe('Missing Test Coverage - State Management', () => {
+    let transformer;
+    
+    beforeEach(async () => {
+        transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+    });
+
+    it('should maintain state consistency after failed operations', async () => {
+        await transformer.seed([
+            { PROMPT: { test: 1 }, ANSWER: { result: 2 } }
+        ]);
+        
+        const historyBefore = transformer.getHistory();
+        
+        try {
+            await transformer.message("invalid payload that will fail", { maxRetries: 0 });
+        } catch (error) {
+            // Expected to fail
+        }
+        
+        const historyAfter = transformer.getHistory();
+        expect(historyAfter.length).toBeGreaterThanOrEqual(historyBefore.length);
+    });
+
+    it('should handle memory usage with large conversation histories', async () => {
+        const largeExamples = Array.from({ length: 20 }, (_, i) => ({
+            PROMPT: { index: i, data: "x".repeat(100) },
+            ANSWER: { result: i * 2, processed: "y".repeat(100) }
+        }));
+        
+        await transformer.seed(largeExamples);
+        
+        const history = transformer.getHistory();
+        expect(history.length).toBe(40); // 20 examples * 2 messages each
+        
+        // Should still work after large seeding
+        const result = await transformer.message({ index: 999 });
+        expect(result).toBeTruthy();
+    });
+});
+
+
+describe('Missing Test Coverage - Token Estimation', () => {
+    let transformer;
+    
+    beforeEach(async () => {
+        transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+    });
+
+    it('should provide accurate token estimates for various payload sizes', async () => {
+        const payloads = [
+            { small: "test" },
+            { medium: "x".repeat(100) },
+            { large: "x".repeat(1000) }
+        ];
+        
+        const estimates = [];
+        for (const payload of payloads) {
+            const estimate = await transformer.estimate(payload);
+            estimates.push(estimate.totalTokens);
+        }
+        
+        // Larger payloads should have more tokens
+        expect(estimates[0]).toBeLessThan(estimates[1]);
+        expect(estimates[1]).toBeLessThan(estimates[2]);
+    });
+
+    it('should include system instructions and examples in token count', async () => {
+        const emptyEstimate = await transformer.estimate({ test: "small" });
+        
+        await transformer.seed([
+            { PROMPT: { big: "x".repeat(500) }, ANSWER: { result: "y".repeat(500) } }
+        ]);
+        
+        const seededEstimate = await transformer.estimate({ test: "small" });
+        
+        // Should include more tokens after seeding
+        expect(seededEstimate.totalTokens).toBeGreaterThan(emptyEstimate.totalTokens);
+    });
+});
+
+
+describe('Missing Test Coverage - Concurrent Operations', () => {
+    let transformer;
+    
+    beforeEach(async () => {
+        transformer = new AITransformer({ ...BASE_OPTIONS });
+        await transformer.init();
+        await transformer.seed([
+            { PROMPT: { value: 1 }, ANSWER: { doubled: 2 } },
+            { PROMPT: { value: 2 }, ANSWER: { doubled: 4 } }
+        ]);
+    });
+
+    it('should handle multiple concurrent transformations safely', async () => {
+        const promises = Array.from({ length: 5 }, (_, i) =>
+            transformer.message({ value: i + 10 })
+        );
+        
+        const results = await Promise.all(promises);
+        
+        expect(results).toHaveLength(5);
+        results.forEach((result, i) => {
+            expect(result).toBeTruthy();
+            expect(typeof result).toBe('object');
+        });
+    });
+
+    it('should handle concurrent seeding and transformation', async () => {
+        const seedPromise = transformer.seed([
+            { PROMPT: { new: 1 }, ANSWER: { new_result: 2 } }
+        ]);
+        
+        const transformPromise = transformer.message({ value: 5 });
+        
+        const [seedResult, transformResult] = await Promise.all([seedPromise, transformPromise]);
+        
+        expect(transformResult).toBeTruthy();
+    });
+});
