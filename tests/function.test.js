@@ -1,6 +1,12 @@
 // @ts-ignore
 import { getFunction } from "@google-cloud/functions-framework/testing";
 import { jest } from "@jest/globals";
+import dotenv from "dotenv";
+dotenv.config();
+const { CODE_PHRASE = "" } = process.env;
+if (!CODE_PHRASE) {
+	throw new Error("CODE_PHRASE environment variable is not set");
+}
 
 // Mock the AITransformer module
 const mockInit = jest.fn();
@@ -23,6 +29,15 @@ const MockAITransformer = jest.fn(() => mockTransformer);
 jest.unstable_mockModule('../index.js', () => ({
 	default: MockAITransformer
 }));
+
+// Mock environment variables for testing
+const originalEnv = process.env;
+beforeAll(() => {
+	process.env.CODE_PHRASE = CODE_PHRASE;
+});
+afterAll(() => {
+	process.env = originalEnv;
+});
 
 let func;
 beforeAll(async () => {
@@ -75,10 +90,372 @@ describe("Cloud Function - Simplified API", () => {
 		});
 	});
 
+	describe("Help endpoint", () => {
+		test("GET /help returns comprehensive API documentation", async () => {
+			const res = makeRes();
+			await func(prepReq({ path: "/help", method: "GET" }), res);
+			
+			expect(res._status()).toBe(200);
+			const helpDoc = res._result();
+			
+			// Check main structure
+			expect(helpDoc.service).toBe("AI Transformer Service");
+			expect(helpDoc.description).toMatch(/Google Gemini API wrapper/);
+			expect(helpDoc.version).toBeDefined();
+			expect(helpDoc.runId).toBeDefined();
+			
+			// Check endpoints documentation
+			expect(helpDoc.endpoints).toBeDefined();
+			expect(helpDoc.endpoints['/']).toBeDefined();
+			expect(helpDoc.endpoints['/health']).toBeDefined();
+			expect(helpDoc.endpoints['/help']).toBeDefined();
+			
+			// Check main endpoint documentation
+			const mainEndpoint = helpDoc.endpoints['/'];
+			expect(mainEndpoint.methods).toEqual(['GET', 'POST']);
+			expect(mainEndpoint.post.parameters).toBeDefined();
+			expect(mainEndpoint.post.parameters.payload).toBeDefined();
+			expect(mainEndpoint.post.parameters.examples).toBeDefined();
+			expect(mainEndpoint.post.parameters.modelName).toBeDefined();
+		});
+
+		test("POST /help also returns help documentation", async () => {
+			const res = makeRes();
+			await func(prepReq({ path: "/help", method: "POST" }), res);
+			
+			expect(res._status()).toBe(200);
+			expect(res._result().service).toBe("AI Transformer Service");
+		});
+
+		test("Help documentation includes parameter details", async () => {
+			const res = makeRes();
+			await func(prepReq({ path: "/help" }), res);
+			
+			const helpDoc = res._result();
+			const params = helpDoc.endpoints['/'].post.parameters;
+			
+			// Core transformation parameters
+			expect(params.payload.type).toBe('object|string|array|primitive');
+			expect(params.data.description).toMatch(/alias for payload/i);
+			
+			// Configuration parameters
+			expect(params.modelName.default).toBe('gemini-2.0-flash');
+			expect(params.modelName.options).toContain('gemini-1.5-flash');
+			expect(params.id.default).toBe('default');
+			
+			// Few-shot learning parameters
+			expect(params.examples.type).toBe('array');
+			expect(params.examples.example).toBeDefined();
+			expect(params.exampleData.description).toMatch(/alias for examples/i);
+			
+			// Custom key mappings
+			expect(params.promptKey.default).toBe('PROMPT');
+			expect(params.answerKey.default).toBe('ANSWER');
+			expect(params.contextKey.default).toBe('CONTEXT');
+			expect(params.explanationKey.default).toBe('EXPLANATION');
+			
+			// AI configuration
+			expect(params.chatConfig.properties.temperature).toBeDefined();
+			expect(params.chatConfig.properties.topP).toBeDefined();
+			expect(params.responseSchema.description).toMatch(/JSON schema/i);
+			
+			// Behavior control
+			expect(params.onlyJSON.default).toBe(true);
+			expect(params.maxRetries.default).toBe(3);
+			expect(params.retryDelay.default).toBe(1000);
+		});
+
+		test("Help documentation includes practical examples", async () => {
+			const res = makeRes();
+			await func(prepReq({ path: "/help" }), res);
+			
+			const helpDoc = res._result();
+			
+			// Check examples section exists
+			expect(helpDoc.examples).toBeDefined();
+			expect(helpDoc.examples.basic_transformation).toBeDefined();
+			expect(helpDoc.examples.with_examples).toBeDefined();
+			expect(helpDoc.examples.with_context).toBeDefined();
+			expect(helpDoc.examples.custom_model).toBeDefined();
+			expect(helpDoc.examples.url_parameters).toBeDefined();
+			expect(helpDoc.examples.response_schema).toBeDefined();
+			
+			// Check example structure
+			const basicExample = helpDoc.examples.basic_transformation;
+			expect(basicExample.description).toBeDefined();
+			expect(basicExample.request.method).toBe('POST');
+			expect(basicExample.request.url).toBe('/');
+			expect(basicExample.request.body.payload).toBeDefined();
+			
+			// Check few-shot example
+			const examplesExample = helpDoc.examples.with_examples;
+			expect(examplesExample.request.body.examples).toBeDefined();
+			expect(Array.isArray(examplesExample.request.body.examples)).toBe(true);
+			expect(examplesExample.request.body.examples[0].PROMPT).toBeDefined();
+			expect(examplesExample.request.body.examples[0].ANSWER).toBeDefined();
+		});
+
+		test("Help documentation includes curl examples", async () => {
+			const res = makeRes();
+			await func(prepReq({ path: "/help" }), res);
+			
+			const helpDoc = res._result();
+			
+			// Check curl examples section
+			expect(helpDoc.curl_examples).toBeDefined();
+			expect(Array.isArray(helpDoc.curl_examples)).toBe(true);
+			expect(helpDoc.curl_examples.length).toBeGreaterThan(0);
+			
+			// Check curl example structure
+			const curlExamples = helpDoc.curl_examples;
+			curlExamples.forEach(example => {
+				expect(example.name).toBeDefined();
+				expect(example.command).toBeDefined();
+				expect(typeof example.command).toBe('string');
+				expect(example.command).toMatch(/curl/);
+			});
+			
+			// Check specific examples
+			const healthExample = curlExamples.find(ex => ex.name === 'Health Check');
+			expect(healthExample.command).toMatch(/GET.*\/health/);
+			
+			const basicExample = curlExamples.find(ex => ex.name === 'Basic Transformation');
+			expect(basicExample.command).toMatch(/POST/);
+			expect(basicExample.command).toMatch(/Content-Type: application\/json/);
+			expect(basicExample.command).toMatch(/payload/);
+		});
+
+		test("Help documentation includes useful notes", async () => {
+			const res = makeRes();
+			await func(prepReq({ path: "/help" }), res);
+			
+			const helpDoc = res._result();
+			
+			// Check notes section
+			expect(helpDoc.notes).toBeDefined();
+			expect(Array.isArray(helpDoc.notes)).toBe(true);
+			expect(helpDoc.notes.length).toBeGreaterThan(0);
+			
+			// Check for key implementation details
+			const notesText = helpDoc.notes.join(' ');
+			expect(notesText).toMatch(/caches transformer instances/i);
+			expect(notesText).toMatch(/URL parameters.*merged/i);
+			expect(notesText).toMatch(/JSON strings.*parsed/i);
+			expect(notesText).toMatch(/payload.*data.*parameter/i);
+		});
+
+		test("Help endpoint works with query parameters", async () => {
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/help", 
+				method: "GET",
+				query: { format: "json", verbose: "true" }
+			}), res);
+			
+			expect(res._status()).toBe(200);
+			expect(res._result().service).toBe("AI Transformer Service");
+		});
+
+		test("Help documentation has consistent structure", async () => {
+			const res = makeRes();
+			await func(prepReq({ path: "/help" }), res);
+			
+			const helpDoc = res._result();
+			
+			// Required top-level properties
+			expect(helpDoc).toHaveProperty('service');
+			expect(helpDoc).toHaveProperty('description');
+			expect(helpDoc).toHaveProperty('version');
+			expect(helpDoc).toHaveProperty('endpoints');
+			expect(helpDoc).toHaveProperty('examples');
+			expect(helpDoc).toHaveProperty('curl_examples');
+			expect(helpDoc).toHaveProperty('notes');
+			expect(helpDoc).toHaveProperty('runId');
+			
+			// Endpoints should have consistent structure
+			Object.values(helpDoc.endpoints).forEach(endpoint => {
+				expect(endpoint).toHaveProperty('methods');
+				expect(endpoint).toHaveProperty('description');
+				expect(Array.isArray(endpoint.methods)).toBe(true);
+			});
+		});
+	});
+
+	describe("Authentication", () => {
+		test("Main endpoint requires authentication", async () => {
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				body: { payload: { test: 123 } } // No code_phrase
+			}), res);
+			
+			expect(res._status()).toBe(401);
+			expect(res._result().error).toMatch(/unauthorized/i);
+			expect(res._result().hint).toMatch(/code_phrase/i);
+		});
+
+		test("Main endpoint allows access with correct code_phrase in body", async () => {
+			const payload = { test: 456 };
+			mockMessage.mockResolvedValue({ transformed: payload });
+			
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				body: { 
+					code_phrase: CODE_PHRASE,
+					payload 
+				}
+			}), res);
+			
+			expect(res._status()).toBe(200);
+			expect(mockMessage).toHaveBeenCalledWith(payload);
+		});
+
+		test("Main endpoint allows access with correct CODE_PHRASE in body", async () => {
+			const payload = { test: 789 };
+			mockMessage.mockResolvedValue({ transformed: payload });
+			
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				body: { 
+					CODE_PHRASE: CODE_PHRASE,
+					payload 
+				}
+			}), res);
+			
+			expect(res._status()).toBe(200);
+			expect(mockMessage).toHaveBeenCalledWith(payload);
+		});
+
+		test("Main endpoint allows access with code in URL parameters", async () => {
+			const payload = { test: 101112 };
+			mockMessage.mockResolvedValue({ transformed: payload });
+			
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				query: { code_phrase: CODE_PHRASE },
+				body: { code_phrase: CODE_PHRASE, payload }
+			}), res);
+			
+			expect(res._status()).toBe(200);
+			expect(mockMessage).toHaveBeenCalledWith(payload);
+		});
+
+		test("Main endpoint supports alternative auth parameter names", async () => {
+			const payload = { test: 131415 };
+			mockMessage.mockResolvedValue({ transformed: payload });
+			
+			// Test 'code' parameter
+			const res1 = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				body: { 
+					code: CODE_PHRASE,
+					payload 
+				}
+			}), res1);
+			expect(res1._status()).toBe(200);
+			
+			// Test 'auth' parameter
+			const res2 = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				body: { 
+					auth: CODE_PHRASE,
+					payload 
+				}
+			}), res2);
+			expect(res2._status()).toBe(200);
+		});
+
+		test("Main endpoint rejects wrong code_phrase", async () => {
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				body: { 
+					code_phrase: 'wrong-secret',
+					payload: { test: 123 } 
+				}
+			}), res);
+			
+			expect(res._status()).toBe(401);
+			expect(res._result().error).toMatch(/unauthorized/i);
+		});
+
+		test("Body auth takes precedence over URL auth", async () => {
+			const payload = { test: 161718 };
+			mockMessage.mockResolvedValue({ transformed: payload });
+			
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				query: { code_phrase: 'wrong-key' },
+				body: { 
+					code_phrase: CODE_PHRASE, // Correct one in body
+					payload 
+				}
+			}), res);
+			
+			expect(res._status()).toBe(200);
+			expect(mockMessage).toHaveBeenCalledWith(payload);
+		});
+
+		test("/health endpoint bypasses authentication", async () => {
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/health",
+				method: "GET"
+				// No code_phrase provided
+			}), res);
+			
+			expect(res._status()).toBe(200);
+			expect(res._result().status).toBe("ok");
+		});
+
+		test("/help endpoint bypasses authentication", async () => {
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/help",
+				method: "GET"
+				// No code_phrase provided
+			}), res);
+			
+			expect(res._status()).toBe(200);
+			expect(res._result().service).toBe("AI Transformer Service");
+		});
+
+		test("Authentication failure logs include runId", async () => {
+			const res = makeRes();
+			await func(prepReq({ 
+				path: "/", 
+				method: "POST",
+				body: { payload: { test: 123 } } // No auth
+			}), res);
+			
+			expect(res._status()).toBe(401);
+			expect(res._result().runId).toBeDefined();
+			expect(typeof res._result().runId).toBe('string');
+		});
+	});
+
 	describe("Root endpoint - GET requests", () => {
 		test("GET / without payload returns service info", async () => {
 			const res = makeRes();
-			await func(prepReq({ path: "/", method: "GET" }), res);
+			await func(prepReq({ 
+				path: "/", 
+				method: "GET",
+				query: { code_phrase: CODE_PHRASE }
+			}), res);
 			expect(res._status()).toBe(200);
 			expect(res._result().message).toBe("AI Transformer Service");
 			expect(res._result().usage).toMatch(/POST with payload/);
@@ -89,7 +466,11 @@ describe("Cloud Function - Simplified API", () => {
 			await func(prepReq({ 
 				path: "/", 
 				method: "GET",
-				query: { modelName: "gemini-2.0-flash", temperature: "0.5" }
+				query: { 
+					code_phrase: CODE_PHRASE,
+					modelName: "gemini-2.0-flash", 
+					temperature: "0.5" 
+				}
 			}), res);
 			expect(res._status()).toBe(200);
 			expect(res._result().message).toBe("AI Transformer Service");
@@ -105,7 +486,7 @@ describe("Cloud Function - Simplified API", () => {
 			await func(prepReq({ 
 				path: "/", 
 				method: "POST",
-				body: { payload }
+				body: { code_phrase: CODE_PHRASE, payload }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -123,7 +504,7 @@ describe("Cloud Function - Simplified API", () => {
 			await func(prepReq({ 
 				path: "/", 
 				method: "POST",
-				body: { data }
+				body: { code_phrase: CODE_PHRASE, data }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -142,7 +523,7 @@ describe("Cloud Function - Simplified API", () => {
 			await func(prepReq({ 
 				path: "/", 
 				method: "POST",
-				body: { payload, ...options }
+				body: { code_phrase: CODE_PHRASE, payload, ...options }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -159,7 +540,7 @@ describe("Cloud Function - Simplified API", () => {
 			await func(prepReq({ 
 				path: "/", 
 				method: "POST",
-				body: { payload, examples }
+				body: { code_phrase: CODE_PHRASE, payload, examples }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -177,7 +558,7 @@ describe("Cloud Function - Simplified API", () => {
 			await func(prepReq({ 
 				path: "/", 
 				method: "POST",
-				body: { payload, exampleData }
+				body: { code_phrase: CODE_PHRASE, payload, exampleData }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -198,7 +579,7 @@ describe("Cloud Function - Simplified API", () => {
 					temperature: "0.3",
 					examples: JSON.stringify([{ PROMPT: { a: 1 }, ANSWER: { b: 2 } }])
 				},
-				body: { payload }
+				body: { code_phrase: CODE_PHRASE, payload }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -346,7 +727,7 @@ describe("Cloud Function - Simplified API", () => {
 				path: "/", 
 				method: "POST",
 				query: { id: "url-id" },
-				body: { payload }
+				body: { code_phrase: CODE_PHRASE, payload }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -367,7 +748,7 @@ describe("Cloud Function - Simplified API", () => {
 				query: { 
 					examples: JSON.stringify([complexExample])
 				},
-				body: { payload }
+				body: { code_phrase: CODE_PHRASE, payload }
 			}), res);
 			
 			expect(res._status()).toBe(200);
@@ -384,7 +765,7 @@ describe("Cloud Function - Simplified API", () => {
 				query: { 
 					invalidJson: "{ invalid json }"
 				},
-				body: { payload }
+				body: { code_phrase: CODE_PHRASE, payload }
 			}), res);
 			
 			// Should not crash, just treat as string

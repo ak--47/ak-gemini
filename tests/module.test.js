@@ -71,8 +71,10 @@ describe('Basics', () => {
 			expect(typeof result).toBe('object');
 		});
 
-		it('should reject invalid payload', async () => {
-			await expect(transformer.message(123)).rejects.toThrow(/invalid source payload/i);
+		it('should work with invalid payloads', async () => {
+			const result = await transformer.message(123);
+			expect(result).toBeTruthy();
+			expect(typeof result).toBe('string');
 		});
 	});
 

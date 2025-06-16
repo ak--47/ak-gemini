@@ -18,7 +18,7 @@
 //env
 import dotenv from 'dotenv';
 dotenv.config();
-const { NODE_ENV = "unknown", GEMINI_API_KEY } = process.env;
+const { NODE_ENV = "unknown", GEMINI_API_KEY, LOG_LEVEL = "" } = process.env;
 
 
 
@@ -32,6 +32,11 @@ export { log };
 if (NODE_ENV === 'dev') log.level = 'debug';
 if (NODE_ENV === 'test') log.level = 'warn';
 if (NODE_ENV.startsWith('prod')) log.level = 'error';
+
+if (LOG_LEVEL) {
+	log.level = LOG_LEVEL;
+	log.debug(`Setting log level to ${LOG_LEVEL}`);
+}
 
 
 
