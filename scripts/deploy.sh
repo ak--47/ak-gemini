@@ -2,6 +2,20 @@
 
 set -euo pipefail
 
+# Load environment variables from .env
+if [ -f .env ]; then
+    export "$(grep -v '^#' .env | xargs)"
+fi
+
+# Generate env.yaml from environment variables
+cat > env.yaml << EOF
+# Generated from .env - DO NOT CHECK IN THIS FILE
+NODE_ENV: "production"
+GEMINI_API_KEY: "${GEMINI_API_KEY}"
+LOG_LEVEL: "info"
+CODE_PHRASE: "${CODE_PHRASE}"
+EOF
+
 cp package.json package.deploy.json
 jq '.main = "function.js"' package.deploy.json > package.json
 

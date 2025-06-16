@@ -2,19 +2,25 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... transforms",
-	"version": "1.0.54",
+	"version": "1.0.55",
 	"main": "index.js",
 	"files": [
 		"index.js",
 		"index.cjs",
-		"types.ts",
+		"types.d.ts",
 		"logger.js"
 	],
 	"types": "types.d.ts",
 	"exports": {
 		".": {
-			"import": "./index.js",
-			"require": "./index.cjs"
+			"import": {
+				"types": "./types.d.ts",
+				"default": "./index.js"
+			},
+			"require": {
+				"types": "./types.d.ts",
+				"default": "./index.cjs"
+			}
 		}
 	},
 	"repository": {
@@ -36,6 +42,11 @@
 		"update-deps": "npx npm-check-updates -u && npm install",
 		"prune": "rm -rf tmp/*",
 		"test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js",
+		"test:all": "./scripts/test-all.sh",
+		"test:integration": "./scripts/test-local.sh",
+		"test:unit": "npm test -- tests/module.test.js",
+		"test:function": "npm test -- tests/function.integration.test.js",
+		"test:http": "npm test -- tests/function.http.test.js",
 		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:ak-tools --external:dotenv --external:pino-pretty --external:pino"
 	},
 	"type": "module",
