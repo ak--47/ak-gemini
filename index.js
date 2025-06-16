@@ -196,6 +196,15 @@ async function initChat(force = false) {
 		history: [],
 	});
 
+	try {
+		await this.genAIClient.models.list();
+		log.debug("Gemini API connection successful.");
+	} catch (e) {
+		throw new Error(`Gemini chat initialization failed: ${e.message}`);
+	}
+
+
+
 	log.debug("Gemini chat session initialized.");
 }
 
@@ -218,7 +227,18 @@ async function seedWithExamples(examples) {
 			catch (err) {
 				throw new Error(`Could not load examples from file: ${this.examplesFile}. Please check the file path and format.`);
 			}
-		} else {
+		}
+
+		else if (this.exampleData) {
+			log.debug(`Using example data provided in options.`);
+			if (Array.isArray(this.exampleData)) {
+				examples = this.exampleData;
+			} else {
+				throw new Error(`Invalid example data provided. Expected an array of examples.`);
+			}
+		}
+
+		else {
 			log.debug("No examples provided and no examples file specified. Skipping seeding.");
 			return;
 		}
@@ -267,8 +287,9 @@ async function seedWithExamples(examples) {
 
 	}
 
-	const currentHistory = this?.chat?.getHistory() || [];
 
+	const currentHistory = this?.chat?.getHistory() || [];
+	log.debug(`Adding ${historyToAdd.length} examples to chat history (${currentHistory.length} current examples)...`);
 	this.chat = await this.genAIClient.chats.create({
 		model: this.modelName,
 		// @ts-ignore
@@ -276,9 +297,10 @@ async function seedWithExamples(examples) {
 		history: [...currentHistory, ...historyToAdd],
 	});
 
-	log.debug("Transformation examples seeded successfully.");
 
-	return this.chat.getHistory(); // Return the updated chat history for reference
+	const newHistory = this.chat.getHistory();
+	log.debug(`Created new chat session with ${newHistory.length} examples.`);
+	return newHistory;
 }
 
 /**
@@ -346,7 +368,14 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
 		lastPayload = JSON.stringify(sourcePayload, null, 2);
 	} else if (typeof sourcePayload === 'string') {
 		lastPayload = sourcePayload;
-	} else {
+	}
+	else if (typeof sourcePayload === 'boolean' || typeof sourcePayload === 'number') {
+		lastPayload = sourcePayload.toString();
+	}
+	else if (sourcePayload === null || sourcePayload === undefined) {
+		lastPayload = JSON.stringify({}); // Convert null/undefined to empty object
+	}
+	else {
 		throw new Error("Invalid source payload. Must be a JSON object or string.");
 	}
 

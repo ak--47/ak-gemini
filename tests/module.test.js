@@ -1352,7 +1352,7 @@ describe('Response Schema', () => {
 });
 
 
-describe('Missing Test Coverage - Constructor Validation', () => {
+describe('Constructor Validation', () => {
     it('should throw error when promptKey and answerKey are identical', () => {
         expect(() => new AITransformer({
             ...BASE_OPTIONS,
@@ -1409,7 +1409,7 @@ describe('Missing Test Coverage - Constructor Validation', () => {
 });
 
 
-describe('Missing Test Coverage - Initialization Edge Cases', () => {
+describe('Initialization Edge Cases', () => {
     it('should handle init with force=true parameter', async () => {
         const transformer = new AITransformer({ ...BASE_OPTIONS });
         await transformer.init();
@@ -1430,7 +1430,7 @@ describe('Missing Test Coverage - Initialization Edge Cases', () => {
 });
 
 
-describe('Missing Test Coverage - Message Processing', () => {
+describe('Message Processing', () => {
     let transformer;
     
     beforeEach(async () => {
@@ -1486,7 +1486,7 @@ describe('Missing Test Coverage - Message Processing', () => {
 });
 
 
-describe('Missing Test Coverage - Error Handling', () => {
+describe('Error Handling', () => {
     let transformer;
     
     beforeEach(async () => {
@@ -1505,7 +1505,7 @@ describe('Missing Test Coverage - Error Handling', () => {
             await transformer.message({ test: 'malformed' }, { maxRetries: 0 });
             expect(true).toBe(false); // Should not reach here
         } catch (error) {
-            expect(error.message).toMatch(/invalid json response/i);
+            expect(error.message).toMatch(/valid JSON from model response/i);
         }
         
         transformer.rawMessage = originalRawMessage;
@@ -1523,7 +1523,7 @@ describe('Missing Test Coverage - Error Handling', () => {
 });
 
 
-describe('Missing Test Coverage - Configuration Options', () => {
+describe('Configuration Options', () => {
     it('should handle all chatConfig properties', async () => {
         const customConfig = {
             temperature: 0.7,
@@ -1562,7 +1562,7 @@ describe('Missing Test Coverage - Configuration Options', () => {
 });
 
 
-describe('Missing Test Coverage - Validation System', () => {
+describe('Validation System', () => {
     let transformer;
     
     beforeEach(async () => {
@@ -1608,7 +1608,7 @@ describe('Missing Test Coverage - Validation System', () => {
 });
 
 
-describe('Missing Test Coverage - Edge Cases', () => {
+describe('Edge Cases', () => {
     let transformer;
     
     beforeEach(async () => {
@@ -1668,7 +1668,7 @@ describe('Missing Test Coverage - Edge Cases', () => {
 });
 
 
-describe('Missing Test Coverage - State Management', () => {
+describe('State Management', () => {
     let transformer;
     
     beforeEach(async () => {
@@ -1711,7 +1711,7 @@ describe('Missing Test Coverage - State Management', () => {
 });
 
 
-describe('Missing Test Coverage - Token Estimation', () => {
+describe('Token Estimation', () => {
     let transformer;
     
     beforeEach(async () => {
@@ -1752,7 +1752,7 @@ describe('Missing Test Coverage - Token Estimation', () => {
 });
 
 
-describe('Missing Test Coverage - Concurrent Operations', () => {
+describe('Concurrent Operations', () => {
     let transformer;
     
     beforeEach(async () => {
