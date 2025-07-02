@@ -56,10 +56,14 @@ var logger_default = logger;
 // index.js
 var import_meta = {};
 import_dotenv.default.config();
-var { NODE_ENV = "unknown", GEMINI_API_KEY } = process.env;
+var { NODE_ENV = "unknown", GEMINI_API_KEY, LOG_LEVEL = "" } = process.env;
 if (NODE_ENV === "dev") logger_default.level = "debug";
 if (NODE_ENV === "test") logger_default.level = "warn";
 if (NODE_ENV.startsWith("prod")) logger_default.level = "error";
+if (LOG_LEVEL) {
+  logger_default.level = LOG_LEVEL;
+  logger_default.debug(`Setting log level to ${LOG_LEVEL}`);
+}
 var DEFAULT_SAFETY_SETTINGS = [
   { category: import_genai.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE },
   { category: import_genai.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE }
@@ -161,6 +165,12 @@ async function initChat(force = false) {
     config: this.chatConfig,
     history: []
   });
+  try {
+    await this.genAIClient.models.list();
+    logger_default.debug("Gemini API connection successful.");
+  } catch (e) {
+    throw new Error(`Gemini chat initialization failed: ${e.message}`);
+  }
   logger_default.debug("Gemini chat session initialized.");
 }
 async function seedWithExamples(examples) {
@@ -173,14 +183,22 @@ async function seedWithExamples(examples) {
       } catch (err) {
         throw new Error(`Could not load examples from file: ${this.examplesFile}. Please check the file path and format.`);
       }
+    } else if (this.exampleData) {
+      logger_default.debug(`Using example data provided in options.`);
+      if (Array.isArray(this.exampleData)) {
+        examples = this.exampleData;
+      } else {
+        throw new Error(`Invalid example data provided. Expected an array of examples.`);
+      }
     } else {
       logger_default.debug("No examples provided and no examples file specified. Skipping seeding.");
       return;
     }
   }
-  if (examples?.slice().pop()[this.systemInstructionsKey]) {
+  const instructionExample = examples.find((ex) => ex[this.systemInstructionsKey]);
+  if (instructionExample) {
     logger_default.debug(`Found system instructions in examples; reinitializing chat with new instructions.`);
-    this.systemInstructions = examples.slice().pop()[this.systemInstructionsKey];
+    this.systemInstructions = instructionExample[this.systemInstructionsKey];
     this.chatConfig.systemInstruction = this.systemInstructions;
     await this.init(true);
   }
@@ -213,14 +231,16 @@ ${contextText}
     }
   }
   const currentHistory = this?.chat?.getHistory() || [];
+  logger_default.debug(`Adding ${historyToAdd.length} examples to chat history (${currentHistory.length} current examples)...`);
   this.chat = await this.genAIClient.chats.create({
     model: this.modelName,
     // @ts-ignore
     config: this.chatConfig,
     history: [...currentHistory, ...historyToAdd]
   });
-  logger_default.debug("Transformation examples seeded successfully.");
-  return this.chat.getHistory();
+  const newHistory = this.chat.getHistory();
+  logger_default.debug(`Created new chat session with ${newHistory.length} examples.`);
+  return newHistory;
 }
 async function rawMessage(sourcePayload) {
   if (!this.chat) {
@@ -254,6 +274,10 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
     lastPayload = JSON.stringify(sourcePayload, null, 2);
   } else if (typeof sourcePayload === "string") {
     lastPayload = sourcePayload;
+  } else if (typeof sourcePayload === "boolean" || typeof sourcePayload === "number") {
+    lastPayload = sourcePayload.toString();
+  } else if (sourcePayload === null || sourcePayload === void 0) {
+    lastPayload = JSON.stringify({});
   } else {
     throw new Error("Invalid source payload. Must be a JSON object or string.");
   }
