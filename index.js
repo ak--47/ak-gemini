@@ -120,7 +120,9 @@ class AITransformer {
 		this.reset = resetChat.bind(this);
 		this.getHistory = getChatHistory.bind(this);
 		this.messageAndValidate = prepareAndValidateMessage.bind(this);
+		this.transformWithValidation = prepareAndValidateMessage.bind(this);
 		this.estimate = estimateTokenUsage.bind(this);
+		this.estimateTokenUsage = estimateTokenUsage.bind(this);
 	}
 }
 
@@ -155,8 +157,8 @@ function AITransformFactory(options = {}) {
 	this.exampleData = options.exampleData || null; // can be used instead of examplesFile
 
 	// Use configurable keys with fallbacks
-	this.promptKey = options.promptKey || 'PROMPT';
-	this.answerKey = options.answerKey || 'ANSWER';
+	this.promptKey = options.promptKey || options.sourceKey || 'PROMPT';
+	this.answerKey = options.answerKey || options.targetKey || 'ANSWER';
 	this.contextKey = options.contextKey || 'CONTEXT'; // Optional key for context
 	this.explanationKey = options.explanationKey || 'EXPLANATION'; // Optional key for explanations
 	this.systemInstructionsKey = options.systemInstructionsKey || 'SYSTEM'; // Optional key for system instructions

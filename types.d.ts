@@ -58,8 +58,10 @@ export interface AITransformerOptions {
   chatConfig?: ChatConfig; // Configuration object for the chat session
   examplesFile?: string; // Path to JSON file containing transformation examples
   exampleData?: TransformationExample[]; // Inline examples to seed the transformer
-  sourceKey?: string; // Key name for source data in examples
-  targetKey?: string; // Key name for target data in examples
+  sourceKey?: string; // Key name for source data in examples (alias for promptKey)
+  targetKey?: string; // Key name for target data in examples (alias for answerKey)
+  promptKey?: string; // Key for the prompt in examples
+  answerKey?: string; // Key for the answer in examples
   contextKey?: string; // Key name for context data in examples
   explanationKey?: string; // Key name for explanation data in examples
   systemInstructionsKey?: string; // Key for system instructions in examples
@@ -70,14 +72,47 @@ export interface AITransformerOptions {
   apiKey?: string; // API key for Google GenAI
   onlyJSON?: boolean; // If true, only JSON responses are allowed
   asyncValidator?: AsyncValidatorFunction; // Optional async validator function for response validation
-  promptKey?: string; // Key for the prompt in examples
-  answerKey?: string; // Key for the answer in examples
-  contextKey?: string; // Key for the context in examples
-  explanationKey?: string; // Key for the explanation in examples
 }
 
 // Async validator function type
 export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<unknown>;
 
 
-export declare class AITransformer implements AITransformerContext {}
+export declare class AITransformer {
+  // Constructor
+  constructor(options?: AITransformerOptions);
+  
+  // Properties
+  modelName: string;
+  promptKey: string;
+  answerKey: string;
+  contextKey: string;
+  explanationKey: string;
+  systemInstructionKey: string;
+  maxRetries: number;
+  retryDelay: number;
+  systemInstructions: string;
+  chatConfig: ChatConfig;
+  apiKey: string;
+  onlyJSON: boolean;
+  asyncValidator: AsyncValidatorFunction | null;
+  genAIClient: any;
+  chat: any;
+  
+  // Methods
+  init(force?: boolean): Promise<void>;
+  seed(examples?: TransformationExample[]): Promise<any>;
+  message(payload: Record<string, unknown>, opts?: object, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
+  rawMessage(sourcePayload: Record<string, unknown> | string): Promise<Record<string, unknown>>;
+  transformWithValidation(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
+  messageAndValidate(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
+  rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
+  reset(): Promise<void>;
+  getHistory(): Array<any>;
+  estimateTokenUsage(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
+  estimate(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
+}
+
+// Default export
+declare const _default: typeof AITransformer;
+export default _default;

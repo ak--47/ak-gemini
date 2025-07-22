@@ -119,7 +119,9 @@ var AITransformer = class {
     this.reset = resetChat.bind(this);
     this.getHistory = getChatHistory.bind(this);
     this.messageAndValidate = prepareAndValidateMessage.bind(this);
+    this.transformWithValidation = prepareAndValidateMessage.bind(this);
     this.estimate = estimateTokenUsage.bind(this);
+    this.estimateTokenUsage = estimateTokenUsage.bind(this);
   }
 };
 var index_default = AITransformer;
@@ -138,8 +140,8 @@ function AITransformFactory(options = {}) {
   }
   this.examplesFile = options.examplesFile || null;
   this.exampleData = options.exampleData || null;
-  this.promptKey = options.promptKey || "PROMPT";
-  this.answerKey = options.answerKey || "ANSWER";
+  this.promptKey = options.promptKey || options.sourceKey || "PROMPT";
+  this.answerKey = options.answerKey || options.targetKey || "ANSWER";
   this.contextKey = options.contextKey || "CONTEXT";
   this.explanationKey = options.explanationKey || "EXPLANATION";
   this.systemInstructionsKey = options.systemInstructionsKey || "SYSTEM";
