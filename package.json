@@ -39,7 +39,8 @@
 		"prune": "rm -rf tmp/*",
 		"test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js",
 		"test:unit": "npm test -- tests/module.test.js",
-		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:ak-tools --external:dotenv --external:pino-pretty --external:pino"
+		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:ak-tools --external:dotenv --external:pino-pretty --external:pino",
+		"coverage": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js --coverage"
 	},
 	"type": "module",
 	"keywords": [

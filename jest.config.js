@@ -3,7 +3,7 @@ export default {
 	testEnvironment: 'node',
 	transform: {},
 	moduleNameMapper: {	'^(\\.{1,2}/.*)\\.js$': '$1.js'	},
-	coverageDirectory: "/tests/coverage",
+	coverageDirectory: "./coverage",
 	setupFiles: [
 		"<rootDir>/tests/jest.setup.js"
 	],
