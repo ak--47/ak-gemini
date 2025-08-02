@@ -2,7 +2,9 @@
 	"compilerOptions": {
 		"checkJs": true,
 		"allowJs": true,
-		"maxNodeModuleJsDepth": 1,
+		"declaration": true,
+		"emitDeclarationOnly": true,
+		"maxNodeModuleJsDepth": 0,
 		"target": "ESNext",
 		"module": "ESNext",
 		"moduleResolution": "Node",
@@ -12,6 +14,8 @@
 		"allowUnreachableCode": false,
 		"allowSyntheticDefaultImports": true,
 		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"noEmitOnError": false,
 		"baseUrl": ".",
 		"paths": {
 			"*": [
@@ -24,10 +28,14 @@
 		"node_modules",
 		"dist",
 		"build",
-		"coverage"
+		"coverage",
+		"tests/**/*",
+		"**/*.test.js",
+		"node_modules/ak-tools/**/*"
 	],
 	"include": [
-		"**/*.js",
-		"**/*.mjs"
+		"index.js",
+		"logger.js",
+		"types.d.ts"
 	]
 }

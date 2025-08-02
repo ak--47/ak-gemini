@@ -31,20 +31,25 @@ export interface AITransformerContext {
   systemInstructionsKey?: string;
   maxRetries?: number;
   retryDelay?: number;
-  init?: () => Promise<void>; // Initialization function
+  init?: (force?: boolean) => Promise<void>; // Initialization function
   seed?: () => Promise<void>; // Function to seed the transformer with examples  
   message?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send messages to the model
-  rebuild?: () => Promise<Record<string, unknown>; // Function to rebuild the transformer
-  rawMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
+  rebuild?: (lastPayload: Record<string, unknown>, serverError: string) => Promise<Record<string, unknown>>; // Function to rebuild the transformer
+  rawMessage?: (payload: Record<string, unknown> | string) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
   genAIClient?: GoogleGenAI; // Google GenAI client instance
   onlyJSON?: boolean; // If true, only JSON responses are allowed
   
 }
 
 export interface TransformationExample {
-  CONTEXT?: Record<string, unknown>; // optional context for the transformation
+  CONTEXT?: Record<string, unknown> | string; // optional context for the transformation
   PROMPT?: Record<string, unknown>; // what the user provides as input
   ANSWER?: Record<string, unknown>; // what the model should return as output
+  INPUT?: Record<string, unknown>; // alias for PROMPT
+  OUTPUT?: Record<string, unknown>; // alias for ANSWER
+  SYSTEM?: string; // system instructions for this example
+  EXPLANATION?: string; // explanation for this example
+  [key: string]: any; // allow additional properties for flexible key mapping
 }
 
 export interface ExampleFileContent {
@@ -103,7 +108,7 @@ export declare class AITransformer {
   init(force?: boolean): Promise<void>;
   seed(examples?: TransformationExample[]): Promise<any>;
   message(payload: Record<string, unknown>, opts?: object, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
-  rawMessage(sourcePayload: Record<string, unknown> | string): Promise<Record<string, unknown>>;
+  rawMessage(sourcePayload: Record<string, unknown> | string): Promise<Record<string, unknown> | any>;
   transformWithValidation(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
   messageAndValidate(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
   rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
