@@ -229,6 +229,7 @@ async function seedWithExamples(examples) {
 		if (this.examplesFile) {
 			log.debug(`No examples provided, loading from file: ${this.examplesFile}`);
 			try {
+				// @ts-ignore
 				examples = await u.load(path.resolve(this.examplesFile), true);
 			}
 			catch (err) {
