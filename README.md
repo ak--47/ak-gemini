@@ -7,7 +7,7 @@ Use this to power LLM-driven data pipelines, JSON mapping, or any automated AI t
 
 ## Features
 
-* **Model-Agnostic:** Use any Gemini model (`gemini-2.0-flash` by default)
+* **Model-Agnostic:** Use any Gemini model (`gemini-2.5-flash` by default)
 * **Declarative Few-shot Examples:** Seed transformations using example mappings, with support for custom keys (`PROMPT`, `ANSWER`, `CONTEXT`, or your own)
 * **Automatic Validation & Repair:** Validate outputs with your own async function; auto-repair failed payloads with LLM feedback loop (exponential backoff, fully configurable)
 * **Token Counting & Safety:** Preview the *exact* Gemini token consumption for any operation—including all examples, instructions, and your input—before sending, so you can avoid window errors and manage costs.
@@ -47,7 +47,7 @@ or pass it directly in the constructor options.
 import AITransformer from 'ak-gemini';
 
 const transformer = new AITransformer({
-  modelName: 'gemini-2.0-flash',    // or your preferred Gemini model
+  modelName: 'gemini-2.5-flash',    // or your preferred Gemini model
   sourceKey: 'INPUT',               // Custom prompt key (default: 'PROMPT')
   targetKey: 'OUTPUT',              // Custom answer key (default: 'ANSWER')
   contextKey: 'CONTEXT',            // Optional, for per-example context
@@ -116,7 +116,7 @@ new AITransformer(options)
 
 | Option             | Type   | Default            | Description                                       |
 | ------------------ | ------ | ------------------ | ------------------------------------------------- |
-| modelName          | string | 'gemini-2.0-flash' | Gemini model to use                               |
+| modelName          | string | 'gemini-2.5-flash' | Gemini model to use                               |
 | sourceKey          | string | 'PROMPT'           | Key for prompt/example input                      |
 | targetKey          | string | 'ANSWER'           | Key for expected output in examples               |
 | contextKey         | string | 'CONTEXT'          | Key for per-example context (optional)            |
@@ -125,6 +125,7 @@ new AITransformer(options)
 | responseSchema     | object | null               | Optional JSON schema for strict output validation |
 | maxRetries         | number | 3                  | Retries for validation+rebuild loop               |
 | retryDelay         | number | 1000               | Initial retry delay in ms (exponential backoff)   |
+| logLevel           | string | 'info'             | Log level: 'trace', 'debug', 'info', 'warn', 'error', 'fatal', or 'none' |
 | chatConfig         | object | ...                | Gemini chat config overrides                      |
 | systemInstructions | string | ...                | System prompt for Gemini                          |
 

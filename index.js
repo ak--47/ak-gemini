@@ -29,15 +29,6 @@ import path from 'path';
 import log from './logger.js';
 export { log };
 
-if (NODE_ENV === 'dev') log.level = 'debug';
-if (NODE_ENV === 'test') log.level = 'warn';
-if (NODE_ENV.startsWith('prod')) log.level = 'error';
-
-if (LOG_LEVEL) {
-	log.level = LOG_LEVEL;
-	log.debug(`Setting log level to ${LOG_LEVEL}`);
-}
-
 
 
 // defaults
@@ -101,6 +92,7 @@ class AITransformer {
 		this.apiKey = GEMINI_API_KEY;
 		this.onlyJSON = true; // always return JSON
 		this.asyncValidator = null; // for transformWithValidation
+		this.logLevel = 'info'; // default log level
 		AITransformFactory.call(this, options);
 
 		//external API
@@ -135,8 +127,37 @@ export default AITransformer;
  */
 function AITransformFactory(options = {}) {
 	// ? https://ai.google.dev/gemini-api/docs/models
-	this.modelName = options.modelName || 'gemini-2.0-flash';
+	this.modelName = options.modelName || 'gemini-2.5-flash';
 	this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
+
+	// Configure log level - priority: options.logLevel > LOG_LEVEL env > NODE_ENV based defaults > 'info'
+	if (options.logLevel) {
+		this.logLevel = options.logLevel;
+		if (this.logLevel === 'none') {
+			// Set to silent to disable all logging
+			log.level = 'silent';
+		} else {
+			// Set the log level as specified
+			log.level = this.logLevel;
+		}
+	} else if (LOG_LEVEL) {
+		// Use environment variable if no option specified
+		this.logLevel = LOG_LEVEL;
+		log.level = LOG_LEVEL;
+	} else if (NODE_ENV === 'dev') {
+		this.logLevel = 'debug';
+		log.level = 'debug';
+	} else if (NODE_ENV === 'test') {
+		this.logLevel = 'warn';
+		log.level = 'warn';
+	} else if (NODE_ENV.startsWith('prod')) {
+		this.logLevel = 'error';
+		log.level = 'error';
+	} else {
+		// Default to info
+		this.logLevel = 'info';
+		log.level = 'info';
+	}
 
 	this.apiKey = options.apiKey !== undefined && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
 	if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
@@ -177,8 +198,10 @@ function AITransformFactory(options = {}) {
 		throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
 	}
 
-	log.debug(`Creating AI Transformer with model: ${this.modelName}`);
-	log.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+	if (log.level !== 'silent') {
+		log.debug(`Creating AI Transformer with model: ${this.modelName}`);
+		log.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+	}
 
 	const ai = new GoogleGenAI({ apiKey: this.apiKey });
 	this.genAIClient = ai;
@@ -708,7 +731,7 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 			try {
 				log.info("Initializing AI Transformer...");
 				const transformer = new AITransformer({
-					modelName: 'gemini-2.0-flash',
+					modelName: 'gemini-2.5-flash',
 					sourceKey: 'INPUT', // Custom source key
 					targetKey: 'OUTPUT', // Custom target key
 					contextKey: 'CONTEXT', // Custom context key

@@ -126,7 +126,7 @@ var AITransformer = class {
 };
 var index_default = AITransformer;
 function AITransformFactory(options = {}) {
-  this.modelName = options.modelName || "gemini-2.0-flash";
+  this.modelName = options.modelName || "gemini-2.5-flash";
   this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
   this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
   if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
@@ -501,7 +501,7 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
     try {
       logger_default.info("Initializing AI Transformer...");
       const transformer = new AITransformer({
-        modelName: "gemini-2.0-flash",
+        modelName: "gemini-2.5-flash",
         sourceKey: "INPUT",
         // Custom source key
         targetKey: "OUTPUT",

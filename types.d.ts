@@ -73,10 +73,11 @@ export interface AITransformerOptions {
   maxRetries?: number; // Maximum retry attempts for auto-retry functionality
   retryDelay?: number; // Initial retry delay in milliseconds
   // ? https://ai.google.dev/gemini-api/docs/structured-output
-  responseSchema?: Object; // Schema for validating model responses 
+  responseSchema?: Object; // Schema for validating model responses
   apiKey?: string; // API key for Google GenAI
   onlyJSON?: boolean; // If true, only JSON responses are allowed
   asyncValidator?: AsyncValidatorFunction; // Optional async validator function for response validation
+  logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none'; // Log level for the logger (defaults to 'info', 'none' disables logging)
 }
 
 // Async validator function type
@@ -86,7 +87,7 @@ export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promi
 export declare class AITransformer {
   // Constructor
   constructor(options?: AITransformerOptions);
-  
+
   // Properties
   modelName: string;
   promptKey: string;
@@ -103,6 +104,7 @@ export declare class AITransformer {
   asyncValidator: AsyncValidatorFunction | null;
   genAIClient: any;
   chat: any;
+  logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
   
   // Methods
   init(force?: boolean): Promise<void>;

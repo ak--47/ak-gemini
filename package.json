@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... transforms",
-	"version": "1.0.59",
+	"version": "1.0.6",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -51,8 +51,8 @@
 	],
 	"license": "ISC",
 	"dependencies": {
-		"@google/genai": "^1.4.0",
-		"ak-tools": "^1.1.1",
+		"@google/genai": "^1.25.0",
+		"ak-tools": "^1.1.12",
 		"dotenv": "^16.5.0",
 		"pino": "^9.7.0",
 		"pino-pretty": "^13.0.0"
