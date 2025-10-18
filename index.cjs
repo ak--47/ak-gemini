@@ -57,13 +57,6 @@ var logger_default = logger;
 var import_meta = {};
 import_dotenv.default.config();
 var { NODE_ENV = "unknown", GEMINI_API_KEY, LOG_LEVEL = "" } = process.env;
-if (NODE_ENV === "dev") logger_default.level = "debug";
-if (NODE_ENV === "test") logger_default.level = "warn";
-if (NODE_ENV.startsWith("prod")) logger_default.level = "error";
-if (LOG_LEVEL) {
-  logger_default.level = LOG_LEVEL;
-  logger_default.debug(`Setting log level to ${LOG_LEVEL}`);
-}
 var DEFAULT_SAFETY_SETTINGS = [
   { category: import_genai.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE },
   { category: import_genai.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE }
@@ -108,6 +101,7 @@ var AITransformer = class {
     this.apiKey = GEMINI_API_KEY;
     this.onlyJSON = true;
     this.asyncValidator = null;
+    this.logLevel = "info";
     AITransformFactory.call(this, options);
     this.init = initChat.bind(this);
     this.seed = seedWithExamples.bind(this);
@@ -128,6 +122,29 @@ var index_default = AITransformer;
 function AITransformFactory(options = {}) {
   this.modelName = options.modelName || "gemini-2.5-flash";
   this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
+  if (options.logLevel) {
+    this.logLevel = options.logLevel;
+    if (this.logLevel === "none") {
+      logger_default.level = "silent";
+    } else {
+      logger_default.level = this.logLevel;
+    }
+  } else if (LOG_LEVEL) {
+    this.logLevel = LOG_LEVEL;
+    logger_default.level = LOG_LEVEL;
+  } else if (NODE_ENV === "dev") {
+    this.logLevel = "debug";
+    logger_default.level = "debug";
+  } else if (NODE_ENV === "test") {
+    this.logLevel = "warn";
+    logger_default.level = "warn";
+  } else if (NODE_ENV.startsWith("prod")) {
+    this.logLevel = "error";
+    logger_default.level = "error";
+  } else {
+    this.logLevel = "info";
+    logger_default.level = "info";
+  }
   this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
   if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
   this.chatConfig = {
@@ -152,8 +169,10 @@ function AITransformFactory(options = {}) {
   if (this.promptKey === this.answerKey) {
     throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
   }
-  logger_default.debug(`Creating AI Transformer with model: ${this.modelName}`);
-  logger_default.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+  if (logger_default.level !== "silent") {
+    logger_default.debug(`Creating AI Transformer with model: ${this.modelName}`);
+    logger_default.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+  }
   const ai = new import_genai.GoogleGenAI({ apiKey: this.apiKey });
   this.genAIClient = ai;
   this.chat = null;
