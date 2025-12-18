@@ -1079,7 +1079,7 @@ describe('Advanced Options + Configs', () => {
 		});
 		await transformer.init();
 
-		const result = await transformer.message("What is this?");
+		const result = await transformer.message("just say test");
 		expect(result).toBe('test');
 	});
 
