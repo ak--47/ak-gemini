@@ -1,6 +1,6 @@
-import type { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import type { GoogleGenAI, ThinkingLevel, HarmCategory, HarmBlockThreshold } from '@google/genai';
 
-export { ThinkingLevel };
+export { ThinkingLevel, HarmCategory, HarmBlockThreshold };
 
 export interface ThinkingConfig {
   /** Indicates whether to include thoughts in the response. If true, thoughts are returned only if the model supports thought and thoughts are available. */
@@ -12,8 +12,8 @@ export interface ThinkingConfig {
 }
 
 export interface SafetySetting {
-  category: string; // The harm category
-  threshold: string; // The blocking threshold
+  category: HarmCategory; // The harm category
+  threshold: HarmBlockThreshold; // The blocking threshold
 }
 
 export interface ChatConfig {
@@ -51,7 +51,9 @@ export interface AITransformerContext {
   rawMessage?: (payload: Record<string, unknown> | string) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
   genAIClient?: GoogleGenAI; // Google GenAI client instance
   onlyJSON?: boolean; // If true, only JSON responses are allowed
-  
+  enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
+  groundingConfig?: Record<string, any>; // Additional grounding configuration options
+
 }
 
 export interface TransformationExample {
@@ -93,6 +95,8 @@ export interface AITransformerOptions {
   onlyJSON?: boolean; // If true, only JSON responses are allowed
   asyncValidator?: AsyncValidatorFunction; // Optional async validator function for response validation
   logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none'; // Log level for the logger (defaults to 'info', 'none' disables logging)
+  enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
+  groundingConfig?: Record<string, any>; // Additional grounding configuration options
 }
 
 // Async validator function type
@@ -120,6 +124,8 @@ export declare class AITransformer {
   genAIClient: any;
   chat: any;
   logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
+  enableGrounding: boolean;
+  groundingConfig: Record<string, any>;
   
   // Methods
   init(force?: boolean): Promise<void>;

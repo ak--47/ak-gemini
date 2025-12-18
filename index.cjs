@@ -221,6 +221,8 @@ function AITransformFactory(options = {}) {
   this.retryDelay = options.retryDelay || 1e3;
   this.asyncValidator = options.asyncValidator || null;
   this.onlyJSON = options.onlyJSON !== void 0 ? options.onlyJSON : true;
+  this.enableGrounding = options.enableGrounding || false;
+  this.groundingConfig = options.groundingConfig || {};
   if (this.promptKey === this.answerKey) {
     throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
   }
@@ -228,6 +230,8 @@ function AITransformFactory(options = {}) {
     logger_default.debug(`Creating AI Transformer with model: ${this.modelName}`);
     logger_default.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
     logger_default.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
+    logger_default.debug(`Using API key: ${this.apiKey.substring(0, 10)}...`);
+    logger_default.debug(`Grounding ${this.enableGrounding ? "ENABLED" : "DISABLED"} (costs $35/1k queries)`);
   }
   const ai = new import_genai.GoogleGenAI({ apiKey: this.apiKey });
   this.genAIClient = ai;
@@ -236,12 +240,19 @@ function AITransformFactory(options = {}) {
 async function initChat(force = false) {
   if (this.chat && !force) return;
   logger_default.debug(`Initializing Gemini chat session with model: ${this.modelName}...`);
-  this.chat = await this.genAIClient.chats.create({
+  const chatOptions = {
     model: this.modelName,
     // @ts-ignore
     config: this.chatConfig,
     history: []
-  });
+  };
+  if (this.enableGrounding) {
+    chatOptions.config.tools = [{
+      googleSearch: this.groundingConfig
+    }];
+    logger_default.debug(`Search grounding ENABLED for this session (WARNING: costs $35/1k queries)`);
+  }
+  this.chat = await this.genAIClient.chats.create(chatOptions);
   try {
     await this.genAIClient.models.list();
     logger_default.debug("Gemini API connection successful.");
@@ -345,6 +356,32 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
   }
   const maxRetries = options.maxRetries ?? this.maxRetries;
   const retryDelay = options.retryDelay ?? this.retryDelay;
+  const enableGroundingForMessage = options.enableGrounding ?? this.enableGrounding;
+  const groundingConfigForMessage = options.groundingConfig ?? this.groundingConfig;
+  if (enableGroundingForMessage !== this.enableGrounding) {
+    const originalGrounding = this.enableGrounding;
+    const originalConfig = this.groundingConfig;
+    try {
+      this.enableGrounding = enableGroundingForMessage;
+      this.groundingConfig = groundingConfigForMessage;
+      await this.init(true);
+      if (enableGroundingForMessage) {
+        logger_default.warn(`Search grounding ENABLED for this message (WARNING: costs $35/1k queries)`);
+      } else {
+        logger_default.debug(`Search grounding DISABLED for this message`);
+      }
+    } catch (error) {
+      this.enableGrounding = originalGrounding;
+      this.groundingConfig = originalConfig;
+      throw error;
+    }
+    const restoreGrounding = async () => {
+      this.enableGrounding = originalGrounding;
+      this.groundingConfig = originalConfig;
+      await this.init(true);
+    };
+    options._restoreGrounding = restoreGrounding;
+  }
   let lastError = null;
   let lastPayload = null;
   if (sourcePayload && isJSON(sourcePayload)) {
@@ -366,12 +403,18 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
         await validatorFn(transformedPayload);
       }
       logger_default.debug(`Transformation succeeded on attempt ${attempt + 1}`);
+      if (options._restoreGrounding) {
+        await options._restoreGrounding();
+      }
       return transformedPayload;
     } catch (error) {
       lastError = error;
       logger_default.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
       if (attempt >= maxRetries) {
         logger_default.error(`All ${maxRetries + 1} attempts failed.`);
+        if (options._restoreGrounding) {
+          await options._restoreGrounding();
+        }
         throw new Error(`Transformation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
       }
       const delay = retryDelay * Math.pow(2, attempt);
@@ -430,12 +473,19 @@ async function estimateTokenUsage(nextPayload) {
 async function resetChat() {
   if (this.chat) {
     logger_default.debug("Resetting Gemini chat session...");
-    this.chat = await this.genAIClient.chats.create({
+    const chatOptions = {
       model: this.modelName,
       // @ts-ignore
       config: this.chatConfig,
       history: []
-    });
+    };
+    if (this.enableGrounding) {
+      chatOptions.config.tools = [{
+        googleSearch: this.groundingConfig
+      }];
+      logger_default.debug(`Search grounding preserved during reset (WARNING: costs $35/1k queries)`);
+    }
+    this.chat = await this.genAIClient.chats.create(chatOptions);
     logger_default.debug("Chat session reset.");
   } else {
     logger_default.warn("Cannot reset chat session: chat not yet initialized.");
