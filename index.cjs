@@ -30,6 +30,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var index_exports = {};
 __export(index_exports, {
   ThinkingLevel: () => import_genai.ThinkingLevel,
+  attemptJSONRecovery: () => attemptJSONRecovery,
   default: () => index_default,
   log: () => logger_default
 });
@@ -79,6 +80,7 @@ var DEFAULT_THINKING_CONFIG = {
   thinkingBudget: 0,
   thinkingLevel: import_genai.ThinkingLevel.MINIMAL
 };
+var DEFAULT_MAX_OUTPUT_TOKENS = 1e5;
 var THINKING_SUPPORTED_MODELS = [
   /^gemini-3-flash(-preview)?$/,
   /^gemini-3-pro(-preview|-image-preview)?$/,
@@ -166,21 +168,43 @@ function AITransformFactory(options = {}) {
     ...options.chatConfig,
     systemInstruction: this.systemInstructions
   };
+  if (options.maxOutputTokens !== void 0) {
+    if (options.maxOutputTokens === null) {
+      delete this.chatConfig.maxOutputTokens;
+    } else {
+      this.chatConfig.maxOutputTokens = options.maxOutputTokens;
+    }
+  } else if (options.chatConfig?.maxOutputTokens !== void 0) {
+    if (options.chatConfig.maxOutputTokens === null) {
+      delete this.chatConfig.maxOutputTokens;
+    } else {
+      this.chatConfig.maxOutputTokens = options.chatConfig.maxOutputTokens;
+    }
+  } else {
+    this.chatConfig.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+  }
   const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some(
     (pattern) => pattern.test(this.modelName)
   );
-  if (modelSupportsThinking && options.thinkingConfig) {
-    const thinkingConfig = {
-      ...DEFAULT_THINKING_CONFIG,
-      ...options.thinkingConfig
-    };
-    this.chatConfig.thinkingConfig = thinkingConfig;
-    if (logger_default.level !== "silent") {
-      logger_default.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
-    }
-  } else if (options.thinkingConfig && !modelSupportsThinking) {
-    if (logger_default.level !== "silent") {
-      logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+  if (options.thinkingConfig !== void 0) {
+    if (options.thinkingConfig === null) {
+      delete this.chatConfig.thinkingConfig;
+      if (logger_default.level !== "silent") {
+        logger_default.debug(`thinkingConfig set to null - removed from configuration`);
+      }
+    } else if (modelSupportsThinking) {
+      const thinkingConfig = {
+        ...DEFAULT_THINKING_CONFIG,
+        ...options.thinkingConfig
+      };
+      this.chatConfig.thinkingConfig = thinkingConfig;
+      if (logger_default.level !== "silent") {
+        logger_default.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
+      }
+    } else {
+      if (logger_default.level !== "silent") {
+        logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+      }
     }
   }
   if (options.responseSchema) {
@@ -203,6 +227,7 @@ function AITransformFactory(options = {}) {
   if (logger_default.level !== "silent") {
     logger_default.debug(`Creating AI Transformer with model: ${this.modelName}`);
     logger_default.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+    logger_default.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
   }
   const ai = new import_genai.GoogleGenAI({ apiKey: this.apiKey });
   this.genAIClient = ai;
@@ -423,6 +448,122 @@ function getChatHistory() {
   }
   return this.chat.getHistory();
 }
+function attemptJSONRecovery(text, maxAttempts = 100) {
+  if (!text || typeof text !== "string") return null;
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+  }
+  let workingText = text.trim();
+  let braces = 0;
+  let brackets = 0;
+  let inString = false;
+  let escapeNext = false;
+  for (let j = 0; j < workingText.length; j++) {
+    const char = workingText[j];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (char === "\\") {
+      escapeNext = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (char === "{") braces++;
+      else if (char === "}") braces--;
+      else if (char === "[") brackets++;
+      else if (char === "]") brackets--;
+    }
+  }
+  if ((braces > 0 || brackets > 0 || inString) && workingText.length > 2) {
+    let fixedText = workingText;
+    if (inString) {
+      fixedText += '"';
+    }
+    while (braces > 0) {
+      fixedText += "}";
+      braces--;
+    }
+    while (brackets > 0) {
+      fixedText += "]";
+      brackets--;
+    }
+    try {
+      const result = JSON.parse(fixedText);
+      if (logger_default.level !== "silent") {
+        logger_default.warn(`JSON response appears truncated (possibly hit maxOutputTokens limit). Recovered by adding closing characters.`);
+      }
+      return result;
+    } catch (e) {
+    }
+  }
+  for (let i = 0; i < maxAttempts && workingText.length > 2; i++) {
+    workingText = workingText.slice(0, -1);
+    let braces2 = 0;
+    let brackets2 = 0;
+    let inString2 = false;
+    let escapeNext2 = false;
+    for (let j = 0; j < workingText.length; j++) {
+      const char = workingText[j];
+      if (escapeNext2) {
+        escapeNext2 = false;
+        continue;
+      }
+      if (char === "\\") {
+        escapeNext2 = true;
+        continue;
+      }
+      if (char === '"') {
+        inString2 = !inString2;
+        continue;
+      }
+      if (!inString2) {
+        if (char === "{") braces2++;
+        else if (char === "}") braces2--;
+        else if (char === "[") brackets2++;
+        else if (char === "]") brackets2--;
+      }
+    }
+    if (braces2 === 0 && brackets2 === 0 && !inString2) {
+      try {
+        const result = JSON.parse(workingText);
+        if (logger_default.level !== "silent") {
+          logger_default.warn(`JSON response appears truncated (possibly hit maxOutputTokens limit). Recovered by removing ${i + 1} characters from the end.`);
+        }
+        return result;
+      } catch (e) {
+      }
+    }
+    if (i > 5) {
+      let fixedText = workingText;
+      if (inString2) {
+        fixedText += '"';
+      }
+      while (braces2 > 0) {
+        fixedText += "}";
+        braces2--;
+      }
+      while (brackets2 > 0) {
+        fixedText += "]";
+        brackets2--;
+      }
+      try {
+        const result = JSON.parse(fixedText);
+        if (logger_default.level !== "silent") {
+          logger_default.warn(`JSON response appears truncated (possibly hit maxOutputTokens limit). Recovered by adding closing characters.`);
+        }
+        return result;
+      } catch (e) {
+      }
+    }
+  }
+  return null;
+}
 function isJSON(data) {
   try {
     const attempt = JSON.stringify(data);
@@ -496,6 +637,10 @@ function extractJSON(text) {
   const cleanedText = text.replace(/^\s*Sure,?\s*here\s+is\s+your?\s+.*?[:\n]/gi, "").replace(/^\s*Here\s+is\s+the\s+.*?[:\n]/gi, "").replace(/^\s*The\s+.*?is\s*[:\n]/gi, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "").trim();
   if (isJSONStr(cleanedText)) {
     return JSON.parse(cleanedText);
+  }
+  const recoveredJSON = attemptJSONRecovery(text);
+  if (recoveredJSON !== null) {
+    return recoveredJSON;
   }
   throw new Error(`Could not extract valid JSON from model response. Response preview: ${text.substring(0, 200)}...`);
 }
@@ -604,5 +749,6 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   ThinkingLevel,
+  attemptJSONRecovery,
   log
 });

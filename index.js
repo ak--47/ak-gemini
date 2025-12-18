@@ -57,6 +57,8 @@ const DEFAULT_THINKING_CONFIG = {
 	thinkingLevel: ThinkingLevel.MINIMAL
 };
 
+const DEFAULT_MAX_OUTPUT_TOKENS = 100000; // Default ceiling for output tokens
+
 // Models that support thinking features (as of Dec 2024)
 // Using regex patterns for more precise matching
 const THINKING_SUPPORTED_MODELS = [
@@ -136,6 +138,7 @@ class AITransformer {
 }
 
 export default AITransformer;
+export { attemptJSONRecovery }; // Export for testing
 
 /**
  * factory function to create an AI Transformer instance
@@ -186,25 +189,53 @@ function AITransformFactory(options = {}) {
 		systemInstruction: this.systemInstructions
 	};
 
+	// Handle maxOutputTokens with explicit null check
+	// Priority: options.maxOutputTokens > options.chatConfig.maxOutputTokens > DEFAULT
+	// Setting to null explicitly removes the limit
+	if (options.maxOutputTokens !== undefined) {
+		if (options.maxOutputTokens === null) {
+			delete this.chatConfig.maxOutputTokens;
+		} else {
+			this.chatConfig.maxOutputTokens = options.maxOutputTokens;
+		}
+	} else if (options.chatConfig?.maxOutputTokens !== undefined) {
+		if (options.chatConfig.maxOutputTokens === null) {
+			delete this.chatConfig.maxOutputTokens;
+		} else {
+			this.chatConfig.maxOutputTokens = options.chatConfig.maxOutputTokens;
+		}
+	} else {
+		this.chatConfig.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+	}
+
 	// Only add thinkingConfig if the model supports it
 	const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some(pattern =>
 		pattern.test(this.modelName)
 	);
 
-	if (modelSupportsThinking && options.thinkingConfig) {
-		// Handle thinkingConfig - merge with defaults
-		const thinkingConfig = {
-			...DEFAULT_THINKING_CONFIG,
-			...options.thinkingConfig
-		};
-		this.chatConfig.thinkingConfig = thinkingConfig;
+	// Handle thinkingConfig - null explicitly removes it, undefined means not specified
+	if (options.thinkingConfig !== undefined) {
+		if (options.thinkingConfig === null) {
+			// Explicitly remove thinkingConfig if set to null
+			delete this.chatConfig.thinkingConfig;
+			if (log.level !== 'silent') {
+				log.debug(`thinkingConfig set to null - removed from configuration`);
+			}
+		} else if (modelSupportsThinking) {
+			// Handle thinkingConfig - merge with defaults
+			const thinkingConfig = {
+				...DEFAULT_THINKING_CONFIG,
+				...options.thinkingConfig
+			};
+			this.chatConfig.thinkingConfig = thinkingConfig;
 
-		if (log.level !== 'silent') {
-			log.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
-		}
-	} else if (options.thinkingConfig && !modelSupportsThinking) {
-		if (log.level !== 'silent') {
-			log.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+			if (log.level !== 'silent') {
+				log.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
+			}
+		} else {
+			if (log.level !== 'silent') {
+				log.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+			}
 		}
 	}
 
@@ -241,6 +272,7 @@ function AITransformFactory(options = {}) {
 	if (log.level !== 'silent') {
 		log.debug(`Creating AI Transformer with model: ${this.modelName}`);
 		log.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+		log.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
 	}
 
 	const ai = new GoogleGenAI({ apiKey: this.apiKey });
@@ -606,6 +638,173 @@ HELPERS
 ----
 */
 
+/**
+ * Attempts to recover truncated JSON by progressively removing characters from the end
+ * until valid JSON is found or recovery fails
+ * @param {string} text - The potentially truncated JSON string
+ * @param {number} maxAttempts - Maximum number of characters to remove
+ * @returns {Object|null} - Parsed JSON object or null if recovery fails
+ */
+function attemptJSONRecovery(text, maxAttempts = 100) {
+	if (!text || typeof text !== 'string') return null;
+
+	// First, try parsing as-is
+	try {
+		return JSON.parse(text);
+	} catch (e) {
+		// Continue with recovery
+	}
+
+	let workingText = text.trim();
+
+	// First attempt: try to close unclosed structures without removing characters
+	// Count open/close braces and brackets in the original text
+	let braces = 0;
+	let brackets = 0;
+	let inString = false;
+	let escapeNext = false;
+
+	for (let j = 0; j < workingText.length; j++) {
+		const char = workingText[j];
+
+		if (escapeNext) {
+			escapeNext = false;
+			continue;
+		}
+
+		if (char === '\\') {
+			escapeNext = true;
+			continue;
+		}
+
+		if (char === '"') {
+			inString = !inString;
+			continue;
+		}
+
+		if (!inString) {
+			if (char === '{') braces++;
+			else if (char === '}') braces--;
+			else if (char === '[') brackets++;
+			else if (char === ']') brackets--;
+		}
+	}
+
+	// Try to fix by just adding closing characters
+	if ((braces > 0 || brackets > 0 || inString) && workingText.length > 2) {
+		let fixedText = workingText;
+
+		// Close any open strings first
+		if (inString) {
+			fixedText += '"';
+		}
+
+		// Add missing closing characters
+		while (braces > 0) {
+			fixedText += '}';
+			braces--;
+		}
+		while (brackets > 0) {
+			fixedText += ']';
+			brackets--;
+		}
+
+		try {
+			const result = JSON.parse(fixedText);
+			if (log.level !== 'silent') {
+				log.warn(`JSON response appears truncated (possibly hit maxOutputTokens limit). Recovered by adding closing characters.`);
+			}
+			return result;
+		} catch (e) {
+			// Simple fix didn't work, continue with more aggressive recovery
+		}
+	}
+
+	// Second attempt: progressively remove characters from the end
+
+	for (let i = 0; i < maxAttempts && workingText.length > 2; i++) {
+		// Remove one character from the end
+		workingText = workingText.slice(0, -1);
+
+		// Count open/close braces and brackets
+		let braces = 0;
+		let brackets = 0;
+		let inString = false;
+		let escapeNext = false;
+
+		for (let j = 0; j < workingText.length; j++) {
+			const char = workingText[j];
+
+			if (escapeNext) {
+				escapeNext = false;
+				continue;
+			}
+
+			if (char === '\\') {
+				escapeNext = true;
+				continue;
+			}
+
+			if (char === '"') {
+				inString = !inString;
+				continue;
+			}
+
+			if (!inString) {
+				if (char === '{') braces++;
+				else if (char === '}') braces--;
+				else if (char === '[') brackets++;
+				else if (char === ']') brackets--;
+			}
+		}
+
+		// If we have balanced braces/brackets, try parsing
+		if (braces === 0 && brackets === 0 && !inString) {
+			try {
+				const result = JSON.parse(workingText);
+				if (log.level !== 'silent') {
+					log.warn(`JSON response appears truncated (possibly hit maxOutputTokens limit). Recovered by removing ${i + 1} characters from the end.`);
+				}
+				return result;
+			} catch (e) {
+				// Continue trying
+			}
+		}
+
+		// After a few attempts, try adding closing characters
+		if (i > 5) {
+			let fixedText = workingText;
+
+			// Close any open strings first
+			if (inString) {
+				fixedText += '"';
+			}
+
+			// Add missing closing characters
+			while (braces > 0) {
+				fixedText += '}';
+				braces--;
+			}
+			while (brackets > 0) {
+				fixedText += ']';
+				brackets--;
+			}
+
+			try {
+				const result = JSON.parse(fixedText);
+				if (log.level !== 'silent') {
+					log.warn(`JSON response appears truncated (possibly hit maxOutputTokens limit). Recovered by adding closing characters.`);
+				}
+				return result;
+			} catch (e) {
+				// Recovery failed, continue trying
+			}
+		}
+	}
+
+	return null;
+}
+
 function isJSON(data) {
 	try {
 		const attempt = JSON.stringify(data);
@@ -701,6 +900,13 @@ function extractJSON(text) {
 
 	if (isJSONStr(cleanedText)) {
 		return JSON.parse(cleanedText);
+	}
+
+	// Strategy 6: Last resort - attempt recovery for potentially truncated JSON
+	// This is especially useful when maxOutputTokens might have cut off the response
+	const recoveredJSON = attemptJSONRecovery(text);
+	if (recoveredJSON !== null) {
+		return recoveredJSON;
 	}
 
 	// If all else fails, throw an error with helpful information

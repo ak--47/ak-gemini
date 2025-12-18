@@ -21,6 +21,7 @@ export interface ChatConfig {
   temperature?: number; // Controls randomness (0.0 to 1.0)
   topP?: number; // Controls diversity via nucleus sampling
   topK?: number; // Controls diversity by limiting top-k tokens
+  maxOutputTokens?: number; // Maximum number of tokens that can be generated in the response
   systemInstruction?: string; // System instruction for the model
   safetySettings?: SafetySetting[]; // Safety settings array
   responseSchema?: Object; // Schema for validating model responses
@@ -74,6 +75,7 @@ export interface AITransformerOptions {
   systemInstructions?: string; // Custom system instructions for the model
   chatConfig?: ChatConfig; // Configuration object for the chat session
   thinkingConfig?: ThinkingConfig; // Thinking features configuration (defaults to thinkingBudget: 0, thinkingLevel: "MINIMAL")
+  maxOutputTokens?: number; // Maximum number of tokens that can be generated in the response (defaults to 100000)
   examplesFile?: string; // Path to JSON file containing transformation examples
   exampleData?: TransformationExample[]; // Inline examples to seed the transformer
   sourceKey?: string; // Key name for source data in examples (alias for promptKey)

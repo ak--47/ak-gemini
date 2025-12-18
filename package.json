@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... transforms",
-	"version": "1.0.7",
+	"version": "1.0.8",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -33,12 +33,13 @@
 	"homepage": "https://github.com/ak--47/ak-gemini#readme",
 	"scripts": {
 		"prepublishOnly": "npm run typecheck && npm run build:cjs",
-		"post": "npm publish --access public",
+		"post": "npm publish",
 		"release": "npm version patch && npm publish --access public",
 		"update-deps": "npx npm-check-updates -u && npm install",
 		"prune": "rm -rf tmp/*",
 		"test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js",
 		"test:unit": "npm test -- tests/module.test.js",
+		"test:fixed": "npm test -- --testNamePattern=\"should use context in the prompt and transform accordingly|should augment the payload as instructed by system instructions|should succeed on the first try if validation passes|should handle invalid model names|should handle multiple concurrent messages|should use the constructor-provided asyncValidator|should override system instructions from the file\"",
 		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:ak-tools --external:dotenv --external:pino-pretty --external:pino",
 		"coverage": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
 		"typecheck": "tsc --noEmit",
