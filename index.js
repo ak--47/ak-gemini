@@ -23,11 +23,12 @@ const { NODE_ENV = "unknown", GEMINI_API_KEY, LOG_LEVEL = "" } = process.env;
 
 
 //deps
-import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold, ThinkingLevel } from '@google/genai';
 import u from 'ak-tools';
 import path from 'path';
 import log from './logger.js';
 export { log };
+export { ThinkingLevel };
 
 
 
@@ -40,7 +41,7 @@ const DEFAULT_SAFETY_SETTINGS = [
 const DEFAULT_SYSTEM_INSTRUCTIONS = `
 You are an expert JSON transformation engine. Your task is to accurately convert data payloads from one format to another.
 
-You will be provided with example transformations (Source JSON -> Target JSON). 
+You will be provided with example transformations (Source JSON -> Target JSON).
 
 Learn the mapping rules from these examples.
 
@@ -48,8 +49,24 @@ When presented with new Source JSON, apply the learned transformation rules to p
 
 Always respond ONLY with a valid JSON object that strictly adheres to the expected output format.
 
-Do not include any additional text, explanations, or formatting before or after the JSON object. 
+Do not include any additional text, explanations, or formatting before or after the JSON object.
 `;
+
+const DEFAULT_THINKING_CONFIG = {
+	thinkingBudget: 0,
+	thinkingLevel: ThinkingLevel.MINIMAL
+};
+
+// Models that support thinking features (as of Dec 2024)
+// Using regex patterns for more precise matching
+const THINKING_SUPPORTED_MODELS = [
+	/^gemini-3-flash(-preview)?$/,
+	/^gemini-3-pro(-preview|-image-preview)?$/,
+	/^gemini-2\.5-pro/,
+	/^gemini-2\.5-flash(-preview)?$/,
+	/^gemini-2\.5-flash-lite(-preview)?$/,
+	/^gemini-2\.0-flash$/ // Experimental support, exact match only
+];
 
 const DEFAULT_CHAT_CONFIG = {
 	responseMimeType: 'application/json',
@@ -161,12 +178,35 @@ function AITransformFactory(options = {}) {
 
 	this.apiKey = options.apiKey !== undefined && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
 	if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
+
 	// Build chat config, making sure systemInstruction uses the custom instructions
 	this.chatConfig = {
 		...DEFAULT_CHAT_CONFIG,
 		...options.chatConfig,
 		systemInstruction: this.systemInstructions
 	};
+
+	// Only add thinkingConfig if the model supports it
+	const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some(pattern =>
+		pattern.test(this.modelName)
+	);
+
+	if (modelSupportsThinking && options.thinkingConfig) {
+		// Handle thinkingConfig - merge with defaults
+		const thinkingConfig = {
+			...DEFAULT_THINKING_CONFIG,
+			...options.thinkingConfig
+		};
+		this.chatConfig.thinkingConfig = thinkingConfig;
+
+		if (log.level !== 'silent') {
+			log.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
+		}
+	} else if (options.thinkingConfig && !modelSupportsThinking) {
+		if (log.level !== 'silent') {
+			log.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+		}
+	}
 
 	// response schema is optional, but if provided, it should be a valid JSON schema
 	if (options.responseSchema) {

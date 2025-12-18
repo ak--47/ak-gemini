@@ -29,6 +29,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // index.js
 var index_exports = {};
 __export(index_exports, {
+  ThinkingLevel: () => import_genai.ThinkingLevel,
   default: () => index_default,
   log: () => logger_default
 });
@@ -64,7 +65,7 @@ var DEFAULT_SAFETY_SETTINGS = [
 var DEFAULT_SYSTEM_INSTRUCTIONS = `
 You are an expert JSON transformation engine. Your task is to accurately convert data payloads from one format to another.
 
-You will be provided with example transformations (Source JSON -> Target JSON). 
+You will be provided with example transformations (Source JSON -> Target JSON).
 
 Learn the mapping rules from these examples.
 
@@ -72,8 +73,21 @@ When presented with new Source JSON, apply the learned transformation rules to p
 
 Always respond ONLY with a valid JSON object that strictly adheres to the expected output format.
 
-Do not include any additional text, explanations, or formatting before or after the JSON object. 
+Do not include any additional text, explanations, or formatting before or after the JSON object.
 `;
+var DEFAULT_THINKING_CONFIG = {
+  thinkingBudget: 0,
+  thinkingLevel: import_genai.ThinkingLevel.MINIMAL
+};
+var THINKING_SUPPORTED_MODELS = [
+  /^gemini-3-flash(-preview)?$/,
+  /^gemini-3-pro(-preview|-image-preview)?$/,
+  /^gemini-2\.5-pro/,
+  /^gemini-2\.5-flash(-preview)?$/,
+  /^gemini-2\.5-flash-lite(-preview)?$/,
+  /^gemini-2\.0-flash$/
+  // Experimental support, exact match only
+];
 var DEFAULT_CHAT_CONFIG = {
   responseMimeType: "application/json",
   temperature: 0.2,
@@ -152,6 +166,23 @@ function AITransformFactory(options = {}) {
     ...options.chatConfig,
     systemInstruction: this.systemInstructions
   };
+  const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some(
+    (pattern) => pattern.test(this.modelName)
+  );
+  if (modelSupportsThinking && options.thinkingConfig) {
+    const thinkingConfig = {
+      ...DEFAULT_THINKING_CONFIG,
+      ...options.thinkingConfig
+    };
+    this.chatConfig.thinkingConfig = thinkingConfig;
+    if (logger_default.level !== "silent") {
+      logger_default.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
+    }
+  } else if (options.thinkingConfig && !modelSupportsThinking) {
+    if (logger_default.level !== "silent") {
+      logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+    }
+  }
   if (options.responseSchema) {
     this.chatConfig.responseSchema = options.responseSchema;
   }
@@ -572,5 +603,6 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ThinkingLevel,
   log
 });

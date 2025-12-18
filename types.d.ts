@@ -1,4 +1,15 @@
-import type { GoogleGenAI } from '@google/genai';
+import type { GoogleGenAI, ThinkingLevel } from '@google/genai';
+
+export { ThinkingLevel };
+
+export interface ThinkingConfig {
+  /** Indicates whether to include thoughts in the response. If true, thoughts are returned only if the model supports thought and thoughts are available. */
+  includeThoughts?: boolean;
+  /** Indicates the thinking budget in tokens. 0 is DISABLED. -1 is AUTOMATIC. The default values and allowed ranges are model dependent. */
+  thinkingBudget?: number;
+  /** Optional. The number of thoughts tokens that the model should generate. */
+  thinkingLevel?: ThinkingLevel;
+}
 
 export interface SafetySetting {
   category: string; // The harm category
@@ -13,6 +24,7 @@ export interface ChatConfig {
   systemInstruction?: string; // System instruction for the model
   safetySettings?: SafetySetting[]; // Safety settings array
   responseSchema?: Object; // Schema for validating model responses
+  thinkingConfig?: ThinkingConfig; // Thinking features configuration
   [key: string]: any; // Additional properties for flexibility
 }
 
@@ -61,6 +73,7 @@ export interface AITransformerOptions {
   modelName?: string; // The Gemini model to use
   systemInstructions?: string; // Custom system instructions for the model
   chatConfig?: ChatConfig; // Configuration object for the chat session
+  thinkingConfig?: ThinkingConfig; // Thinking features configuration (defaults to thinkingBudget: 0, thinkingLevel: "MINIMAL")
   examplesFile?: string; // Path to JSON file containing transformation examples
   exampleData?: TransformationExample[]; // Inline examples to seed the transformer
   sourceKey?: string; // Key name for source data in examples (alias for promptKey)

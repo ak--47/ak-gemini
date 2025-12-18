@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
-import { default as AITransformer } from '../index.js';
+import { default as AITransformer, ThinkingLevel } from '../index.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -1756,7 +1756,7 @@ describe('Token Estimation', () => {
 
 describe('Concurrent Operations', () => {
     let transformer;
-    
+
     beforeEach(async () => {
         transformer = new AITransformer({ ...BASE_OPTIONS });
         await transformer.init();
@@ -1770,9 +1770,9 @@ describe('Concurrent Operations', () => {
         const promises = Array.from({ length: 5 }, (_, i) =>
             transformer.message({ value: i + 10 })
         );
-        
+
         const results = await Promise.all(promises);
-        
+
         expect(results).toHaveLength(5);
         results.forEach((result, i) => {
             expect(result).toBeTruthy();
@@ -1784,11 +1784,137 @@ describe('Concurrent Operations', () => {
         const seedPromise = transformer.seed([
             { PROMPT: { new: 1 }, ANSWER: { new_result: 2 } }
         ]);
-        
+
         const transformPromise = transformer.message({ value: 5 });
-        
+
         const [seedResult, transformResult] = await Promise.all([seedPromise, transformPromise]);
-        
+
         expect(transformResult).toBeTruthy();
+    });
+});
+
+describe('Thinking Configuration', () => {
+    it('should not apply thinkingConfig for unsupported models', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            thinkingConfig: {
+                thinkingBudget: 100,
+                thinkingLevel: 'HIGH'
+            }
+        });
+        await transformer.init();
+
+        // gemini-2.0-flash-lite doesn't support thinking, so config should not be applied
+        expect(transformer.chatConfig.thinkingConfig).toBeUndefined();
+    });
+
+    it('should apply custom thinkingConfig for supported models', async () => {
+        const customThinkingConfig = {
+            thinkingBudget: 100,
+            thinkingLevel: 'HIGH',
+            includeThoughts: true
+        };
+
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash', // Model that supports thinking
+            thinkingConfig: customThinkingConfig
+        });
+
+        await transformer.init();
+
+        expect(transformer.chatConfig.thinkingConfig).toBeDefined();
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(100);
+        expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('HIGH');
+        expect(transformer.chatConfig.thinkingConfig.includeThoughts).toBe(true);
+    });
+
+    it('should merge partial thinkingConfig with defaults for supported models', async () => {
+        const partialThinkingConfig = {
+            thinkingBudget: -1 // Automatic
+        };
+
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash', // Model that supports thinking
+            thinkingConfig: partialThinkingConfig
+        });
+
+        await transformer.init();
+
+        // Should have the custom budget but default level
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(-1);
+        expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('MINIMAL');
+    });
+
+    it('should pass thinkingConfig to chat creation for supported models', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-pro', // Model that supports thinking
+            thinkingConfig: {
+                thinkingBudget: 50,
+                thinkingLevel: 'LOW'
+            }
+        });
+
+        await transformer.init();
+
+        // The chat should be created with the config containing thinkingConfig
+        expect(transformer.chat).toBeTruthy();
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(50);
+        expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('LOW');
+    });
+
+    it('should preserve thinkingConfig after reset for supported models', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash', // Model that supports thinking
+            thinkingConfig: {
+                thinkingBudget: 200,
+                thinkingLevel: 'HIGH'
+            }
+        });
+
+        await transformer.init();
+        await transformer.seed([
+            { PROMPT: { x: 1 }, ANSWER: { y: 2 } }
+        ]);
+
+        await transformer.reset();
+
+        // Config should still have the same thinkingConfig after reset
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(200);
+        expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('HIGH');
+    });
+
+    it('should handle all ThinkingLevel enum values for supported models', async () => {
+        const levels = [
+            ThinkingLevel.MINIMAL,
+            ThinkingLevel.LOW,
+            ThinkingLevel.MEDIUM,
+            ThinkingLevel.HIGH
+        ];
+
+        for (const level of levels) {
+            const transformer = new AITransformer({
+                ...BASE_OPTIONS,
+                modelName: 'gemini-2.5-flash', // Model that supports thinking
+                thinkingConfig: { thinkingLevel: level }
+            });
+
+            await transformer.init();
+            expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe(level);
+        }
+    });
+
+    it('should not apply thinkingConfig by default even for supported models', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash' // Model that supports thinking, but no thinkingConfig provided
+        });
+        await transformer.init();
+
+        // Should not have thinkingConfig if not explicitly provided
+        expect(transformer.chatConfig.thinkingConfig).toBeUndefined();
     });
 });

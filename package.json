@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... transforms",
-	"version": "1.0.6",
+	"version": "1.0.7",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -41,7 +41,8 @@
 		"test:unit": "npm test -- tests/module.test.js",
 		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:ak-tools --external:dotenv --external:pino-pretty --external:pino",
 		"coverage": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"update:gemini": "npm install @google/genai@latest"
 	},
 	"type": "module",
 	"keywords": [
@@ -51,7 +52,7 @@
 	],
 	"license": "ISC",
 	"dependencies": {
-		"@google/genai": "^1.25.0",
+		"@google/genai": "^1.34.0",
 		"ak-tools": "^1.1.12",
 		"dotenv": "^16.5.0",
 		"pino": "^9.7.0",
