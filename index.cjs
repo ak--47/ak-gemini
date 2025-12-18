@@ -29,6 +29,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // index.js
 var index_exports = {};
 __export(index_exports, {
+  HarmBlockThreshold: () => import_genai.HarmBlockThreshold,
+  HarmCategory: () => import_genai.HarmCategory,
   ThinkingLevel: () => import_genai.ThinkingLevel,
   attemptJSONRecovery: () => attemptJSONRecovery,
   default: () => index_default,
@@ -798,6 +800,8 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  HarmBlockThreshold,
+  HarmCategory,
   ThinkingLevel,
   attemptJSONRecovery,
   log
