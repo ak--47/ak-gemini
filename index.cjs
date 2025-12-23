@@ -134,6 +134,7 @@ var AITransformer = class {
     this.transformWithValidation = prepareAndValidateMessage.bind(this);
     this.estimate = estimateTokenUsage.bind(this);
     this.estimateTokenUsage = estimateTokenUsage.bind(this);
+    this.updateSystemInstructions = updateSystemInstructions.bind(this);
   }
 };
 var index_default = AITransformer;
@@ -499,6 +500,15 @@ function getChatHistory() {
     return [];
   }
   return this.chat.getHistory();
+}
+async function updateSystemInstructions(newInstructions) {
+  if (!newInstructions || typeof newInstructions !== "string") {
+    throw new Error("System instructions must be a non-empty string");
+  }
+  this.systemInstructions = newInstructions.trim();
+  this.chatConfig.systemInstruction = this.systemInstructions;
+  logger_default.debug("Updating system instructions and reinitializing chat...");
+  await this.init(true);
 }
 function attemptJSONRecovery(text, maxAttempts = 100) {
   if (!text || typeof text !== "string") return null;

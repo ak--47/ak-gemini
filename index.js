@@ -134,6 +134,7 @@ class AITransformer {
 		this.transformWithValidation = prepareAndValidateMessage.bind(this);
 		this.estimate = estimateTokenUsage.bind(this);
 		this.estimateTokenUsage = estimateTokenUsage.bind(this);
+		this.updateSystemInstructions = updateSystemInstructions.bind(this);
 	}
 }
 
@@ -712,6 +713,24 @@ function getChatHistory() {
 		return [];
 	}
 	return this.chat.getHistory();
+}
+
+/**
+ * Updates system instructions and reinitializes the chat session
+ * @this {ExportedAPI}
+ * @param {string} newInstructions - The new system instructions
+ * @returns {Promise<void>}
+ */
+async function updateSystemInstructions(newInstructions) {
+	if (!newInstructions || typeof newInstructions !== 'string') {
+		throw new Error('System instructions must be a non-empty string');
+	}
+
+	this.systemInstructions = newInstructions.trim();
+	this.chatConfig.systemInstruction = this.systemInstructions;
+
+	log.debug('Updating system instructions and reinitializing chat...');
+	await this.init(true); // Force reinitialize with new instructions
 }
 
 

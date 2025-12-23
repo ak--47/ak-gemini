@@ -139,8 +139,8 @@ export declare class AITransformer {
   getHistory(): Array<any>;
   estimateTokenUsage(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
   estimate(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
+  updateSystemInstructions(newInstructions: string): Promise<void>;
 }
 
 // Default export
-declare const _default: typeof AITransformer;
-export default _default;
+export default AITransformer;
