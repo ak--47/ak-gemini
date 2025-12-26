@@ -26,6 +26,8 @@ export interface ChatConfig {
   safetySettings?: SafetySetting[]; // Safety settings array
   responseSchema?: Object; // Schema for validating model responses
   thinkingConfig?: ThinkingConfig; // Thinking features configuration
+  labels?: Record<string, string>; // Labels for billing segmentation
+  tools?: any[]; // Tools configuration (e.g., grounding)
   [key: string]: any; // Additional properties for flexibility
 }
 
@@ -48,11 +50,13 @@ export interface AITransformerContext {
   seed?: () => Promise<void>; // Function to seed the transformer with examples  
   message?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send messages to the model
   rebuild?: (lastPayload: Record<string, unknown>, serverError: string) => Promise<Record<string, unknown>>; // Function to rebuild the transformer
-  rawMessage?: (payload: Record<string, unknown> | string) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
+  rawMessage?: (payload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
   genAIClient?: GoogleGenAI; // Google GenAI client instance
   onlyJSON?: boolean; // If true, only JSON responses are allowed
   enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
   groundingConfig?: Record<string, any>; // Additional grounding configuration options
+  labels?: Record<string, string>; // Custom labels for billing segmentation (keys: 1-63 chars lowercase, values: max 63 chars)
+  estimateTokenUsage?: (nextPayload: Record<string, unknown> | string) => Promise<{ totalTokens: number; breakdown?: any }>;
 
 }
 
@@ -69,6 +73,17 @@ export interface TransformationExample {
 
 export interface ExampleFileContent {
   examples: TransformationExample[];
+}
+
+// Google Auth options for Vertex AI authentication
+// See: https://github.com/googleapis/google-auth-library-nodejs/blob/main/src/auth/googleauth.ts
+export interface GoogleAuthOptions {
+  keyFilename?: string; // Path to a .json, .pem, or .p12 key file
+  keyFile?: string; // Alias for keyFilename
+  credentials?: { client_email?: string; private_key?: string; [key: string]: any }; // Object containing client_email and private_key
+  scopes?: string | string[]; // Required scopes for the API request
+  projectId?: string; // Your project ID (alias for project)
+  universeDomain?: string; // The default service domain for a Cloud universe
 }
 
 export interface AITransformerOptions {
@@ -91,12 +106,20 @@ export interface AITransformerOptions {
   retryDelay?: number; // Initial retry delay in milliseconds
   // ? https://ai.google.dev/gemini-api/docs/structured-output
   responseSchema?: Object; // Schema for validating model responses
-  apiKey?: string; // API key for Google GenAI
+  apiKey?: string; // API key for Google GenAI (Gemini API)
   onlyJSON?: boolean; // If true, only JSON responses are allowed
   asyncValidator?: AsyncValidatorFunction; // Optional async validator function for response validation
   logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none'; // Log level for the logger (defaults to 'info', 'none' disables logging)
   enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
   groundingConfig?: Record<string, any>; // Additional grounding configuration options
+  labels?: Record<string, string>; // Custom labels for billing segmentation
+
+  // Vertex AI Authentication Options
+  // Use these instead of apiKey for Vertex AI with service account authentication
+  vertexai?: boolean; // Set to true to use Vertex AI instead of Gemini API
+  project?: string; // Google Cloud project ID (required for Vertex AI)
+  location?: string; // Google Cloud location/region (e.g., 'us-central1') - required for Vertex AI
+  googleAuthOptions?: GoogleAuthOptions; // Authentication options for Vertex AI (keyFilename, credentials, etc.)
 }
 
 // Async validator function type
@@ -126,12 +149,13 @@ export declare class AITransformer {
   logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
   enableGrounding: boolean;
   groundingConfig: Record<string, any>;
+  labels: Record<string, string>;
   
   // Methods
   init(force?: boolean): Promise<void>;
   seed(examples?: TransformationExample[]): Promise<any>;
   message(payload: Record<string, unknown>, opts?: object, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
-  rawMessage(sourcePayload: Record<string, unknown> | string): Promise<Record<string, unknown> | any>;
+  rawMessage(sourcePayload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }): Promise<Record<string, unknown> | any>;
   transformWithValidation(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
   messageAndValidate(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
   rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
@@ -140,6 +164,13 @@ export declare class AITransformer {
   estimateTokenUsage(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
   estimate(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
   updateSystemInstructions(newInstructions: string): Promise<void>;
+  estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
+    totalTokens: number;
+    model: string;
+    pricing: { input: number; output: number };
+    estimatedInputCost: number;
+    note: string;
+  }>;
 }
 
 // Default export

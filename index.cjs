@@ -135,6 +135,7 @@ var AITransformer = class {
     this.estimate = estimateTokenUsage.bind(this);
     this.estimateTokenUsage = estimateTokenUsage.bind(this);
     this.updateSystemInstructions = updateSystemInstructions.bind(this);
+    this.estimateCost = estimateCost.bind(this);
   }
 };
 var index_default = AITransformer;
@@ -164,8 +165,17 @@ function AITransformFactory(options = {}) {
     this.logLevel = "info";
     logger_default.level = "info";
   }
+  this.vertexai = options.vertexai || false;
+  this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
+  this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
+  this.googleAuthOptions = options.googleAuthOptions || null;
   this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
-  if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
+  if (!this.vertexai && !this.apiKey) {
+    throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
+  }
+  if (this.vertexai && !this.project) {
+    throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
+  }
   this.chatConfig = {
     ...DEFAULT_CHAT_CONFIG,
     ...options.chatConfig,
@@ -226,6 +236,10 @@ function AITransformFactory(options = {}) {
   this.onlyJSON = options.onlyJSON !== void 0 ? options.onlyJSON : true;
   this.enableGrounding = options.enableGrounding || false;
   this.groundingConfig = options.groundingConfig || {};
+  this.labels = options.labels || {};
+  if (Object.keys(this.labels).length > 0 && logger_default.level !== "silent") {
+    logger_default.debug(`Billing labels configured: ${JSON.stringify(this.labels)}`);
+  }
   if (this.promptKey === this.answerKey) {
     throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
   }
@@ -233,10 +247,27 @@ function AITransformFactory(options = {}) {
     logger_default.debug(`Creating AI Transformer with model: ${this.modelName}`);
     logger_default.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
     logger_default.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
-    logger_default.debug(`Using API key: ${this.apiKey.substring(0, 10)}...`);
+    if (this.vertexai) {
+      logger_default.debug(`Using Vertex AI - Project: ${this.project}, Location: ${this.location}`);
+      if (this.googleAuthOptions?.keyFilename) {
+        logger_default.debug(`Auth: Service account key file: ${this.googleAuthOptions.keyFilename}`);
+      } else if (this.googleAuthOptions?.credentials) {
+        logger_default.debug(`Auth: Inline credentials provided`);
+      } else {
+        logger_default.debug(`Auth: Application Default Credentials (ADC)`);
+      }
+    } else {
+      logger_default.debug(`Using Gemini API with key: ${this.apiKey.substring(0, 10)}...`);
+    }
     logger_default.debug(`Grounding ${this.enableGrounding ? "ENABLED" : "DISABLED"} (costs $35/1k queries)`);
   }
-  const ai = new import_genai.GoogleGenAI({ apiKey: this.apiKey });
+  const clientOptions = this.vertexai ? {
+    vertexai: true,
+    project: this.project,
+    location: this.location,
+    ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
+  } : { apiKey: this.apiKey };
+  const ai = new import_genai.GoogleGenAI(clientOptions);
   this.genAIClient = ai;
   this.chat = null;
 }
@@ -246,7 +277,10 @@ async function initChat(force = false) {
   const chatOptions = {
     model: this.modelName,
     // @ts-ignore
-    config: this.chatConfig,
+    config: {
+      ...this.chatConfig,
+      ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+    },
     history: []
   };
   if (this.enableGrounding) {
@@ -326,20 +360,29 @@ ${contextText}
   this.chat = await this.genAIClient.chats.create({
     model: this.modelName,
     // @ts-ignore
-    config: this.chatConfig,
+    config: {
+      ...this.chatConfig,
+      ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+    },
     history: [...currentHistory, ...historyToAdd]
   });
   const newHistory = this.chat.getHistory();
   logger_default.debug(`Created new chat session with ${newHistory.length} examples.`);
   return newHistory;
 }
-async function rawMessage(sourcePayload) {
+async function rawMessage(sourcePayload, messageOptions = {}) {
   if (!this.chat) {
     throw new Error("Chat session not initialized.");
   }
   const actualPayload = typeof sourcePayload === "string" ? sourcePayload : JSON.stringify(sourcePayload, null, 2);
+  const mergedLabels = { ...this.labels, ...messageOptions.labels || {} };
+  const hasLabels = Object.keys(mergedLabels).length > 0;
   try {
-    const result = await this.chat.sendMessage({ message: actualPayload });
+    const sendParams = { message: actualPayload };
+    if (hasLabels) {
+      sendParams.config = { labels: mergedLabels };
+    }
+    const result = await this.chat.sendMessage(sendParams);
     const modelResponse = result.text;
     const extractedJSON = extractJSON(modelResponse);
     if (extractedJSON?.data) {
@@ -398,9 +441,13 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
   } else {
     throw new Error("Invalid source payload. Must be a JSON object or string.");
   }
+  const messageOptions = {};
+  if (options.labels) {
+    messageOptions.labels = options.labels;
+  }
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const transformedPayload = attempt === 0 ? await this.rawMessage(lastPayload) : await this.rebuild(lastPayload, lastError.message);
+      const transformedPayload = attempt === 0 ? await this.rawMessage(lastPayload, messageOptions) : await this.rebuild(lastPayload, lastError.message);
       lastPayload = transformedPayload;
       if (validatorFn) {
         await validatorFn(transformedPayload);
@@ -473,13 +520,36 @@ async function estimateTokenUsage(nextPayload) {
   });
   return resp;
 }
+var MODEL_PRICING = {
+  "gemini-2.5-flash": { input: 0.15, output: 0.6 },
+  "gemini-2.5-flash-lite": { input: 0.02, output: 0.1 },
+  "gemini-2.5-pro": { input: 2.5, output: 10 },
+  "gemini-3-pro": { input: 2, output: 12 },
+  "gemini-3-pro-preview": { input: 2, output: 12 },
+  "gemini-2.0-flash": { input: 0.1, output: 0.4 },
+  "gemini-2.0-flash-lite": { input: 0.02, output: 0.1 }
+};
+async function estimateCost(nextPayload) {
+  const tokenInfo = await this.estimateTokenUsage(nextPayload);
+  const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+  return {
+    totalTokens: tokenInfo.totalTokens,
+    model: this.modelName,
+    pricing,
+    estimatedInputCost: tokenInfo.totalTokens / 1e6 * pricing.input,
+    note: "Cost is for input tokens only; output cost depends on response length"
+  };
+}
 async function resetChat() {
   if (this.chat) {
     logger_default.debug("Resetting Gemini chat session...");
     const chatOptions = {
       model: this.modelName,
       // @ts-ignore
-      config: this.chatConfig,
+      config: {
+        ...this.chatConfig,
+        ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+      },
       history: []
     };
     if (this.enableGrounding) {

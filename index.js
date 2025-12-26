@@ -135,6 +135,7 @@ class AITransformer {
 		this.estimate = estimateTokenUsage.bind(this);
 		this.estimateTokenUsage = estimateTokenUsage.bind(this);
 		this.updateSystemInstructions = updateSystemInstructions.bind(this);
+		this.estimateCost = estimateCost.bind(this);
 	}
 }
 
@@ -180,8 +181,22 @@ function AITransformFactory(options = {}) {
 		log.level = 'info';
 	}
 
+	// Vertex AI configuration
+	this.vertexai = options.vertexai || false;
+	this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
+	this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+	this.googleAuthOptions = options.googleAuthOptions || null;
+
+	// API Key (for Gemini API, not Vertex AI)
 	this.apiKey = options.apiKey !== undefined && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
-	if (!this.apiKey) throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var.");
+
+	// Validate authentication - need either API key (for Gemini API) or Vertex AI config
+	if (!this.vertexai && !this.apiKey) {
+		throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
+	}
+	if (this.vertexai && !this.project) {
+		throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
+	}
 
 	// Build chat config, making sure systemInstruction uses the custom instructions
 	this.chatConfig = {
@@ -270,6 +285,12 @@ function AITransformFactory(options = {}) {
 	this.enableGrounding = options.enableGrounding || false;
 	this.groundingConfig = options.groundingConfig || {};
 
+	// Billing labels for cost segmentation
+	this.labels = options.labels || {};
+	if (Object.keys(this.labels).length > 0 && log.level !== 'silent') {
+		log.debug(`Billing labels configured: ${JSON.stringify(this.labels)}`);
+	}
+
 	if (this.promptKey === this.answerKey) {
 		throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
 	}
@@ -278,12 +299,33 @@ function AITransformFactory(options = {}) {
 		log.debug(`Creating AI Transformer with model: ${this.modelName}`);
 		log.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
 		log.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
-		// Log API key prefix for tracking (first 10 chars only for security)
-		log.debug(`Using API key: ${this.apiKey.substring(0, 10)}...`);
+		// Log authentication method
+		if (this.vertexai) {
+			log.debug(`Using Vertex AI - Project: ${this.project}, Location: ${this.location}`);
+			if (this.googleAuthOptions?.keyFilename) {
+				log.debug(`Auth: Service account key file: ${this.googleAuthOptions.keyFilename}`);
+			} else if (this.googleAuthOptions?.credentials) {
+				log.debug(`Auth: Inline credentials provided`);
+			} else {
+				log.debug(`Auth: Application Default Credentials (ADC)`);
+			}
+		} else {
+			log.debug(`Using Gemini API with key: ${this.apiKey.substring(0, 10)}...`);
+		}
 		log.debug(`Grounding ${this.enableGrounding ? 'ENABLED' : 'DISABLED'} (costs $35/1k queries)`);
 	}
 
-	const ai = new GoogleGenAI({ apiKey: this.apiKey });
+	// Initialize Google GenAI client with appropriate configuration
+	const clientOptions = this.vertexai
+		? {
+			vertexai: true,
+			project: this.project,
+			location: this.location,
+			...(this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions })
+		}
+		: { apiKey: this.apiKey };
+
+	const ai = new GoogleGenAI(clientOptions);
 	this.genAIClient = ai;
 	this.chat = null;
 }
@@ -303,7 +345,10 @@ async function initChat(force = false) {
 	const chatOptions = {
 		model: this.modelName,
 		// @ts-ignore
-		config: this.chatConfig,
+		config: {
+			...this.chatConfig,
+			...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+		},
 		history: [],
 	};
 
@@ -415,7 +460,10 @@ async function seedWithExamples(examples) {
 	this.chat = await this.genAIClient.chats.create({
 		model: this.modelName,
 		// @ts-ignore
-		config: this.chatConfig,
+		config: {
+			...this.chatConfig,
+			...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+		},
 		history: [...currentHistory, ...historyToAdd],
 	});
 
@@ -436,9 +484,10 @@ async function seedWithExamples(examples) {
  * No validation or retry logic.
  * @this {ExportedAPI}
  * @param {Object|string} sourcePayload - The source payload.
+ * @param {Object} [messageOptions] - Optional per-message options (e.g., labels).
  * @returns {Promise<Object>} - The transformed payload.
  */
-async function rawMessage(sourcePayload) {
+async function rawMessage(sourcePayload, messageOptions = {}) {
 	if (!this.chat) {
 		throw new Error("Chat session not initialized.");
 	}
@@ -447,8 +496,19 @@ async function rawMessage(sourcePayload) {
 		? sourcePayload
 		: JSON.stringify(sourcePayload, null, 2);
 
+	// Merge instance labels with per-message labels (per-message takes precedence)
+	const mergedLabels = { ...this.labels, ...(messageOptions.labels || {}) };
+	const hasLabels = Object.keys(mergedLabels).length > 0;
+
 	try {
-		const result = await this.chat.sendMessage({ message: actualPayload });
+		const sendParams = { message: actualPayload };
+
+		// Add config with labels if we have any
+		if (hasLabels) {
+			sendParams.config = { labels: mergedLabels };
+		}
+
+		const result = await this.chat.sendMessage(sendParams);
 		const modelResponse = result.text;
 		const extractedJSON = extractJSON(modelResponse); // Assuming extractJSON is defined
 
@@ -542,11 +602,17 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
 		throw new Error("Invalid source payload. Must be a JSON object or string.");
 	}
 
+	// Extract per-message labels for passing to rawMessage
+	const messageOptions = {};
+	if (options.labels) {
+		messageOptions.labels = options.labels;
+	}
+
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		try {
 			// Step 1: Get the transformed payload
 			const transformedPayload = (attempt === 0)
-				? await this.rawMessage(lastPayload) // Use the new raw method
+				? await this.rawMessage(lastPayload, messageOptions) // Use the new raw method with per-message options
 				: await this.rebuild(lastPayload, lastError.message);
 
 			lastPayload = transformedPayload; // Always update lastPayload *before* validation
@@ -670,6 +736,37 @@ async function estimateTokenUsage(nextPayload) {
 	return resp; // includes totalTokens, possibly breakdown
 }
 
+// Model pricing per million tokens (as of Dec 2025)
+// https://ai.google.dev/gemini-api/docs/pricing
+const MODEL_PRICING = {
+	'gemini-2.5-flash': { input: 0.15, output: 0.60 },
+	'gemini-2.5-flash-lite': { input: 0.02, output: 0.10 },
+	'gemini-2.5-pro': { input: 2.50, output: 10.00 },
+	'gemini-3-pro': { input: 2.00, output: 12.00 },
+	'gemini-3-pro-preview': { input: 2.00, output: 12.00 },
+	'gemini-2.0-flash': { input: 0.10, output: 0.40 },
+	'gemini-2.0-flash-lite': { input: 0.02, output: 0.10 }
+};
+
+/**
+ * Estimates the cost of sending a payload based on token count and model pricing.
+ * @this {ExportedAPI}
+ * @param {object|string} nextPayload - The next user message to be sent (object or string)
+ * @returns {Promise<Object>} - Cost estimation including tokens, model, pricing, and estimated input cost
+ */
+async function estimateCost(nextPayload) {
+	const tokenInfo = await this.estimateTokenUsage(nextPayload);
+	const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+
+	return {
+		totalTokens: tokenInfo.totalTokens,
+		model: this.modelName,
+		pricing: pricing,
+		estimatedInputCost: (tokenInfo.totalTokens / 1_000_000) * pricing.input,
+		note: 'Cost is for input tokens only; output cost depends on response length'
+	};
+}
+
 
 /**
  * Resets the current chat session, clearing all history and examples
@@ -684,7 +781,10 @@ async function resetChat() {
 		const chatOptions = {
 			model: this.modelName,
 			// @ts-ignore
-			config: this.chatConfig,
+			config: {
+				...this.chatConfig,
+				...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+			},
 			history: [],
 		};
 
