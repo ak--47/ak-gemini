@@ -82,7 +82,7 @@ var DEFAULT_THINKING_CONFIG = {
   thinkingBudget: 0,
   thinkingLevel: import_genai.ThinkingLevel.MINIMAL
 };
-var DEFAULT_MAX_OUTPUT_TOKENS = 1e5;
+var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
 var THINKING_SUPPORTED_MODELS = [
   /^gemini-3-flash(-preview)?$/,
   /^gemini-3-pro(-preview|-image-preview)?$/,
@@ -120,6 +120,8 @@ var AITransformer = class {
     this.onlyJSON = true;
     this.asyncValidator = null;
     this.logLevel = "info";
+    this.lastResponseMetadata = null;
+    this.exampleCount = 0;
     AITransformFactory.call(this, options);
     this.init = initChat.bind(this);
     this.seed = seedWithExamples.bind(this);
@@ -136,6 +138,7 @@ var AITransformer = class {
     this.estimateTokenUsage = estimateTokenUsage.bind(this);
     this.updateSystemInstructions = updateSystemInstructions.bind(this);
     this.estimateCost = estimateCost.bind(this);
+    this.clearConversation = clearConversation.bind(this);
   }
 };
 var index_default = AITransformer;
@@ -366,6 +369,7 @@ ${contextText}
     },
     history: [...currentHistory, ...historyToAdd]
   });
+  this.exampleCount = currentHistory.length + historyToAdd.length;
   const newHistory = this.chat.getHistory();
   logger_default.debug(`Created new chat session with ${newHistory.length} examples.`);
   return newHistory;
@@ -383,6 +387,23 @@ async function rawMessage(sourcePayload, messageOptions = {}) {
       sendParams.config = { labels: mergedLabels };
     }
     const result = await this.chat.sendMessage(sendParams);
+    this.lastResponseMetadata = {
+      modelVersion: result.modelVersion || null,
+      requestedModel: this.modelName,
+      promptTokens: result.usageMetadata?.promptTokenCount || 0,
+      responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
+      totalTokens: result.usageMetadata?.totalTokenCount || 0,
+      timestamp: Date.now()
+    };
+    if (result.usageMetadata && logger_default.level !== "silent") {
+      logger_default.debug(`API response metadata:`, {
+        modelVersion: result.modelVersion || "not-provided",
+        requestedModel: this.modelName,
+        promptTokens: result.usageMetadata.promptTokenCount,
+        responseTokens: result.usageMetadata.candidatesTokenCount,
+        totalTokens: result.usageMetadata.totalTokenCount
+      });
+    }
     const modelResponse = result.text;
     const extractedJSON = extractJSON(modelResponse);
     if (extractedJSON?.data) {
@@ -399,6 +420,9 @@ async function rawMessage(sourcePayload, messageOptions = {}) {
 async function prepareAndValidateMessage(sourcePayload, options = {}, validatorFn = null) {
   if (!this.chat) {
     throw new Error("Chat session not initialized. Please call init() first.");
+  }
+  if (options.stateless) {
+    return await statelessMessage.call(this, sourcePayload, options, validatorFn);
   }
   const maxRetries = options.maxRetries ?? this.maxRetries;
   const retryDelay = options.retryDelay ?? this.retryDelay;
@@ -491,6 +515,17 @@ Respond with JSON only \u2013 no comments or explanations.
   let result;
   try {
     result = await this.chat.sendMessage({ message: prompt });
+    this.lastResponseMetadata = {
+      modelVersion: result.modelVersion || null,
+      requestedModel: this.modelName,
+      promptTokens: result.usageMetadata?.promptTokenCount || 0,
+      responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
+      totalTokens: result.usageMetadata?.totalTokenCount || 0,
+      timestamp: Date.now()
+    };
+    if (result.usageMetadata && logger_default.level !== "silent") {
+      logger_default.debug(`Rebuild response metadata - tokens used:`, result.usageMetadata.totalTokenCount);
+    }
   } catch (err) {
     throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
   }
@@ -579,6 +614,68 @@ async function updateSystemInstructions(newInstructions) {
   this.chatConfig.systemInstruction = this.systemInstructions;
   logger_default.debug("Updating system instructions and reinitializing chat...");
   await this.init(true);
+}
+async function clearConversation() {
+  if (!this.chat) {
+    logger_default.warn("Cannot clear conversation: chat not initialized.");
+    return;
+  }
+  const history = this.chat.getHistory();
+  const exampleHistory = history.slice(0, this.exampleCount || 0);
+  this.chat = await this.genAIClient.chats.create({
+    model: this.modelName,
+    // @ts-ignore
+    config: {
+      ...this.chatConfig,
+      ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+    },
+    history: exampleHistory
+  });
+  logger_default.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
+}
+async function statelessMessage(sourcePayload, options = {}, validatorFn = null) {
+  if (!this.chat) {
+    throw new Error("Chat session not initialized. Please call init() first.");
+  }
+  const payloadStr = typeof sourcePayload === "string" ? sourcePayload : JSON.stringify(sourcePayload, null, 2);
+  const contents = [];
+  if (this.exampleCount > 0) {
+    const history = this.chat.getHistory();
+    const exampleHistory = history.slice(0, this.exampleCount);
+    contents.push(...exampleHistory);
+  }
+  contents.push({ role: "user", parts: [{ text: payloadStr }] });
+  const mergedLabels = { ...this.labels, ...options.labels || {} };
+  const result = await this.genAIClient.models.generateContent({
+    model: this.modelName,
+    contents,
+    config: {
+      ...this.chatConfig,
+      ...Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
+    }
+  });
+  this.lastResponseMetadata = {
+    modelVersion: result.modelVersion || null,
+    requestedModel: this.modelName,
+    promptTokens: result.usageMetadata?.promptTokenCount || 0,
+    responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
+    totalTokens: result.usageMetadata?.totalTokenCount || 0,
+    timestamp: Date.now()
+  };
+  if (result.usageMetadata && logger_default.level !== "silent") {
+    logger_default.debug(`Stateless message metadata:`, {
+      modelVersion: result.modelVersion || "not-provided",
+      promptTokens: result.usageMetadata.promptTokenCount,
+      responseTokens: result.usageMetadata.candidatesTokenCount
+    });
+  }
+  const modelResponse = result.text;
+  const extractedJSON = extractJSON(modelResponse);
+  let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
+  if (validatorFn) {
+    await validatorFn(transformedPayload);
+  }
+  return transformedPayload;
 }
 function attemptJSONRecovery(text, maxAttempts = 100) {
   if (!text || typeof text !== "string") return null;

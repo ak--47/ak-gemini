@@ -11,6 +11,8 @@ Use this to power LLM-driven data pipelines, JSON mapping, or any automated AI t
 * **Declarative Few-shot Examples:** Seed transformations using example mappings, with support for custom keys (`PROMPT`, `ANSWER`, `CONTEXT`, or your own)
 * **Automatic Validation & Repair:** Validate outputs with your own async function; auto-repair failed payloads with LLM feedback loop (exponential backoff, fully configurable)
 * **Token Counting & Safety:** Preview the *exact* Gemini token consumption for any operation—including all examples, instructions, and your input—before sending, so you can avoid window errors and manage costs.
+* **Conversation Management:** Clear conversation history while preserving examples, or send stateless one-off messages that don't affect history
+* **Response Metadata:** Access actual model version and token counts from API responses for billing verification and debugging
 * **Strong TypeScript/JSDoc Typings:** All public APIs fully typed (see `/types`)
 * **Minimal API Surface:** Dead simple, no ceremony—init, seed, transform, validate.
 * **Robust Logging:** Pluggable logger for all steps, easy debugging
@@ -106,6 +108,25 @@ console.log(validPayload);
 
 ---
 
+### 5. **Conversation Management**
+
+Manage chat history to control costs and isolate requests:
+
+```js
+// Clear conversation history while preserving seeded examples
+await transformer.clearConversation();
+
+// Send a stateless message that doesn't affect chat history
+const result = await transformer.message({ query: "one-off question" }, { stateless: true });
+
+// Check actual model and token usage from last API call
+console.log(transformer.lastResponseMetadata);
+// → { modelVersion: 'gemini-2.5-flash-001', requestedModel: 'gemini-2.5-flash',
+//    promptTokens: 150, responseTokens: 42, totalTokens: 192, timestamp: 1703... }
+```
+
+---
+
 ## API
 
 ### Constructor
@@ -142,9 +163,13 @@ Initializes Gemini chat session (idempotent).
 Seeds the model with example transformations (uses keys from constructor).
 You can omit `examples` to use the `examplesFile` (if provided).
 
-#### `await transformer.message(sourcePayload)`
+#### `await transformer.message(sourcePayload, options?)`
 
 Transforms input JSON to output JSON using the seeded examples and system instructions. Throws if estimated token window would be exceeded.
+
+**Options:**
+- `stateless: true` — Send a one-off message without affecting chat history (uses `generateContent` instead of chat)
+- `labels: {}` — Per-message billing labels
 
 #### `await transformer.estimateTokenUsage(sourcePayload)`
 
@@ -167,6 +192,31 @@ Resets the Gemini chat session, clearing all history/examples.
 #### `transformer.getHistory()`
 
 Returns the current chat history (for debugging).
+
+#### `await transformer.clearConversation()`
+
+Clears conversation history while preserving seeded examples. Useful for starting fresh user sessions without re-seeding.
+
+---
+
+### Properties
+
+#### `transformer.lastResponseMetadata`
+
+After each API call, contains metadata from the response:
+
+```js
+{
+  modelVersion: string | null,  // Actual model version that responded (e.g., 'gemini-2.5-flash-001')
+  requestedModel: string,       // Model you requested (e.g., 'gemini-2.5-flash')
+  promptTokens: number,         // Tokens in the prompt
+  responseTokens: number,       // Tokens in the response
+  totalTokens: number,          // Total tokens used
+  timestamp: number             // When response was received
+}
+```
+
+Useful for verifying billing, debugging model behavior, and tracking token usage.
 
 ---
 

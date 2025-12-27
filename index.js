@@ -57,7 +57,7 @@ const DEFAULT_THINKING_CONFIG = {
 	thinkingLevel: ThinkingLevel.MINIMAL
 };
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 100000; // Default ceiling for output tokens
+const DEFAULT_MAX_OUTPUT_TOKENS = 50_000; // Default ceiling for output tokens
 
 // Models that support thinking features (as of Dec 2024)
 // Using regex patterns for more precise matching
@@ -112,6 +112,8 @@ class AITransformer {
 		this.onlyJSON = true; // always return JSON
 		this.asyncValidator = null; // for transformWithValidation
 		this.logLevel = 'info'; // default log level
+		this.lastResponseMetadata = null; // stores metadata from last API response
+		this.exampleCount = 0; // tracks number of example history items from seed()
 		AITransformFactory.call(this, options);
 
 		//external API
@@ -136,6 +138,7 @@ class AITransformer {
 		this.estimateTokenUsage = estimateTokenUsage.bind(this);
 		this.updateSystemInstructions = updateSystemInstructions.bind(this);
 		this.estimateCost = estimateCost.bind(this);
+		this.clearConversation = clearConversation.bind(this);
 	}
 }
 
@@ -467,6 +470,8 @@ async function seedWithExamples(examples) {
 		history: [...currentHistory, ...historyToAdd],
 	});
 
+	// Track example count for clearConversation() and stateless messages
+	this.exampleCount = currentHistory.length + historyToAdd.length;
 
 	const newHistory = this.chat.getHistory();
 	log.debug(`Created new chat session with ${newHistory.length} examples.`);
@@ -509,6 +514,27 @@ async function rawMessage(sourcePayload, messageOptions = {}) {
 		}
 
 		const result = await this.chat.sendMessage(sendParams);
+
+		// Capture and log response metadata for model verification and debugging
+		this.lastResponseMetadata = {
+			modelVersion: result.modelVersion || null,
+			requestedModel: this.modelName,
+			promptTokens: result.usageMetadata?.promptTokenCount || 0,
+			responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
+			totalTokens: result.usageMetadata?.totalTokenCount || 0,
+			timestamp: Date.now()
+		};
+
+		if (result.usageMetadata && log.level !== 'silent') {
+			log.debug(`API response metadata:`, {
+				modelVersion: result.modelVersion || 'not-provided',
+				requestedModel: this.modelName,
+				promptTokens: result.usageMetadata.promptTokenCount,
+				responseTokens: result.usageMetadata.candidatesTokenCount,
+				totalTokens: result.usageMetadata.totalTokenCount
+			});
+		}
+
 		const modelResponse = result.text;
 		const extractedJSON = extractJSON(modelResponse); // Assuming extractJSON is defined
 
@@ -539,6 +565,12 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
 	if (!this.chat) {
 		throw new Error("Chat session not initialized. Please call init() first.");
 	}
+
+	// Handle stateless messages separately - they don't add to chat history
+	if (options.stateless) {
+		return await statelessMessage.call(this, sourcePayload, options, validatorFn);
+	}
+
 	const maxRetries = options.maxRetries ?? this.maxRetries;
 	const retryDelay = options.retryDelay ?? this.retryDelay;
 
@@ -656,6 +688,7 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
 
 /**
  * Rebuilds a payload based on server error feedback
+ * @this {ExportedAPI}
  * @param {Object} lastPayload - The payload that failed validation
  * @param {string} serverError - The error message from the server
  * @returns {Promise<Object>} - A new corrected payload
@@ -681,6 +714,20 @@ Respond with JSON only – no comments or explanations.
 	let result;
 	try {
 		result = await this.chat.sendMessage({ message: prompt });
+
+		// Capture and log response metadata for rebuild calls too
+		this.lastResponseMetadata = {
+			modelVersion: result.modelVersion || null,
+			requestedModel: this.modelName,
+			promptTokens: result.usageMetadata?.promptTokenCount || 0,
+			responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
+			totalTokens: result.usageMetadata?.totalTokenCount || 0,
+			timestamp: Date.now()
+		};
+
+		if (result.usageMetadata && log.level !== 'silent') {
+			log.debug(`Rebuild response metadata - tokens used:`, result.usageMetadata.totalTokenCount);
+		}
 	} catch (err) {
 		throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
 	}
@@ -831,6 +878,110 @@ async function updateSystemInstructions(newInstructions) {
 
 	log.debug('Updating system instructions and reinitializing chat...');
 	await this.init(true); // Force reinitialize with new instructions
+}
+
+/**
+ * Clears conversation history while preserving seeded examples.
+ * Useful for starting a fresh conversation within the same session
+ * without losing the few-shot learning examples.
+ * @this {ExportedAPI}
+ * @returns {Promise<void>}
+ */
+async function clearConversation() {
+	if (!this.chat) {
+		log.warn("Cannot clear conversation: chat not initialized.");
+		return;
+	}
+
+	const history = this.chat.getHistory();
+	const exampleHistory = history.slice(0, this.exampleCount || 0);
+
+	this.chat = await this.genAIClient.chats.create({
+		model: this.modelName,
+		// @ts-ignore
+		config: {
+			...this.chatConfig,
+			...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+		},
+		history: exampleHistory,
+	});
+
+	log.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
+}
+
+/**
+ * Sends a one-off message using generateContent (not chat).
+ * Does NOT affect chat history - useful for isolated requests.
+ * @this {ExportedAPI}
+ * @param {Object|string} sourcePayload - The source payload.
+ * @param {Object} [options] - Options including labels.
+ * @param {AsyncValidatorFunction|null} [validatorFn] - Optional validator.
+ * @returns {Promise<Object>} - The transformed payload.
+ */
+async function statelessMessage(sourcePayload, options = {}, validatorFn = null) {
+	if (!this.chat) {
+		throw new Error("Chat session not initialized. Please call init() first.");
+	}
+
+	const payloadStr = typeof sourcePayload === 'string'
+		? sourcePayload
+		: JSON.stringify(sourcePayload, null, 2);
+
+	// Build contents including examples from current chat history
+	const contents = [];
+
+	// Include seeded examples if we have them
+	if (this.exampleCount > 0) {
+		const history = this.chat.getHistory();
+		const exampleHistory = history.slice(0, this.exampleCount);
+		contents.push(...exampleHistory);
+	}
+
+	// Add the user message
+	contents.push({ role: 'user', parts: [{ text: payloadStr }] });
+
+	// Merge labels
+	const mergedLabels = { ...this.labels, ...(options.labels || {}) };
+
+	// Use generateContent instead of chat.sendMessage
+	const result = await this.genAIClient.models.generateContent({
+		model: this.modelName,
+		contents: contents,
+		config: {
+			...this.chatConfig,
+			...(Object.keys(mergedLabels).length > 0 && { labels: mergedLabels })
+		}
+	});
+
+	// Capture and log response metadata
+	this.lastResponseMetadata = {
+		modelVersion: result.modelVersion || null,
+		requestedModel: this.modelName,
+		promptTokens: result.usageMetadata?.promptTokenCount || 0,
+		responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
+		totalTokens: result.usageMetadata?.totalTokenCount || 0,
+		timestamp: Date.now()
+	};
+
+	if (result.usageMetadata && log.level !== 'silent') {
+		log.debug(`Stateless message metadata:`, {
+			modelVersion: result.modelVersion || 'not-provided',
+			promptTokens: result.usageMetadata.promptTokenCount,
+			responseTokens: result.usageMetadata.candidatesTokenCount
+		});
+	}
+
+	const modelResponse = result.text;
+	const extractedJSON = extractJSON(modelResponse);
+
+	let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
+
+	// Validate if a validator is provided
+	if (validatorFn) {
+		await validatorFn(transformedPayload);
+	}
+
+	return transformedPayload;
 }
 
 

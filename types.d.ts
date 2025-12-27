@@ -31,6 +31,26 @@ export interface ChatConfig {
   [key: string]: any; // Additional properties for flexibility
 }
 
+/** Metadata from the last API response, useful for debugging and cost tracking */
+export interface ResponseMetadata {
+  modelVersion: string | null; // The actual model version that responded
+  requestedModel: string; // The model that was requested
+  promptTokens: number; // Number of tokens in the prompt
+  responseTokens: number; // Number of tokens in the response
+  totalTokens: number; // Total tokens used
+  timestamp: number; // Timestamp of when the response was received
+}
+
+/** Options for per-message configuration */
+export interface MessageOptions {
+  labels?: Record<string, string>; // Per-message billing labels
+  stateless?: boolean; // If true, send message without affecting chat history
+  maxRetries?: number; // Override max retries for this message
+  retryDelay?: number; // Override retry delay for this message
+  enableGrounding?: boolean; // Override grounding setting for this message
+  groundingConfig?: Record<string, any>; // Override grounding config for this message
+}
+
 export interface AITransformerContext {
   modelName?: string;
   systemInstructions?: string;
@@ -47,8 +67,8 @@ export interface AITransformerContext {
   maxRetries?: number;
   retryDelay?: number;
   init?: (force?: boolean) => Promise<void>; // Initialization function
-  seed?: () => Promise<void>; // Function to seed the transformer with examples  
-  message?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>; // Function to send messages to the model
+  seed?: () => Promise<void>; // Function to seed the transformer with examples
+  message?: (payload: Record<string, unknown>, opts?: MessageOptions, validatorFn?: AsyncValidatorFunction | null) => Promise<Record<string, unknown>>; // Function to send messages to the model
   rebuild?: (lastPayload: Record<string, unknown>, serverError: string) => Promise<Record<string, unknown>>; // Function to rebuild the transformer
   rawMessage?: (payload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
   genAIClient?: GoogleGenAI; // Google GenAI client instance
@@ -57,7 +77,9 @@ export interface AITransformerContext {
   groundingConfig?: Record<string, any>; // Additional grounding configuration options
   labels?: Record<string, string>; // Custom labels for billing segmentation (keys: 1-63 chars lowercase, values: max 63 chars)
   estimateTokenUsage?: (nextPayload: Record<string, unknown> | string) => Promise<{ totalTokens: number; breakdown?: any }>;
-
+  lastResponseMetadata?: ResponseMetadata | null; // Metadata from the last API response
+  exampleCount?: number; // Number of example history items from seed()
+  clearConversation?: () => Promise<void>; // Clears conversation history while preserving examples
 }
 
 export interface TransformationExample {
@@ -92,7 +114,7 @@ export interface AITransformerOptions {
   systemInstructions?: string; // Custom system instructions for the model
   chatConfig?: ChatConfig; // Configuration object for the chat session
   thinkingConfig?: ThinkingConfig; // Thinking features configuration (defaults to thinkingBudget: 0, thinkingLevel: "MINIMAL")
-  maxOutputTokens?: number; // Maximum number of tokens that can be generated in the response (defaults to 100000)
+  maxOutputTokens?: number; // Maximum number of tokens that can be generated in the response (defaults to 50000)
   examplesFile?: string; // Path to JSON file containing transformation examples
   exampleData?: TransformationExample[]; // Inline examples to seed the transformer
   sourceKey?: string; // Key name for source data in examples (alias for promptKey)
@@ -150,14 +172,24 @@ export declare class AITransformer {
   enableGrounding: boolean;
   groundingConfig: Record<string, any>;
   labels: Record<string, string>;
-  
+  /** Metadata from the last API response (model version, token counts, etc.) */
+  lastResponseMetadata: ResponseMetadata | null;
+  /** Number of history items that are seeded examples (used by clearConversation) */
+  exampleCount: number;
+
   // Methods
   init(force?: boolean): Promise<void>;
   seed(examples?: TransformationExample[]): Promise<any>;
-  message(payload: Record<string, unknown>, opts?: object, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
+  /**
+   * Send a message to the model.
+   * @param payload - The payload to transform
+   * @param opts - Options including { stateless: true } to send without affecting history
+   * @param validatorFn - Optional validator function
+   */
+  message(payload: Record<string, unknown>, opts?: MessageOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
   rawMessage(sourcePayload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }): Promise<Record<string, unknown> | any>;
-  transformWithValidation(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
-  messageAndValidate(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: object): Promise<Record<string, unknown>>;
+  transformWithValidation(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: MessageOptions): Promise<Record<string, unknown>>;
+  messageAndValidate(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: MessageOptions): Promise<Record<string, unknown>>;
   rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
   reset(): Promise<void>;
   getHistory(): Array<any>;
@@ -171,6 +203,8 @@ export declare class AITransformer {
     estimatedInputCost: number;
     note: string;
   }>;
+  /** Clears conversation history while preserving seeded examples */
+  clearConversation(): Promise<void>;
 }
 
 // Default export

@@ -2318,3 +2318,259 @@ describe('Thinking Configuration', () => {
         expect('thinkingConfig' in transformer.chatConfig).toBe(false);
     });
 });
+
+
+describe('Model Verification', () => {
+    it('should capture lastResponseMetadata after a message', async () => {
+        const modelName = 'gemini-2.5-flash';
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName
+        });
+        await transformer.init();
+        await transformer.seed([
+            { PROMPT: { x: 1 }, ANSWER: { y: 2 } }
+        ]);
+
+        await transformer.message({ x: 5 });
+
+        // Verify metadata was captured
+        expect(transformer.lastResponseMetadata).not.toBeNull();
+        expect(transformer.lastResponseMetadata.requestedModel).toBe(modelName);
+
+        // Verify token counts are present
+        expect(transformer.lastResponseMetadata.promptTokens).toBeGreaterThan(0);
+        expect(transformer.lastResponseMetadata.responseTokens).toBeGreaterThan(0);
+        expect(transformer.lastResponseMetadata.totalTokens).toBeGreaterThan(0);
+        expect(transformer.lastResponseMetadata.timestamp).toBeGreaterThan(0);
+
+        // Log for manual verification of actual model used
+        console.log('Model verification:', {
+            requested: transformer.lastResponseMetadata.requestedModel,
+            actual: transformer.lastResponseMetadata.modelVersion
+        });
+    });
+
+    it('should update lastResponseMetadata after each message', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        await transformer.message({ q: 'test1' });
+        const firstTimestamp = transformer.lastResponseMetadata.timestamp;
+        const firstTokens = transformer.lastResponseMetadata.totalTokens;
+
+        // Small delay to ensure different timestamp
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        await transformer.message({ q: 'test2' });
+        const secondTimestamp = transformer.lastResponseMetadata.timestamp;
+
+        expect(secondTimestamp).toBeGreaterThan(firstTimestamp);
+    }, 30000); // Longer timeout for 2 API calls
+
+    it('should have null lastResponseMetadata before any message', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        expect(transformer.lastResponseMetadata).toBeNull();
+    });
+});
+
+
+describe('clearConversation', () => {
+    it('should clear messages but preserve examples', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        const examples = [
+            { PROMPT: { x: 1 }, ANSWER: { y: 2 } },
+            { PROMPT: { x: 3 }, ANSWER: { y: 4 } }
+        ];
+        await transformer.seed(examples);
+
+        const historyAfterSeed = transformer.getHistory().length;
+        expect(historyAfterSeed).toBeGreaterThan(0);
+
+        // Send some messages
+        await transformer.message({ x: 5 });
+        await transformer.message({ x: 6 });
+
+        const historyAfterMessages = transformer.getHistory().length;
+        expect(historyAfterMessages).toBeGreaterThan(historyAfterSeed);
+
+        // Clear conversation
+        await transformer.clearConversation();
+
+        const historyAfterClear = transformer.getHistory().length;
+        expect(historyAfterClear).toBe(historyAfterSeed); // Only examples remain
+    });
+
+    it('should track exampleCount correctly', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        expect(transformer.exampleCount).toBe(0);
+
+        const examples = [
+            { PROMPT: { a: 1 }, ANSWER: { b: 2 } },
+            { PROMPT: { a: 3 }, ANSWER: { b: 4 } },
+            { PROMPT: { a: 5 }, ANSWER: { b: 6 } }
+        ];
+        await transformer.seed(examples);
+
+        // Each example creates 2 history items (user + model)
+        expect(transformer.exampleCount).toBe(examples.length * 2);
+    });
+
+    it('should warn but not throw when clearing without init', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+
+        // Should not throw, just warn
+        await expect(transformer.clearConversation()).resolves.not.toThrow();
+    });
+
+    it('should allow new messages after clearing', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        const examples = [
+            { PROMPT: { num: 1 }, ANSWER: { doubled: 2 } }
+        ];
+        await transformer.seed(examples);
+
+        await transformer.message({ num: 5 });
+        await transformer.clearConversation();
+
+        // Should be able to send new messages after clearing
+        const result = await transformer.message({ num: 10 });
+        expect(result).toBeTruthy();
+        expect(typeof result).toBe('object');
+    });
+});
+
+
+describe('Stateless Messages', () => {
+    it('should not add to history when stateless: true', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        const examples = [{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }];
+        await transformer.seed(examples);
+
+        const historyBeforeStateless = transformer.getHistory().length;
+
+        // Send stateless message
+        await transformer.message({ x: 99 }, { stateless: true });
+
+        const historyAfterStateless = transformer.getHistory().length;
+
+        // History should be unchanged
+        expect(historyAfterStateless).toBe(historyBeforeStateless);
+    });
+
+    it('should return valid response for stateless message', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        const examples = [
+            { PROMPT: { name: 'Alice' }, ANSWER: { greeting: 'Hello Alice' } }
+        ];
+        await transformer.seed(examples);
+
+        const result = await transformer.message(
+            { name: 'Bob' },
+            { stateless: true }
+        );
+
+        expect(result).toBeDefined();
+        expect(typeof result).toBe('object');
+    });
+
+    it('should use seeded examples for stateless messages', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        const examples = [
+            { PROMPT: { num: 1 }, ANSWER: { doubled: 2 } },
+            { PROMPT: { num: 5 }, ANSWER: { doubled: 10 } }
+        ];
+        await transformer.seed(examples);
+
+        const result = await transformer.message(
+            { num: 7 },
+            { stateless: true }
+        );
+
+        // Should learn the doubling pattern from examples
+        expect(result.doubled).toBe(14);
+    });
+
+    it('should capture lastResponseMetadata for stateless messages', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+        await transformer.seed([{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }]);
+
+        await transformer.message({ x: 5 }, { stateless: true });
+
+        expect(transformer.lastResponseMetadata).not.toBeNull();
+        expect(transformer.lastResponseMetadata.promptTokens).toBeGreaterThan(0);
+    });
+
+    it('should allow mixing stateless and stateful messages', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        const examples = [{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }];
+        await transformer.seed(examples);
+
+        const historyAfterSeed = transformer.getHistory().length;
+
+        // Stateful message - should add to history
+        await transformer.message({ x: 10 });
+        const historyAfterStateful = transformer.getHistory().length;
+        expect(historyAfterStateful).toBeGreaterThan(historyAfterSeed);
+
+        // Stateless message - should NOT add to history
+        await transformer.message({ x: 20 }, { stateless: true });
+        const historyAfterStateless = transformer.getHistory().length;
+        expect(historyAfterStateless).toBe(historyAfterStateful);
+
+        // Another stateful message - should add to history
+        await transformer.message({ x: 30 });
+        const historyAfterSecondStateful = transformer.getHistory().length;
+        expect(historyAfterSecondStateful).toBeGreaterThan(historyAfterStateless);
+    });
+});
