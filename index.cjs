@@ -134,11 +134,11 @@ var AITransformer = class {
     this.getHistory = getChatHistory.bind(this);
     this.messageAndValidate = prepareAndValidateMessage.bind(this);
     this.transformWithValidation = prepareAndValidateMessage.bind(this);
-    this.estimate = estimateTokenUsage.bind(this);
-    this.estimateTokenUsage = estimateTokenUsage.bind(this);
+    this.estimate = estimateInputTokens.bind(this);
     this.updateSystemInstructions = updateSystemInstructions.bind(this);
     this.estimateCost = estimateCost.bind(this);
     this.clearConversation = clearConversation.bind(this);
+    this.getLastUsage = getLastUsage.bind(this);
   }
 };
 var index_default = AITransformer;
@@ -536,7 +536,7 @@ Respond with JSON only \u2013 no comments or explanations.
     throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
   }
 }
-async function estimateTokenUsage(nextPayload) {
+async function estimateInputTokens(nextPayload) {
   const contents = [];
   if (this.systemInstructions) {
     contents.push({ parts: [{ text: this.systemInstructions }] });
@@ -553,7 +553,7 @@ async function estimateTokenUsage(nextPayload) {
     model: this.modelName,
     contents
   });
-  return resp;
+  return { inputTokens: resp.totalTokens };
 }
 var MODEL_PRICING = {
   "gemini-2.5-flash": { input: 0.15, output: 0.6 },
@@ -565,13 +565,13 @@ var MODEL_PRICING = {
   "gemini-2.0-flash-lite": { input: 0.02, output: 0.1 }
 };
 async function estimateCost(nextPayload) {
-  const tokenInfo = await this.estimateTokenUsage(nextPayload);
+  const tokenInfo = await this.estimate(nextPayload);
   const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
   return {
-    totalTokens: tokenInfo.totalTokens,
+    inputTokens: tokenInfo.inputTokens,
     model: this.modelName,
     pricing,
-    estimatedInputCost: tokenInfo.totalTokens / 1e6 * pricing.input,
+    estimatedInputCost: tokenInfo.inputTokens / 1e6 * pricing.input,
     note: "Cost is for input tokens only; output cost depends on response length"
   };
 }
@@ -632,6 +632,28 @@ async function clearConversation() {
     history: exampleHistory
   });
   logger_default.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
+}
+function getLastUsage() {
+  if (!this.lastResponseMetadata) {
+    return null;
+  }
+  const meta = this.lastResponseMetadata;
+  return {
+    // Token breakdown for billing
+    promptTokens: meta.promptTokens,
+    // Input tokens (includes system instructions + history + message)
+    responseTokens: meta.responseTokens,
+    // Output tokens
+    totalTokens: meta.totalTokens,
+    // promptTokens + responseTokens
+    // Model verification for billing cross-check
+    modelVersion: meta.modelVersion,
+    // Actual model that responded (e.g., 'gemini-2.5-flash-001')
+    requestedModel: meta.requestedModel,
+    // Model you requested (e.g., 'gemini-2.5-flash')
+    // Timestamp for audit trail
+    timestamp: meta.timestamp
+  };
 }
 async function statelessMessage(sourcePayload, options = {}, validatorFn = null) {
   if (!this.chat) {

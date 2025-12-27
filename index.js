@@ -134,11 +134,11 @@ class AITransformer {
 		this.getHistory = getChatHistory.bind(this);
 		this.messageAndValidate = prepareAndValidateMessage.bind(this);
 		this.transformWithValidation = prepareAndValidateMessage.bind(this);
-		this.estimate = estimateTokenUsage.bind(this);
-		this.estimateTokenUsage = estimateTokenUsage.bind(this);
+		this.estimate = estimateInputTokens.bind(this);
 		this.updateSystemInstructions = updateSystemInstructions.bind(this);
 		this.estimateCost = estimateCost.bind(this);
 		this.clearConversation = clearConversation.bind(this);
+		this.getLastUsage = getLastUsage.bind(this);
 	}
 }
 
@@ -744,12 +744,19 @@ Respond with JSON only – no comments or explanations.
 
 
 /**
- * Estimate total token usage if you were to send a new payload as the next message.
- * Considers system instructions, current chat history (including examples), and the new message.
+ * Estimate INPUT tokens only for a payload before sending.
+ * This estimates the tokens that will be consumed by your prompt (input), NOT the response (output).
+ * Includes: system instructions + chat history (seeded examples) + your new message.
+ * Use this to preview input token costs and avoid exceeding context window limits.
+ *
+ * NOTE: Output tokens cannot be predicted before the API call. Use getLastUsage() after
+ * calling message() to see actual input + output token consumption.
+ *
+ * @this {ExportedAPI}
  * @param {object|string} nextPayload - The next user message to be sent (object or string)
- * @returns {Promise<{ totalTokens: number }>} - The result of Gemini's countTokens API
+ * @returns {Promise<{ inputTokens: number }>} - Estimated input token count
  */
-async function estimateTokenUsage(nextPayload) {
+async function estimateInputTokens(nextPayload) {
 	// Compose the conversation contents, Gemini-style
 	const contents = [];
 
@@ -780,7 +787,8 @@ async function estimateTokenUsage(nextPayload) {
 		contents,
 	});
 
-	return resp; // includes totalTokens, possibly breakdown
+	// Return with clear naming - this is INPUT tokens only
+	return { inputTokens: resp.totalTokens };
 }
 
 // Model pricing per million tokens (as of Dec 2025)
@@ -796,20 +804,21 @@ const MODEL_PRICING = {
 };
 
 /**
- * Estimates the cost of sending a payload based on token count and model pricing.
+ * Estimates the cost of sending a payload based on input token count and model pricing.
+ * NOTE: This only estimates INPUT cost. Output cost depends on response length and cannot be predicted.
  * @this {ExportedAPI}
  * @param {object|string} nextPayload - The next user message to be sent (object or string)
- * @returns {Promise<Object>} - Cost estimation including tokens, model, pricing, and estimated input cost
+ * @returns {Promise<Object>} - Cost estimation including input tokens, model, pricing, and estimated input cost
  */
 async function estimateCost(nextPayload) {
-	const tokenInfo = await this.estimateTokenUsage(nextPayload);
+	const tokenInfo = await this.estimate(nextPayload);
 	const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
 
 	return {
-		totalTokens: tokenInfo.totalTokens,
+		inputTokens: tokenInfo.inputTokens,
 		model: this.modelName,
 		pricing: pricing,
-		estimatedInputCost: (tokenInfo.totalTokens / 1_000_000) * pricing.input,
+		estimatedInputCost: (tokenInfo.inputTokens / 1_000_000) * pricing.input,
 		note: 'Cost is for input tokens only; output cost depends on response length'
 	};
 }
@@ -907,6 +916,35 @@ async function clearConversation() {
 	});
 
 	log.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
+}
+
+/**
+ * Returns structured usage data from the last API response for billing verification.
+ * Call this after message() or statelessMessage() to get actual token consumption.
+ *
+ * @this {ExportedAPI}
+ * @returns {Object|null} Usage data with promptTokens, responseTokens, totalTokens, modelVersion, etc.
+ *                        Returns null if no API call has been made yet.
+ */
+function getLastUsage() {
+	if (!this.lastResponseMetadata) {
+		return null;
+	}
+
+	const meta = this.lastResponseMetadata;
+	return {
+		// Token breakdown for billing
+		promptTokens: meta.promptTokens,      // Input tokens (includes system instructions + history + message)
+		responseTokens: meta.responseTokens,  // Output tokens
+		totalTokens: meta.totalTokens,        // promptTokens + responseTokens
+
+		// Model verification for billing cross-check
+		modelVersion: meta.modelVersion,      // Actual model that responded (e.g., 'gemini-2.5-flash-001')
+		requestedModel: meta.requestedModel,  // Model you requested (e.g., 'gemini-2.5-flash')
+
+		// Timestamp for audit trail
+		timestamp: meta.timestamp
+	};
 }
 
 /**

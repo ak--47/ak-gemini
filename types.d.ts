@@ -41,6 +41,16 @@ export interface ResponseMetadata {
   timestamp: number; // Timestamp of when the response was received
 }
 
+/** Structured usage data returned by getLastUsage() for billing verification */
+export interface UsageData {
+  promptTokens: number;       // Input tokens (includes system instructions + history + message)
+  responseTokens: number;     // Output tokens
+  totalTokens: number;        // promptTokens + responseTokens
+  modelVersion: string | null; // Actual model that responded (e.g., 'gemini-2.5-flash-001')
+  requestedModel: string;     // Model you requested (e.g., 'gemini-2.5-flash')
+  timestamp: number;          // When response was received
+}
+
 /** Options for per-message configuration */
 export interface MessageOptions {
   labels?: Record<string, string>; // Per-message billing labels
@@ -76,7 +86,8 @@ export interface AITransformerContext {
   enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
   groundingConfig?: Record<string, any>; // Additional grounding configuration options
   labels?: Record<string, string>; // Custom labels for billing segmentation (keys: 1-63 chars lowercase, values: max 63 chars)
-  estimateTokenUsage?: (nextPayload: Record<string, unknown> | string) => Promise<{ totalTokens: number; breakdown?: any }>;
+  estimate?: (nextPayload: Record<string, unknown> | string) => Promise<{ inputTokens: number }>;
+  getLastUsage?: () => UsageData | null;
   lastResponseMetadata?: ResponseMetadata | null; // Metadata from the last API response
   exampleCount?: number; // Number of example history items from seed()
   clearConversation?: () => Promise<void>; // Clears conversation history while preserving examples
@@ -193,11 +204,19 @@ export declare class AITransformer {
   rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
   reset(): Promise<void>;
   getHistory(): Array<any>;
-  estimateTokenUsage(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
-  estimate(nextPayload: Record<string, unknown> | string): Promise<{ totalTokens: number; breakdown?: any }>;
+  /**
+   * Estimate INPUT tokens only for a payload before sending.
+   * NOTE: Output tokens cannot be predicted before the API call.
+   * Use getLastUsage() after message() to see actual consumption.
+   */
+  estimate(nextPayload: Record<string, unknown> | string): Promise<{ inputTokens: number }>;
   updateSystemInstructions(newInstructions: string): Promise<void>;
+  /**
+   * Estimates the INPUT cost of sending a payload.
+   * NOTE: Output cost depends on response length and cannot be predicted.
+   */
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
-    totalTokens: number;
+    inputTokens: number;
     model: string;
     pricing: { input: number; output: number };
     estimatedInputCost: number;
@@ -205,6 +224,11 @@ export declare class AITransformer {
   }>;
   /** Clears conversation history while preserving seeded examples */
   clearConversation(): Promise<void>;
+  /**
+   * Returns structured usage data from the last API response for billing verification.
+   * Returns null if no API call has been made yet.
+   */
+  getLastUsage(): UsageData | null;
 }
 
 // Default export

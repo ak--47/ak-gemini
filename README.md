@@ -77,15 +77,19 @@ console.log(result);
 
 ### 3. **Token Window Safety/Preview**
 
-Before calling `.message()` or `.seed()`, you can preview the exact token usage that will be sent to Gemini—*including* your system instructions, examples, and user input. This is vital for avoiding window errors and managing context size:
+Before calling `.message()` or `.seed()`, you can preview the INPUT token usage that will be sent to Gemini—*including* your system instructions, examples, and user input. This is vital for avoiding window errors and managing context size:
 
 ```js
-const { totalTokens, breakdown } = await transformer.estimateTokenUsage({ name: "Bob" });
-console.log(`Total tokens: ${totalTokens}`);
-console.log(breakdown); // See per-section token counts
+const { inputTokens } = await transformer.estimate({ name: "Bob" });
+console.log(`Input tokens: ${inputTokens}`);
 
 // Optional: abort or trim if over limit
-if (totalTokens > 32000) throw new Error("Request too large for selected Gemini model");
+if (inputTokens > 32000) throw new Error("Request too large for selected Gemini model");
+
+// After the call, check actual usage (input + output)
+await transformer.message({ name: "Bob" });
+const usage = transformer.getLastUsage();
+console.log(`Actual usage: ${usage.promptTokens} in, ${usage.responseTokens} out`);
 ```
 
 ---
@@ -171,10 +175,12 @@ Transforms input JSON to output JSON using the seeded examples and system instru
 - `stateless: true` — Send a one-off message without affecting chat history (uses `generateContent` instead of chat)
 - `labels: {}` — Per-message billing labels
 
-#### `await transformer.estimateTokenUsage(sourcePayload)`
+#### `await transformer.estimate(sourcePayload)`
 
-Returns `{ totalTokens, breakdown }` for the *full request* that would be sent to Gemini (system instructions + all examples + your sourcePayload as the new prompt).
-Lets you preview token window safety and abort/trim as needed.
+Returns `{ inputTokens }` — the estimated INPUT tokens for the request (system instructions + all examples + your sourcePayload).
+Use this to preview token window safety and manage costs before sending.
+
+**Note:** This only estimates input tokens. Output tokens cannot be predicted before the API call. Use `getLastUsage()` after `message()` to see actual consumption.
 
 #### `await transformer.transformWithValidation(sourcePayload, validatorFn, options?)`
 
@@ -196,6 +202,22 @@ Returns the current chat history (for debugging).
 #### `await transformer.clearConversation()`
 
 Clears conversation history while preserving seeded examples. Useful for starting fresh user sessions without re-seeding.
+
+#### `transformer.getLastUsage()`
+
+Returns structured usage data from the last API response for billing verification. Returns `null` if no API call has been made yet.
+
+```js
+const usage = transformer.getLastUsage();
+// {
+//   promptTokens: 150,      // Input tokens (includes system instructions + history + message)
+//   responseTokens: 42,     // Output tokens
+//   totalTokens: 192,       // Total tokens from API
+//   modelVersion: 'gemini-2.5-flash-001',  // Actual model that responded
+//   requestedModel: 'gemini-2.5-flash',    // Model you requested
+//   timestamp: 1703...      // When response was received
+// }
+```
 
 ---
 

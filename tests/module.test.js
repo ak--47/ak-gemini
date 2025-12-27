@@ -79,10 +79,10 @@ describe('Basics', () => {
 	});
 
 	describe('estimate', () => {
-		it('should estimate token usage for a payload', async () => {
+		it('should estimate input token usage for a payload', async () => {
 			const count = await transformer.estimate({ foo: "bar" });
-			expect(typeof count.totalTokens).toBe('number');
-			expect(count.totalTokens).toBeGreaterThan(0);
+			expect(typeof count.inputTokens).toBe('number');
+			expect(count.inputTokens).toBeGreaterThan(0);
 		});
 
 		it('should throw on a huge payload if over window', async () => {
@@ -1755,25 +1755,25 @@ describe('Token Estimation', () => {
         const estimates = [];
         for (const payload of payloads) {
             const estimate = await transformer.estimate(payload);
-            estimates.push(estimate.totalTokens);
+            estimates.push(estimate.inputTokens);
         }
-        
-        // Larger payloads should have more tokens
+
+        // Larger payloads should have more input tokens
         expect(estimates[0]).toBeLessThan(estimates[1]);
         expect(estimates[1]).toBeLessThan(estimates[2]);
     });
 
-    it('should include system instructions and examples in token count', async () => {
+    it('should include system instructions and examples in input token count', async () => {
         const emptyEstimate = await transformer.estimate({ test: "small" });
-        
+
         await transformer.seed([
             { PROMPT: { big: "x".repeat(500) }, ANSWER: { result: "y".repeat(500) } }
         ]);
-        
+
         const seededEstimate = await transformer.estimate({ test: "small" });
-        
-        // Should include more tokens after seeding
-        expect(seededEstimate.totalTokens).toBeGreaterThan(emptyEstimate.totalTokens);
+
+        // Should include more input tokens after seeding
+        expect(seededEstimate.inputTokens).toBeGreaterThan(emptyEstimate.inputTokens);
     });
 });
 
@@ -2572,5 +2572,76 @@ describe('Stateless Messages', () => {
         await transformer.message({ x: 30 });
         const historyAfterSecondStateful = transformer.getHistory().length;
         expect(historyAfterSecondStateful).toBeGreaterThan(historyAfterStateless);
+    });
+});
+
+
+describe('getLastUsage', () => {
+    it('should return null before any message', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        expect(transformer.getLastUsage()).toBeNull();
+    });
+
+    it('should return structured usage data after a message', async () => {
+        const modelName = 'gemini-2.5-flash';
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName
+        });
+        await transformer.init();
+        await transformer.seed([{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }]);
+
+        await transformer.message({ x: 5 });
+
+        const usage = transformer.getLastUsage();
+        expect(usage).not.toBeNull();
+
+        // Verify all expected fields
+        expect(usage.promptTokens).toBeGreaterThan(0);
+        expect(usage.responseTokens).toBeGreaterThan(0);
+        expect(usage.totalTokens).toBeGreaterThanOrEqual(usage.promptTokens + usage.responseTokens);
+        expect(usage.requestedModel).toBe(modelName);
+        expect(usage.modelVersion).toBeDefined();
+        expect(usage.timestamp).toBeGreaterThan(0);
+    });
+
+    it('should update after each message', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+
+        await transformer.message({ q: 'first' });
+        const firstUsage = transformer.getLastUsage();
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        await transformer.message({ q: 'second' });
+        const secondUsage = transformer.getLastUsage();
+
+        // Timestamps should be different
+        expect(secondUsage.timestamp).toBeGreaterThan(firstUsage.timestamp);
+    }, 30000);
+
+    it('should work with stateless messages', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+        await transformer.seed([{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }]);
+
+        await transformer.message({ x: 5 }, { stateless: true });
+
+        const usage = transformer.getLastUsage();
+        expect(usage).not.toBeNull();
+        expect(usage.promptTokens).toBeGreaterThan(0);
+        expect(usage.responseTokens).toBeGreaterThan(0);
     });
 });
