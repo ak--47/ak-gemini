@@ -43,9 +43,10 @@ export interface ResponseMetadata {
 
 /** Structured usage data returned by getLastUsage() for billing verification */
 export interface UsageData {
-  promptTokens: number;       // Input tokens (includes system instructions + history + message)
-  responseTokens: number;     // Output tokens
-  totalTokens: number;        // promptTokens + responseTokens
+  promptTokens: number;       // CUMULATIVE input tokens across all retry attempts
+  responseTokens: number;     // CUMULATIVE output tokens across all retry attempts
+  totalTokens: number;        // CUMULATIVE total tokens across all retry attempts
+  attempts: number;           // Number of attempts (1 = first try success, 2+ = retries needed)
   modelVersion: string | null; // Actual model that responded (e.g., 'gemini-2.5-flash-001')
   requestedModel: string;     // Model you requested (e.g., 'gemini-2.5-flash')
   timestamp: number;          // When response was received
@@ -91,6 +92,7 @@ export interface AITransformerContext {
   lastResponseMetadata?: ResponseMetadata | null; // Metadata from the last API response
   exampleCount?: number; // Number of example history items from seed()
   clearConversation?: () => Promise<void>; // Clears conversation history while preserving examples
+  _cumulativeUsage?: { promptTokens: number; responseTokens: number; totalTokens: number; attempts: number }; // Internal cumulative tracking
 }
 
 export interface TransformationExample {

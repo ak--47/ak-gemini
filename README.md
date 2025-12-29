@@ -205,14 +205,15 @@ Clears conversation history while preserving seeded examples. Useful for startin
 
 #### `transformer.getLastUsage()`
 
-Returns structured usage data from the last API response for billing verification. Returns `null` if no API call has been made yet.
+Returns structured usage data for billing verification. Token counts are **cumulative across all retry attempts** - if validation failed and a retry was needed, you see the total tokens consumed, not just the final successful call. Returns `null` if no API call has been made yet.
 
 ```js
 const usage = transformer.getLastUsage();
 // {
-//   promptTokens: 150,      // Input tokens (includes system instructions + history + message)
-//   responseTokens: 42,     // Output tokens
-//   totalTokens: 192,       // Total tokens from API
+//   promptTokens: 300,      // CUMULATIVE input tokens across all attempts
+//   responseTokens: 84,     // CUMULATIVE output tokens across all attempts
+//   totalTokens: 384,       // CUMULATIVE total tokens
+//   attempts: 2,            // Number of attempts (1 = first try success, 2+ = retries needed)
 //   modelVersion: 'gemini-2.5-flash-001',  // Actual model that responded
 //   requestedModel: 'gemini-2.5-flash',    // Model you requested
 //   timestamp: 1703...      // When response was received

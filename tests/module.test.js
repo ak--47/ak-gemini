@@ -2464,6 +2464,28 @@ describe('clearConversation', () => {
         expect(result).toBeTruthy();
         expect(typeof result).toBe('object');
     });
+
+    it('should reset usage tracking when clearing', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash'
+        });
+        await transformer.init();
+        await transformer.seed([{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }]);
+
+        // Send a message to populate usage
+        await transformer.message({ x: 5 });
+        const usageBeforeClear = transformer.getLastUsage();
+        expect(usageBeforeClear).not.toBeNull();
+        expect(usageBeforeClear.promptTokens).toBeGreaterThan(0);
+
+        // Clear conversation
+        await transformer.clearConversation();
+
+        // Usage should be reset
+        const usageAfterClear = transformer.getLastUsage();
+        expect(usageAfterClear).toBeNull();
+    });
 });
 
 
@@ -2605,6 +2627,7 @@ describe('getLastUsage', () => {
         expect(usage.promptTokens).toBeGreaterThan(0);
         expect(usage.responseTokens).toBeGreaterThan(0);
         expect(usage.totalTokens).toBeGreaterThanOrEqual(usage.promptTokens + usage.responseTokens);
+        expect(usage.attempts).toBe(1); // First try success
         expect(usage.requestedModel).toBe(modelName);
         expect(usage.modelVersion).toBeDefined();
         expect(usage.timestamp).toBeGreaterThan(0);
@@ -2643,5 +2666,38 @@ describe('getLastUsage', () => {
         expect(usage).not.toBeNull();
         expect(usage.promptTokens).toBeGreaterThan(0);
         expect(usage.responseTokens).toBeGreaterThan(0);
+        expect(usage.attempts).toBe(1); // Stateless messages are always 1 attempt
     });
+
+    it('should track cumulative tokens across validation retries', async () => {
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash',
+            maxRetries: 2,
+            retryDelay: 100 // Short delay for faster test
+        });
+        await transformer.init();
+        await transformer.seed([{ PROMPT: { x: 1 }, ANSWER: { y: 2 } }]);
+
+        let validatorCallCount = 0;
+
+        // Validator that fails first time, passes second time
+        const failOnceValidator = async (payload) => {
+            validatorCallCount++;
+            if (validatorCallCount === 1) {
+                throw new Error('First attempt fails');
+            }
+            return payload;
+        };
+
+        // Implementation signature is (payload, options, validatorFn)
+        await transformer.transformWithValidation({ x: 5 }, {}, failOnceValidator);
+
+        const usage = transformer.getLastUsage();
+        expect(usage).not.toBeNull();
+        expect(usage.attempts).toBe(2); // Needed 2 attempts
+        // Cumulative tokens should be greater since we made 2 API calls
+        expect(usage.promptTokens).toBeGreaterThan(0);
+        expect(usage.responseTokens).toBeGreaterThan(0);
+    }, 60000);
 });

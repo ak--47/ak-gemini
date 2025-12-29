@@ -114,6 +114,13 @@ class AITransformer {
 		this.logLevel = 'info'; // default log level
 		this.lastResponseMetadata = null; // stores metadata from last API response
 		this.exampleCount = 0; // tracks number of example history items from seed()
+		// Cumulative usage tracking across retry attempts
+		this._cumulativeUsage = {
+			promptTokens: 0,
+			responseTokens: 0,
+			totalTokens: 0,
+			attempts: 0
+		};
 		AITransformFactory.call(this, options);
 
 		//external API
@@ -640,12 +647,28 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
 		messageOptions.labels = options.labels;
 	}
 
+	// Reset cumulative usage tracking for this message call
+	this._cumulativeUsage = {
+		promptTokens: 0,
+		responseTokens: 0,
+		totalTokens: 0,
+		attempts: 0
+	};
+
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		try {
 			// Step 1: Get the transformed payload
 			const transformedPayload = (attempt === 0)
 				? await this.rawMessage(lastPayload, messageOptions) // Use the new raw method with per-message options
 				: await this.rebuild(lastPayload, lastError.message);
+
+			// Accumulate token usage from this attempt
+			if (this.lastResponseMetadata) {
+				this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
+				this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
+				this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
+				this._cumulativeUsage.attempts = attempt + 1;
+			}
 
 			lastPayload = transformedPayload; // Always update lastPayload *before* validation
 
@@ -915,15 +938,25 @@ async function clearConversation() {
 		history: exampleHistory,
 	});
 
+	// Reset usage tracking for the new conversation
+	this.lastResponseMetadata = null;
+	this._cumulativeUsage = {
+		promptTokens: 0,
+		responseTokens: 0,
+		totalTokens: 0,
+		attempts: 0
+	};
+
 	log.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
 }
 
 /**
- * Returns structured usage data from the last API response for billing verification.
+ * Returns structured usage data from the last message call for billing verification.
+ * Includes CUMULATIVE token counts across all retry attempts.
  * Call this after message() or statelessMessage() to get actual token consumption.
  *
  * @this {ExportedAPI}
- * @returns {Object|null} Usage data with promptTokens, responseTokens, totalTokens, modelVersion, etc.
+ * @returns {Object|null} Usage data with promptTokens, responseTokens, totalTokens, attempts, etc.
  *                        Returns null if no API call has been made yet.
  */
 function getLastUsage() {
@@ -932,11 +965,19 @@ function getLastUsage() {
 	}
 
 	const meta = this.lastResponseMetadata;
+	const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
+
+	// Use cumulative tokens if tracking was active (attempts > 0), otherwise fall back to last response
+	const useCumulative = cumulative.attempts > 0;
+
 	return {
-		// Token breakdown for billing
-		promptTokens: meta.promptTokens,      // Input tokens (includes system instructions + history + message)
-		responseTokens: meta.responseTokens,  // Output tokens
-		totalTokens: meta.totalTokens,        // promptTokens + responseTokens
+		// Token breakdown for billing - CUMULATIVE across all retry attempts
+		promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
+		responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
+		totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
+
+		// Number of attempts (1 = success on first try, 2+ = retries were needed)
+		attempts: useCumulative ? cumulative.attempts : 1,
 
 		// Model verification for billing cross-check
 		modelVersion: meta.modelVersion,      // Actual model that responded (e.g., 'gemini-2.5-flash-001')
@@ -999,6 +1040,14 @@ async function statelessMessage(sourcePayload, options = {}, validatorFn = null)
 		responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
 		totalTokens: result.usageMetadata?.totalTokenCount || 0,
 		timestamp: Date.now()
+	};
+
+	// Set cumulative usage for stateless message (single attempt, no retries)
+	this._cumulativeUsage = {
+		promptTokens: this.lastResponseMetadata.promptTokens,
+		responseTokens: this.lastResponseMetadata.responseTokens,
+		totalTokens: this.lastResponseMetadata.totalTokens,
+		attempts: 1
 	};
 
 	if (result.usageMetadata && log.level !== 'silent') {

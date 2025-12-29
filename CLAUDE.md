@@ -153,7 +153,9 @@ await ai.message(payload);
 // Get structured usage data for billing verification
 const usage = ai.getLastUsage();
 console.log(usage);
-// { promptTokens, responseTokens, totalTokens, modelVersion, requestedModel, timestamp }
+// { promptTokens, responseTokens, totalTokens, attempts, modelVersion, requestedModel, timestamp }
+// Note: Token counts are CUMULATIVE across all retry attempts
+// attempts = 1 means success on first try, 2+ means retries were needed
 ```
 
 ### Billing Labels & Cost Tracking

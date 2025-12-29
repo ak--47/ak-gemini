@@ -122,6 +122,12 @@ var AITransformer = class {
     this.logLevel = "info";
     this.lastResponseMetadata = null;
     this.exampleCount = 0;
+    this._cumulativeUsage = {
+      promptTokens: 0,
+      responseTokens: 0,
+      totalTokens: 0,
+      attempts: 0
+    };
     AITransformFactory.call(this, options);
     this.init = initChat.bind(this);
     this.seed = seedWithExamples.bind(this);
@@ -469,9 +475,21 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
   if (options.labels) {
     messageOptions.labels = options.labels;
   }
+  this._cumulativeUsage = {
+    promptTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0,
+    attempts: 0
+  };
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const transformedPayload = attempt === 0 ? await this.rawMessage(lastPayload, messageOptions) : await this.rebuild(lastPayload, lastError.message);
+      if (this.lastResponseMetadata) {
+        this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
+        this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
+        this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
+        this._cumulativeUsage.attempts = attempt + 1;
+      }
       lastPayload = transformedPayload;
       if (validatorFn) {
         await validatorFn(transformedPayload);
@@ -631,6 +649,13 @@ async function clearConversation() {
     },
     history: exampleHistory
   });
+  this.lastResponseMetadata = null;
+  this._cumulativeUsage = {
+    promptTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0,
+    attempts: 0
+  };
   logger_default.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
 }
 function getLastUsage() {
@@ -638,14 +663,15 @@ function getLastUsage() {
     return null;
   }
   const meta = this.lastResponseMetadata;
+  const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
+  const useCumulative = cumulative.attempts > 0;
   return {
-    // Token breakdown for billing
-    promptTokens: meta.promptTokens,
-    // Input tokens (includes system instructions + history + message)
-    responseTokens: meta.responseTokens,
-    // Output tokens
-    totalTokens: meta.totalTokens,
-    // promptTokens + responseTokens
+    // Token breakdown for billing - CUMULATIVE across all retry attempts
+    promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
+    responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
+    totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
+    // Number of attempts (1 = success on first try, 2+ = retries were needed)
+    attempts: useCumulative ? cumulative.attempts : 1,
     // Model verification for billing cross-check
     modelVersion: meta.modelVersion,
     // Actual model that responded (e.g., 'gemini-2.5-flash-001')
@@ -683,6 +709,12 @@ async function statelessMessage(sourcePayload, options = {}, validatorFn = null)
     responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
     totalTokens: result.usageMetadata?.totalTokenCount || 0,
     timestamp: Date.now()
+  };
+  this._cumulativeUsage = {
+    promptTokens: this.lastResponseMetadata.promptTokens,
+    responseTokens: this.lastResponseMetadata.responseTokens,
+    totalTokens: this.lastResponseMetadata.totalTokens,
+    attempts: 1
   };
   if (result.usageMetadata && logger_default.level !== "silent") {
     logger_default.debug(`Stateless message metadata:`, {
