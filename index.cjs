@@ -48,6 +48,8 @@ var isDev = process.env.NODE_ENV !== "production";
 var logger = (0, import_pino.default)({
   level: process.env.LOG_LEVEL || "info",
   // Supports 'fatal', 'error', 'warn', 'info', 'debug', 'trace'
+  messageKey: "message",
+  // GCP expects 'message' instead of Pino's default 'msg'
   transport: isDev ? {
     target: "pino-pretty",
     // Prettified output for local dev
