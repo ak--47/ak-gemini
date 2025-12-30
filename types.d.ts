@@ -87,6 +87,7 @@ export interface AITransformerContext {
   enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
   groundingConfig?: Record<string, any>; // Additional grounding configuration options
   labels?: Record<string, string>; // Custom labels for billing segmentation (keys: 1-63 chars lowercase, values: max 63 chars)
+  vertexai?: boolean; // Whether using Vertex AI (true) or Gemini API (false)
   estimate?: (nextPayload: Record<string, unknown> | string) => Promise<{ inputTokens: number }>;
   getLastUsage?: () => UsageData | null;
   lastResponseMetadata?: ResponseMetadata | null; // Metadata from the last API response
@@ -153,7 +154,7 @@ export interface AITransformerOptions {
   // Use these instead of apiKey for Vertex AI with service account authentication
   vertexai?: boolean; // Set to true to use Vertex AI instead of Gemini API
   project?: string; // Google Cloud project ID (required for Vertex AI)
-  location?: string; // Google Cloud location/region (e.g., 'us-central1') - required for Vertex AI
+  location?: string; // Google Cloud location/region (e.g., 'us-central1'). If not set, defaults to 'global' endpoint
   googleAuthOptions?: GoogleAuthOptions; // Authentication options for Vertex AI (keyFilename, credentials, etc.)
 }
 
@@ -185,6 +186,7 @@ export declare class AITransformer {
   enableGrounding: boolean;
   groundingConfig: Record<string, any>;
   labels: Record<string, string>;
+  vertexai: boolean;
   /** Metadata from the last API response (model version, token counts, etc.) */
   lastResponseMetadata: ResponseMetadata | null;
   /** Number of history items that are seeded examples (used by clearConversation) */

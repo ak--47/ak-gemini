@@ -46,7 +46,7 @@ npm run release           # Version bump and publish to npm
 ### Environment Variables
 - `GEMINI_API_KEY` - Google Gemini API key (for Gemini API)
 - `GOOGLE_CLOUD_PROJECT` - GCP project ID (for Vertex AI)
-- `GOOGLE_CLOUD_LOCATION` - GCP region (for Vertex AI, defaults to 'us-central1')
+- `GOOGLE_CLOUD_LOCATION` - GCP region (for Vertex AI, defaults to 'global' endpoint if not set)
 - `NODE_ENV` - Environment (dev/test/prod affects log levels)
 - `LOG_LEVEL` - Override log level (debug/info/warn/error)
 
@@ -64,7 +64,7 @@ const ai = new AITransformer({
 const ai = new AITransformer({
     vertexai: true,
     project: 'my-gcp-project',
-    location: 'us-central1',
+    // location: 'us-central1',  // Optional: defaults to 'global' endpoint
     googleAuthOptions: {
         keyFilename: './credentials.json'
     }
@@ -76,7 +76,7 @@ const ai = new AITransformer({
 const ai = new AITransformer({
     vertexai: true,
     project: 'my-gcp-project',
-    location: 'us-central1',
+    // location: 'us-central1',  // Optional: defaults to 'global' endpoint
     googleAuthOptions: {
         credentials: {
             client_email: 'svc@project.iam.gserviceaccount.com',

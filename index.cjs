@@ -178,7 +178,7 @@ function AITransformFactory(options = {}) {
   }
   this.vertexai = options.vertexai || false;
   this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
-  this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
+  this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || void 0;
   this.googleAuthOptions = options.googleAuthOptions || null;
   this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
   if (!this.vertexai && !this.apiKey) {
@@ -249,7 +249,11 @@ function AITransformFactory(options = {}) {
   this.groundingConfig = options.groundingConfig || {};
   this.labels = options.labels || {};
   if (Object.keys(this.labels).length > 0 && logger_default.level !== "silent") {
-    logger_default.debug(`Billing labels configured: ${JSON.stringify(this.labels)}`);
+    if (!this.vertexai) {
+      logger_default.warn(`Billing labels are only supported with Vertex AI. Labels will be ignored.`);
+    } else {
+      logger_default.debug(`Billing labels configured: ${JSON.stringify(this.labels)}`);
+    }
   }
   if (this.promptKey === this.answerKey) {
     throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
@@ -259,7 +263,7 @@ function AITransformFactory(options = {}) {
     logger_default.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
     logger_default.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
     if (this.vertexai) {
-      logger_default.debug(`Using Vertex AI - Project: ${this.project}, Location: ${this.location}`);
+      logger_default.debug(`Using Vertex AI - Project: ${this.project}, Location: ${this.location || "global (default)"}`);
       if (this.googleAuthOptions?.keyFilename) {
         logger_default.debug(`Auth: Service account key file: ${this.googleAuthOptions.keyFilename}`);
       } else if (this.googleAuthOptions?.credentials) {
@@ -275,7 +279,7 @@ function AITransformFactory(options = {}) {
   const clientOptions = this.vertexai ? {
     vertexai: true,
     project: this.project,
-    location: this.location,
+    ...this.location && { location: this.location },
     ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
   } : { apiKey: this.apiKey };
   const ai = new import_genai.GoogleGenAI(clientOptions);
@@ -290,7 +294,7 @@ async function initChat(force = false) {
     // @ts-ignore
     config: {
       ...this.chatConfig,
-      ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+      ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
     },
     history: []
   };
@@ -373,7 +377,7 @@ ${contextText}
     // @ts-ignore
     config: {
       ...this.chatConfig,
-      ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+      ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
     },
     history: [...currentHistory, ...historyToAdd]
   });
@@ -388,7 +392,7 @@ async function rawMessage(sourcePayload, messageOptions = {}) {
   }
   const actualPayload = typeof sourcePayload === "string" ? sourcePayload : JSON.stringify(sourcePayload, null, 2);
   const mergedLabels = { ...this.labels, ...messageOptions.labels || {} };
-  const hasLabels = Object.keys(mergedLabels).length > 0;
+  const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
   try {
     const sendParams = { message: actualPayload };
     if (hasLabels) {
@@ -603,7 +607,7 @@ async function resetChat() {
       // @ts-ignore
       config: {
         ...this.chatConfig,
-        ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+        ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
       },
       history: []
     };
@@ -647,7 +651,7 @@ async function clearConversation() {
     // @ts-ignore
     config: {
       ...this.chatConfig,
-      ...Object.keys(this.labels).length > 0 && { labels: this.labels }
+      ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
     },
     history: exampleHistory
   });
@@ -701,7 +705,7 @@ async function statelessMessage(sourcePayload, options = {}, validatorFn = null)
     contents,
     config: {
       ...this.chatConfig,
-      ...Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
+      ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
     }
   });
   this.lastResponseMetadata = {

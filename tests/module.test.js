@@ -1823,7 +1823,7 @@ describe('Max Output Tokens Configuration', () => {
         await transformer.init();
 
         // Should use the default value of 100000
-        expect(transformer.chatConfig.maxOutputTokens).toBe(100000);
+        expect(transformer.chatConfig.maxOutputTokens).toBe(50000);
     });
 
     it('should accept custom maxOutputTokens via direct option', async () => {

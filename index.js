@@ -194,7 +194,7 @@ function AITransformFactory(options = {}) {
 	// Vertex AI configuration
 	this.vertexai = options.vertexai || false;
 	this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
-	this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+	this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || undefined;
 	this.googleAuthOptions = options.googleAuthOptions || null;
 
 	// API Key (for Gemini API, not Vertex AI)
@@ -295,10 +295,14 @@ function AITransformFactory(options = {}) {
 	this.enableGrounding = options.enableGrounding || false;
 	this.groundingConfig = options.groundingConfig || {};
 
-	// Billing labels for cost segmentation
+	// Billing labels for cost segmentation (Vertex AI only)
 	this.labels = options.labels || {};
 	if (Object.keys(this.labels).length > 0 && log.level !== 'silent') {
-		log.debug(`Billing labels configured: ${JSON.stringify(this.labels)}`);
+		if (!this.vertexai) {
+			log.warn(`Billing labels are only supported with Vertex AI. Labels will be ignored.`);
+		} else {
+			log.debug(`Billing labels configured: ${JSON.stringify(this.labels)}`);
+		}
 	}
 
 	if (this.promptKey === this.answerKey) {
@@ -311,7 +315,7 @@ function AITransformFactory(options = {}) {
 		log.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
 		// Log authentication method
 		if (this.vertexai) {
-			log.debug(`Using Vertex AI - Project: ${this.project}, Location: ${this.location}`);
+			log.debug(`Using Vertex AI - Project: ${this.project}, Location: ${this.location || 'global (default)'}`);
 			if (this.googleAuthOptions?.keyFilename) {
 				log.debug(`Auth: Service account key file: ${this.googleAuthOptions.keyFilename}`);
 			} else if (this.googleAuthOptions?.credentials) {
@@ -330,7 +334,7 @@ function AITransformFactory(options = {}) {
 		? {
 			vertexai: true,
 			project: this.project,
-			location: this.location,
+			...(this.location && { location: this.location }),
 			...(this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions })
 		}
 		: { apiKey: this.apiKey };
@@ -357,7 +361,7 @@ async function initChat(force = false) {
 		// @ts-ignore
 		config: {
 			...this.chatConfig,
-			...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+			...(this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels })
 		},
 		history: [],
 	};
@@ -472,7 +476,7 @@ async function seedWithExamples(examples) {
 		// @ts-ignore
 		config: {
 			...this.chatConfig,
-			...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+			...(this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels })
 		},
 		history: [...currentHistory, ...historyToAdd],
 	});
@@ -509,13 +513,14 @@ async function rawMessage(sourcePayload, messageOptions = {}) {
 		: JSON.stringify(sourcePayload, null, 2);
 
 	// Merge instance labels with per-message labels (per-message takes precedence)
+	// Labels only supported with Vertex AI
 	const mergedLabels = { ...this.labels, ...(messageOptions.labels || {}) };
-	const hasLabels = Object.keys(mergedLabels).length > 0;
+	const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
 
 	try {
 		const sendParams = { message: actualPayload };
 
-		// Add config with labels if we have any
+		// Add config with labels if we have any (Vertex AI only)
 		if (hasLabels) {
 			sendParams.config = { labels: mergedLabels };
 		}
@@ -862,7 +867,7 @@ async function resetChat() {
 			// @ts-ignore
 			config: {
 				...this.chatConfig,
-				...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+				...(this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels })
 			},
 			history: [],
 		};
@@ -933,7 +938,7 @@ async function clearConversation() {
 		// @ts-ignore
 		config: {
 			...this.chatConfig,
-			...(Object.keys(this.labels).length > 0 && { labels: this.labels })
+			...(this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels })
 		},
 		history: exampleHistory,
 	});
@@ -1019,7 +1024,7 @@ async function statelessMessage(sourcePayload, options = {}, validatorFn = null)
 	// Add the user message
 	contents.push({ role: 'user', parts: [{ text: payloadStr }] });
 
-	// Merge labels
+	// Merge labels (Vertex AI only)
 	const mergedLabels = { ...this.labels, ...(options.labels || {}) };
 
 	// Use generateContent instead of chat.sendMessage
@@ -1028,7 +1033,7 @@ async function statelessMessage(sourcePayload, options = {}, validatorFn = null)
 		contents: contents,
 		config: {
 			...this.chatConfig,
-			...(Object.keys(mergedLabels).length > 0 && { labels: mergedLabels })
+			...(this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels })
 		}
 	});
 
