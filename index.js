@@ -106,7 +106,7 @@ class AITransformer {
 		this.systemInstructionKey = "";
 		this.maxRetries = 3;
 		this.retryDelay = 1000;
-		this.systemInstructions = "";
+		// this.systemInstructions = "";
 		this.chatConfig = {};
 		this.apiKey = GEMINI_API_KEY;
 		this.onlyJSON = true; // always return JSON
@@ -160,7 +160,14 @@ export { attemptJSONRecovery }; // Export for testing
 function AITransformFactory(options = {}) {
 	// ? https://ai.google.dev/gemini-api/docs/models
 	this.modelName = options.modelName || 'gemini-2.5-flash';
-	this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
+
+	// Only use default if systemInstructions was not provided at all
+	if (options.systemInstructions === undefined) {
+		this.systemInstructions = DEFAULT_SYSTEM_INSTRUCTIONS;
+	} else {
+		// Use the provided value (could be null, false, or a custom string)
+		this.systemInstructions = options.systemInstructions;
+	}
 
 	// Configure log level - priority: options.logLevel > LOG_LEVEL env > NODE_ENV based defaults > 'info'
 	if (options.logLevel) {
@@ -211,9 +218,12 @@ function AITransformFactory(options = {}) {
 	// Build chat config, making sure systemInstruction uses the custom instructions
 	this.chatConfig = {
 		...DEFAULT_CHAT_CONFIG,
-		...options.chatConfig,
-		systemInstruction: this.systemInstructions
+		...options.chatConfig		
 	};
+
+	if (this.systemInstructions) {
+		this.chatConfig.systemInstruction = this.systemInstructions;
+	}
 
 	// Handle maxOutputTokens with explicit null check
 	// Priority: options.maxOutputTokens > options.chatConfig.maxOutputTokens > DEFAULT
