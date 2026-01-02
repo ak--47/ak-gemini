@@ -38,8 +38,6 @@
 		"update-deps": "npx npm-check-updates -u && npm install",
 		"prune": "rm -rf tmp/*",
 		"test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js",
-		"test:unit": "npm test -- tests/module.test.js",
-		"test:fixed": "npm test -- --testNamePattern=\"should use context in the prompt and transform accordingly|should augment the payload as instructed by system instructions|should succeed on the first try if validation passes|should handle invalid model names|should handle multiple concurrent messages|should use the constructor-provided asyncValidator|should override system instructions from the file\"",
 		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:ak-tools --external:dotenv --external:pino-pretty --external:pino",
 		"coverage": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
 		"typecheck": "tsc --noEmit",

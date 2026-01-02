@@ -152,7 +152,16 @@ new AITransformer(options)
 | retryDelay         | number | 1000               | Initial retry delay in ms (exponential backoff)   |
 | logLevel           | string | 'info'             | Log level: 'trace', 'debug', 'info', 'warn', 'error', 'fatal', or 'none' |
 | chatConfig         | object | ...                | Gemini chat config overrides                      |
-| systemInstructions | string | ...                | System prompt for Gemini                          |
+| systemInstructions | string/null/false | (default prompt) | System prompt for Gemini. Pass `null` or `false` to disable. |
+| maxOutputTokens    | number | 50000              | Maximum tokens in generated response              |
+| thinkingConfig     | object | null               | Thinking features config (see below)              |
+| enableGrounding    | boolean | false             | Enable Google Search grounding (WARNING: $35/1k queries) |
+| labels             | object | null               | Billing labels for cost attribution               |
+| apiKey             | string | env var            | Gemini API key (or use `GEMINI_API_KEY` env var)  |
+| vertexai           | boolean | false             | Use Vertex AI instead of Gemini API               |
+| project            | string | env var            | GCP project ID (for Vertex AI)                    |
+| location           | string | 'global'           | GCP region (for Vertex AI)                        |
+| googleAuthOptions  | object | null               | Auth options for Vertex AI (keyFilename, credentials) |
 
 ---
 
@@ -282,9 +291,85 @@ const result = await transformer.transformWithValidation(
 
 ---
 
+## Vertex AI Authentication
+
+Use Vertex AI instead of the Gemini API for enterprise features, VPC controls, and GCP billing integration.
+
+### With Service Account Key File
+
+```js
+const transformer = new AITransformer({
+  vertexai: true,
+  project: 'my-gcp-project',
+  location: 'us-central1',  // Optional: defaults to 'global' endpoint
+  googleAuthOptions: {
+    keyFilename: './service-account.json'
+  }
+});
+```
+
+### With Application Default Credentials
+
+```js
+// Uses GOOGLE_APPLICATION_CREDENTIALS env var or `gcloud auth application-default login`
+const transformer = new AITransformer({
+  vertexai: true,
+  project: 'my-gcp-project'  // or GOOGLE_CLOUD_PROJECT env var
+});
+```
+
+---
+
+## Advanced Configuration
+
+### Disabling System Instructions
+
+By default, the transformer uses built-in system instructions optimized for JSON transformation. You can provide custom instructions or disable them entirely:
+
+```js
+// Custom system instructions
+new AITransformer({ systemInstructions: "You are a helpful assistant..." });
+
+// Disable system instructions entirely (use Gemini's default behavior)
+new AITransformer({ systemInstructions: null });
+new AITransformer({ systemInstructions: false });
+```
+
+### Thinking Configuration
+
+For models that support extended thinking (like `gemini-2.5-flash`):
+
+```js
+const transformer = new AITransformer({
+  modelName: 'gemini-2.5-flash',
+  thinkingConfig: {
+    thinkingBudget: 1024,  // Token budget for thinking
+  }
+});
+```
+
+### Billing Labels
+
+Labels flow through to GCP billing reports for cost attribution:
+
+```js
+const transformer = new AITransformer({
+  labels: {
+    client: 'acme_corp',
+    app: 'data_pipeline',
+    environment: 'production'
+  }
+});
+
+// Override per-message
+await transformer.message(payload, { labels: { request_type: 'batch' } });
+```
+
+---
+
 ## Token Window Management & Error Handling
 
-* Throws on missing `GEMINI_API_KEY`
+* Throws on missing credentials (API key for Gemini API, or project ID for Vertex AI)
 * `.message()` and `.seed()` will *estimate* and prevent calls that would exceed Gemini's model window
 * All API and parsing errors surfaced as `Error` with context
 * Validator and retry failures include the number of attempts and last error

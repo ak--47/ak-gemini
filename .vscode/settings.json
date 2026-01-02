@@ -4,6 +4,7 @@
 	"jest.jestCommandLine": "npm run test --",
 	"cSpell.words": [
 		"acçénts",
+		"reinit",
 		"waystation"
 	]
 }

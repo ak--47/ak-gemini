@@ -116,7 +116,6 @@ var AITransformer = class {
     this.systemInstructionKey = "";
     this.maxRetries = 3;
     this.retryDelay = 1e3;
-    this.systemInstructions = "";
     this.chatConfig = {};
     this.apiKey = GEMINI_API_KEY;
     this.onlyJSON = true;
@@ -152,7 +151,11 @@ var AITransformer = class {
 var index_default = AITransformer;
 function AITransformFactory(options = {}) {
   this.modelName = options.modelName || "gemini-2.5-flash";
-  this.systemInstructions = options.systemInstructions || DEFAULT_SYSTEM_INSTRUCTIONS;
+  if (options.systemInstructions === void 0) {
+    this.systemInstructions = DEFAULT_SYSTEM_INSTRUCTIONS;
+  } else {
+    this.systemInstructions = options.systemInstructions;
+  }
   if (options.logLevel) {
     this.logLevel = options.logLevel;
     if (this.logLevel === "none") {
@@ -189,9 +192,13 @@ function AITransformFactory(options = {}) {
   }
   this.chatConfig = {
     ...DEFAULT_CHAT_CONFIG,
-    ...options.chatConfig,
-    systemInstruction: this.systemInstructions
+    ...options.chatConfig
   };
+  if (this.systemInstructions) {
+    this.chatConfig.systemInstruction = this.systemInstructions;
+  } else if (options.systemInstructions !== void 0) {
+    delete this.chatConfig.systemInstruction;
+  }
   if (options.maxOutputTokens !== void 0) {
     if (options.maxOutputTokens === null) {
       delete this.chatConfig.maxOutputTokens;

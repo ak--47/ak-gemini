@@ -125,7 +125,7 @@ export interface GoogleAuthOptions {
 export interface AITransformerOptions {
 	// ? https://ai.google.dev/gemini-api/docs/models
   modelName?: string; // The Gemini model to use
-  systemInstructions?: string; // Custom system instructions for the model
+  systemInstructions?: string | null | false; // Custom system instructions for the model (null/false = no instructions)
   chatConfig?: ChatConfig; // Configuration object for the chat session
   thinkingConfig?: ThinkingConfig; // Thinking features configuration (defaults to thinkingBudget: 0, thinkingLevel: "MINIMAL")
   maxOutputTokens?: number; // Maximum number of tokens that can be generated in the response (defaults to 50000)
@@ -175,7 +175,7 @@ export declare class AITransformer {
   systemInstructionKey: string;
   maxRetries: number;
   retryDelay: number;
-  systemInstructions: string;
+  systemInstructions: string | null | false;
   chatConfig: ChatConfig;
   apiKey: string;
   onlyJSON: boolean;

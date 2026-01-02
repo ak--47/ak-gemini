@@ -100,9 +100,27 @@ const ai = new AITransformer({
 ### Few-Shot Learning
 The module uses configurable key mappings for examples:
 - `sourceKey`/`promptKey` (default: 'PROMPT') - Input data
-- `targetKey`/`answerKey` (default: 'ANSWER') - Expected output  
+- `targetKey`/`answerKey` (default: 'ANSWER') - Expected output
 - `contextKey` (default: 'CONTEXT') - Optional per-example context
 - `explanationKey` (default: 'EXPLANATION') - Optional reasoning
+
+### System Instructions
+The module uses default system instructions optimized for JSON transformation. This behavior can be customized:
+- **Not provided** (`undefined`): Uses built-in default instructions
+- **Custom string**: Uses your custom instructions
+- **`null` or `false`**: Disables system instructions entirely (uses Gemini's default behavior)
+
+```javascript
+// Default behavior - uses built-in JSON transformation instructions
+new AITransformer({});
+
+// Custom instructions
+new AITransformer({ systemInstructions: "You are a data extraction expert..." });
+
+// Disable system instructions entirely
+new AITransformer({ systemInstructions: null });
+new AITransformer({ systemInstructions: false });
+```
 
 ### Validation & Self-Healing
 - Custom async validator functions that throw on validation failure

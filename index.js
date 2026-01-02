@@ -221,8 +221,13 @@ function AITransformFactory(options = {}) {
 		...options.chatConfig		
 	};
 
+	// Handle systemInstructions: use custom if provided, otherwise keep default from DEFAULT_CHAT_CONFIG
+	// If explicitly set to null/false, remove it entirely
 	if (this.systemInstructions) {
 		this.chatConfig.systemInstruction = this.systemInstructions;
+	} else if (options.systemInstructions !== undefined) {
+		// Explicitly set to null/false/empty - remove system instruction
+		delete this.chatConfig.systemInstruction;
 	}
 
 	// Handle maxOutputTokens with explicit null check

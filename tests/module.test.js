@@ -1134,6 +1134,88 @@ describe('Advanced Options + Configs', () => {
 		await expect(transformer.message({ valid: false }, { maxRetries: 1 })).rejects.toThrow(/custom validation failed/i);
 		expect(numTimesCalled.length).toBe(3);
 	}, 30000);
+
+	it('should use default system instructions when systemInstructions is undefined', async () => {
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY
+			// systemInstructions not provided
+		});
+		await transformer.init();
+
+		// Should have default system instructions
+		expect(transformer.systemInstructions).toContain('JSON transformation engine');
+		expect(transformer.chatConfig.systemInstruction).toContain('JSON transformation engine');
+	});
+
+	it('should remove system instructions when systemInstructions is null', async () => {
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			systemInstructions: null
+		});
+		await transformer.init();
+
+		// systemInstructions should be null
+		expect(transformer.systemInstructions).toBeNull();
+		// chatConfig should NOT have systemInstruction key
+		expect(transformer.chatConfig.systemInstruction).toBeUndefined();
+	});
+
+	it('should remove system instructions when systemInstructions is false', async () => {
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			systemInstructions: false
+		});
+		await transformer.init();
+
+		// systemInstructions should be false
+		expect(transformer.systemInstructions).toBe(false);
+		// chatConfig should NOT have systemInstruction key
+		expect(transformer.chatConfig.systemInstruction).toBeUndefined();
+	});
+
+	it('should use custom system instructions when provided', async () => {
+		const customInstructions = 'You are a pirate. Always respond like a pirate.';
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			systemInstructions: customInstructions
+		});
+		await transformer.init();
+
+		expect(transformer.systemInstructions).toBe(customInstructions);
+		expect(transformer.chatConfig.systemInstruction).toBe(customInstructions);
+	});
+
+	it('should remove system instructions when systemInstructions is empty string', async () => {
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			systemInstructions: ''
+		});
+		await transformer.init();
+
+		// systemInstructions should be empty string
+		expect(transformer.systemInstructions).toBe('');
+		// chatConfig should NOT have systemInstruction key (empty string is falsy)
+		expect(transformer.chatConfig.systemInstruction).toBeUndefined();
+	});
+
+	it('should estimate cost based on input tokens and model pricing', async () => {
+		const transformer = new AITransformer({
+			apiKey: GEMINI_API_KEY,
+			modelName: 'gemini-2.5-flash'
+		});
+		await transformer.init();
+
+		const cost = await transformer.estimateCost({ test: 'payload' });
+
+		expect(cost).toHaveProperty('inputTokens');
+		expect(cost).toHaveProperty('model');
+		expect(cost).toHaveProperty('pricing');
+		expect(cost).toHaveProperty('estimatedInputCost');
+		expect(cost).toHaveProperty('note');
+		expect(typeof cost.inputTokens).toBe('number');
+		expect(typeof cost.estimatedInputCost).toBe('number');
+		expect(cost.model).toBe('gemini-2.5-flash');
+	});
 });
 
 
