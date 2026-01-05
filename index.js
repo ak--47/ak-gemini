@@ -712,8 +712,8 @@ async function prepareAndValidateMessage(sourcePayload, options = {}, validatorF
 			log.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
 
 			if (attempt >= maxRetries) {
-				log.error(`All ${maxRetries + 1} attempts failed.`);
-
+				log.error(`All ${maxRetries + 1} attempts failed.`)
+;
 				// Restore original grounding settings even on failure
 				if (options._restoreGrounding) {
 					await options._restoreGrounding();

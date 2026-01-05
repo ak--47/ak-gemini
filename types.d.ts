@@ -203,8 +203,8 @@ export declare class AITransformer {
    */
   message(payload: Record<string, unknown>, opts?: MessageOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
   rawMessage(sourcePayload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }): Promise<Record<string, unknown> | any>;
-  transformWithValidation(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: MessageOptions): Promise<Record<string, unknown>>;
-  messageAndValidate(sourcePayload: Record<string, unknown>, validatorFn: AsyncValidatorFunction, options?: MessageOptions): Promise<Record<string, unknown>>;
+  transformWithValidation(sourcePayload: Record<string, unknown>, options?: MessageOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
+  messageAndValidate(sourcePayload: Record<string, unknown>, options?: MessageOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
   rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
   reset(): Promise<void>;
   getHistory(): Array<any>;
