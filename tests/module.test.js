@@ -2266,8 +2266,7 @@ describe('Thinking Configuration', () => {
 
     it('should apply custom thinkingConfig for supported models', async () => {
         const customThinkingConfig = {
-            thinkingBudget: 100,
-            thinkingLevel: 'HIGH',
+            thinkingLevel: 'HIGH', // Only use one parameter (thinkingBudget and thinkingLevel are mutually exclusive)
             includeThoughts: true
         };
 
@@ -2279,10 +2278,17 @@ describe('Thinking Configuration', () => {
 
         await transformer.init();
 
+        // Verify chatConfig (local config)
         expect(transformer.chatConfig.thinkingConfig).toBeDefined();
-        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(100);
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBeUndefined();
         expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('HIGH');
         expect(transformer.chatConfig.thinkingConfig.includeThoughts).toBe(true);
+
+        // Verify chat.config (config passed to Google SDK)
+        expect(transformer.chat.config.thinkingConfig).toBeDefined();
+        expect(transformer.chat.config.thinkingConfig.thinkingBudget).toBeUndefined();
+        expect(transformer.chat.config.thinkingConfig.thinkingLevel).toBe('HIGH');
+        expect(transformer.chat.config.thinkingConfig.includeThoughts).toBe(true);
     });
 
     it('should merge partial thinkingConfig with defaults for supported models', async () => {
@@ -2298,9 +2304,13 @@ describe('Thinking Configuration', () => {
 
         await transformer.init();
 
-        // Should have the custom budget but default level
+        // Should have only the custom budget (thinkingBudget and thinkingLevel are mutually exclusive)
         expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(-1);
-        expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('MINIMAL');
+        expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBeUndefined();
+
+        // Verify chat.config (config passed to Google SDK)
+        expect(transformer.chat.config.thinkingConfig.thinkingBudget).toBe(-1);
+        expect(transformer.chat.config.thinkingConfig.thinkingLevel).toBeUndefined();
     });
 
     it('should pass thinkingConfig to chat creation for supported models', async () => {
@@ -2308,8 +2318,7 @@ describe('Thinking Configuration', () => {
             ...BASE_OPTIONS,
             modelName: 'gemini-2.5-pro', // Model that supports thinking
             thinkingConfig: {
-                thinkingBudget: 50,
-                thinkingLevel: 'LOW'
+                thinkingLevel: 'LOW' // Only use one parameter (thinkingBudget and thinkingLevel are mutually exclusive)
             }
         });
 
@@ -2317,8 +2326,12 @@ describe('Thinking Configuration', () => {
 
         // The chat should be created with the config containing thinkingConfig
         expect(transformer.chat).toBeTruthy();
-        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(50);
         expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('LOW');
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBeUndefined();
+
+        // Verify chat.config (config passed to Google SDK)
+        expect(transformer.chat.config.thinkingConfig.thinkingLevel).toBe('LOW');
+        expect(transformer.chat.config.thinkingConfig.thinkingBudget).toBeUndefined();
     });
 
     it('should preserve thinkingConfig after reset for supported models', async () => {
@@ -2326,8 +2339,7 @@ describe('Thinking Configuration', () => {
             ...BASE_OPTIONS,
             modelName: 'gemini-2.5-flash', // Model that supports thinking
             thinkingConfig: {
-                thinkingBudget: 200,
-                thinkingLevel: 'HIGH'
+                thinkingLevel: 'HIGH' // Only use one parameter (thinkingBudget and thinkingLevel are mutually exclusive)
             }
         });
 
@@ -2339,8 +2351,12 @@ describe('Thinking Configuration', () => {
         await transformer.reset();
 
         // Config should still have the same thinkingConfig after reset
-        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBe(200);
         expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('HIGH');
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBeUndefined();
+
+        // Verify chat.config (config passed to Google SDK after reset)
+        expect(transformer.chat.config.thinkingConfig.thinkingLevel).toBe('HIGH');
+        expect(transformer.chat.config.thinkingConfig.thinkingBudget).toBeUndefined();
     });
 
     it('should handle all ThinkingLevel enum values for supported models', async () => {
@@ -2360,6 +2376,11 @@ describe('Thinking Configuration', () => {
 
             await transformer.init();
             expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe(level);
+            expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBeUndefined();
+
+            // Verify chat.config (config passed to Google SDK)
+            expect(transformer.chat.config.thinkingConfig.thinkingLevel).toBe(level);
+            expect(transformer.chat.config.thinkingConfig.thinkingBudget).toBeUndefined();
         }
     });
 
@@ -2372,6 +2393,29 @@ describe('Thinking Configuration', () => {
 
         // Should not have thinkingConfig if not explicitly provided
         expect(transformer.chatConfig.thinkingConfig).toBeUndefined();
+    });
+
+    it('should gracefully handle when user provides both thinkingBudget and thinkingLevel', async () => {
+        // User mistakenly provides both - thinkingLevel should take precedence
+        const transformer = new AITransformer({
+            ...BASE_OPTIONS,
+            modelName: 'gemini-2.5-flash',
+            thinkingConfig: {
+                thinkingBudget: 500,
+                thinkingLevel: 'MEDIUM'
+            }
+        });
+
+        await transformer.init();
+
+        // thinkingLevel should be preserved, thinkingBudget should be removed
+        // (Gemini API does not allow both parameters together)
+        expect(transformer.chatConfig.thinkingConfig.thinkingLevel).toBe('MEDIUM');
+        expect(transformer.chatConfig.thinkingConfig.thinkingBudget).toBeUndefined();
+
+        // Verify chat.config (config passed to Google SDK)
+        expect(transformer.chat.config.thinkingConfig.thinkingLevel).toBe('MEDIUM');
+        expect(transformer.chat.config.thinkingConfig.thinkingBudget).toBeUndefined();
     });
 
     it('should remove thinkingConfig when explicitly set to null', async () => {

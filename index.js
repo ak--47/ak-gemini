@@ -53,8 +53,7 @@ Do not include any additional text, explanations, or formatting before or after 
 `;
 
 const DEFAULT_THINKING_CONFIG = {
-	thinkingBudget: 0,
-	thinkingLevel: ThinkingLevel.MINIMAL
+	thinkingBudget: 0
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 50_000; // Default ceiling for output tokens
@@ -268,6 +267,13 @@ function AITransformFactory(options = {}) {
 				...DEFAULT_THINKING_CONFIG,
 				...options.thinkingConfig
 			};
+
+			// Gemini API does not allow both thinkingBudget and thinkingLevel together.
+			// If user specified thinkingLevel, remove thinkingBudget (user preference wins)
+			if (options.thinkingConfig?.thinkingLevel !== undefined) {
+				delete thinkingConfig.thinkingBudget;
+			}
+
 			this.chatConfig.thinkingConfig = thinkingConfig;
 
 			if (log.level !== 'silent') {
@@ -1483,6 +1489,7 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 
 				const validatedResponse = await transformer.messageAndValidate(
 					{ "name": "Lynn" },
+				{},
 					mockValidator
 				);
 				log.info("Validated Payload Transformed", validatedResponse);
