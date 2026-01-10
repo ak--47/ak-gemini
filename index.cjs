@@ -81,8 +81,7 @@ Always respond ONLY with a valid JSON object that strictly adheres to the expect
 Do not include any additional text, explanations, or formatting before or after the JSON object.
 `;
 var DEFAULT_THINKING_CONFIG = {
-  thinkingBudget: 0,
-  thinkingLevel: import_genai.ThinkingLevel.MINIMAL
+  thinkingBudget: 0
 };
 var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
 var THINKING_SUPPORTED_MODELS = [
@@ -228,6 +227,9 @@ function AITransformFactory(options = {}) {
         ...DEFAULT_THINKING_CONFIG,
         ...options.thinkingConfig
       };
+      if (options.thinkingConfig?.thinkingLevel !== void 0) {
+        delete thinkingConfig.thinkingBudget;
+      }
       this.chatConfig.thinkingConfig = thinkingConfig;
       if (logger_default.level !== "silent") {
         logger_default.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
@@ -1032,6 +1034,7 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
       };
       const validatedResponse = await transformer.messageAndValidate(
         { "name": "Lynn" },
+        {},
         mockValidator
       );
       logger_default.info("Validated Payload Transformed", validatedResponse);
