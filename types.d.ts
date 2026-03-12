@@ -28,6 +28,7 @@ export interface ChatConfig {
   thinkingConfig?: ThinkingConfig; // Thinking features configuration
   labels?: Record<string, string>; // Labels for billing segmentation
   tools?: any[]; // Tools configuration (e.g., grounding)
+  toolConfig?: any; // Tool configuration (e.g., function calling mode)
   [key: string]: any; // Additional properties for flexibility
 }
 
@@ -232,6 +233,68 @@ export declare class AITransformer {
    * Returns structured usage data from the last API response for billing verification.
    * Returns null if no API call has been made yet.
    */
+  getLastUsage(): UsageData | null;
+}
+
+// --- AIAgent Types ---
+
+export interface AIAgentOptions {
+  // Authentication (same as AITransformer)
+  apiKey?: string;
+  vertexai?: boolean;
+  project?: string;
+  location?: string;
+  googleAuthOptions?: GoogleAuthOptions;
+
+  // Agent configuration
+  systemPrompt?: string; // System prompt for the agent
+  modelName?: string; // Gemini model to use (default: 'gemini-2.5-flash')
+  maxToolRounds?: number; // Max tool-use loop iterations (default: 10)
+  httpTimeout?: number; // Timeout for HTTP tool requests in ms (default: 30000)
+  maxRetries?: number; // Retries on transient API errors (default: 3)
+  logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
+  labels?: Record<string, string>; // Billing labels (Vertex AI)
+  thinkingConfig?: ThinkingConfig;
+  chatConfig?: Partial<ChatConfig>;
+
+  // Callbacks
+  onToolCall?: (toolName: string, args: Record<string, any>) => void;
+  onMarkdown?: (filename: string, content: string) => void;
+}
+
+export interface AgentResponse {
+  text: string; // The agent's final text response
+  toolCalls: Array<{ name: string; args: Record<string, any>; result: any }>; // All tool calls made
+  markdownFiles: Array<{ filename: string; content: string }>; // Generated markdown documents
+  usage: UsageData | null; // Token usage data
+}
+
+export interface AgentStreamEvent {
+  type: 'text' | 'tool_call' | 'tool_result' | 'markdown' | 'done';
+  text?: string; // For 'text' events: the text chunk
+  toolName?: string; // For 'tool_call' and 'tool_result' events
+  args?: Record<string, any>; // For 'tool_call' events: the tool arguments
+  result?: any; // For 'tool_result' events: the tool result
+  filename?: string; // For 'markdown' events: the suggested filename
+  content?: string; // For 'markdown' events: the markdown content
+  fullText?: string; // For 'done' events: the complete accumulated text
+  usage?: UsageData | null; // For 'done' events: token usage
+  markdownFiles?: Array<{ filename: string; content: string }>; // For 'done' events
+  warning?: string; // For 'done' events: e.g. "Max tool rounds reached"
+}
+
+export declare class AIAgent {
+  constructor(options?: AIAgentOptions);
+
+  modelName: string;
+  systemPrompt: string;
+  lastResponseMetadata: ResponseMetadata | null;
+
+  init(): Promise<void>;
+  chat(message: string): Promise<AgentResponse>;
+  stream(message: string): AsyncGenerator<AgentStreamEvent, void, unknown>;
+  clearHistory(): Promise<void>;
+  getHistory(curated?: boolean): any[];
   getLastUsage(): UsageData | null;
 }
 
