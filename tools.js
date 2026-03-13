@@ -16,6 +16,14 @@ import log from './logger.js';
 /** Maximum characters kept from HTTP response bodies before truncation */
 const MAX_RESPONSE_LENGTH = 50_000;
 
+/** Try to parse a response body as JSON; return parsed object or original string */
+function parseBody(text) {
+	const body = text.length > MAX_RESPONSE_LENGTH
+		? text.slice(0, MAX_RESPONSE_LENGTH) + '\n...[TRUNCATED]'
+		: text;
+	try { return JSON.parse(body); } catch { return body; }
+}
+
 /**
  * Built-in function declarations for the @google/genai SDK.
  * These are passed as `functionDeclarations` in the chat config's tools array.
@@ -96,10 +104,7 @@ export async function executeBuiltInTool(name, args, options = {}) {
 				signal: AbortSignal.timeout(httpTimeout)
 			});
 			const text = await resp.text();
-			const body = text.length > MAX_RESPONSE_LENGTH
-				? text.slice(0, MAX_RESPONSE_LENGTH) + '\n...[TRUNCATED]'
-				: text;
-			return { status: resp.status, statusText: resp.statusText, body };
+			return { status: resp.status, statusText: resp.statusText, body: parseBody(text) };
 		}
 
 		case 'http_post': {
@@ -112,10 +117,7 @@ export async function executeBuiltInTool(name, args, options = {}) {
 				signal: AbortSignal.timeout(httpTimeout)
 			});
 			const text = await resp.text();
-			const body = text.length > MAX_RESPONSE_LENGTH
-				? text.slice(0, MAX_RESPONSE_LENGTH) + '\n...[TRUNCATED]'
-				: text;
-			return { status: resp.status, statusText: resp.statusText, body };
+			return { status: resp.status, statusText: resp.statusText, body: parseBody(text) };
 		}
 
 		case 'write_markdown': {
