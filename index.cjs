@@ -29,16 +29,17 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // index.js
 var index_exports = {};
 __export(index_exports, {
-  HarmBlockThreshold: () => import_genai.HarmBlockThreshold,
-  HarmCategory: () => import_genai.HarmCategory,
-  ThinkingLevel: () => import_genai.ThinkingLevel,
+  AIAgent: () => agent_default,
+  HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
+  HarmCategory: () => import_genai2.HarmCategory,
+  ThinkingLevel: () => import_genai2.ThinkingLevel,
   attemptJSONRecovery: () => attemptJSONRecovery,
   default: () => index_default,
   log: () => logger_default
 });
 module.exports = __toCommonJS(index_exports);
-var import_dotenv = __toESM(require("dotenv"), 1);
-var import_genai = require("@google/genai");
+var import_dotenv2 = __toESM(require("dotenv"), 1);
+var import_genai2 = require("@google/genai");
 var import_ak_tools = __toESM(require("ak-tools"), 1);
 var import_path = __toESM(require("path"), 1);
 
@@ -59,13 +60,492 @@ var logger = (0, import_pino.default)({
 });
 var logger_default = logger;
 
-// index.js
-var import_meta = {};
+// agent.js
+var import_dotenv = __toESM(require("dotenv"), 1);
+var import_genai = require("@google/genai");
+
+// tools.js
+var MAX_RESPONSE_LENGTH = 5e4;
+var BUILT_IN_DECLARATIONS = [
+  {
+    name: "http_get",
+    description: "Make an HTTP GET request to any URL. Returns the response status and body as text. Use for fetching web pages, REST APIs, or any HTTP resource.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The full URL to request (including https://)" },
+        headers: {
+          type: "object",
+          description: "Optional HTTP headers as key-value pairs",
+          additionalProperties: { type: "string" }
+        }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "http_post",
+    description: "Make an HTTP POST request to any URL with a JSON body. Returns the response status and body as text.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The full URL to request (including https://)" },
+        body: { type: "object", description: "The JSON body to send" },
+        headers: {
+          type: "object",
+          description: "Optional HTTP headers as key-value pairs",
+          additionalProperties: { type: "string" }
+        }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "write_markdown",
+    description: "Generate a structured markdown document such as a report, analysis, summary, or formatted findings. The content will be captured and returned to the caller.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: {
+        filename: { type: "string", description: 'Suggested filename for the document (e.g. "report.md")' },
+        title: { type: "string", description: "Document title" },
+        content: { type: "string", description: "Full markdown content of the document" }
+      },
+      required: ["filename", "content"]
+    }
+  }
+];
+async function executeBuiltInTool(name, args, options = {}) {
+  const { httpTimeout = 3e4, onToolCall, onMarkdown } = options;
+  if (onToolCall) {
+    try {
+      onToolCall(name, args);
+    } catch (e) {
+      logger_default.warn(`onToolCall callback error: ${e.message}`);
+    }
+  }
+  switch (name) {
+    case "http_get": {
+      logger_default.debug(`http_get: ${args.url}`);
+      const resp = await fetch(args.url, {
+        method: "GET",
+        headers: args.headers || {},
+        signal: AbortSignal.timeout(httpTimeout)
+      });
+      const text = await resp.text();
+      const body = text.length > MAX_RESPONSE_LENGTH ? text.slice(0, MAX_RESPONSE_LENGTH) + "\n...[TRUNCATED]" : text;
+      return { status: resp.status, statusText: resp.statusText, body };
+    }
+    case "http_post": {
+      logger_default.debug(`http_post: ${args.url}`);
+      const headers = { "Content-Type": "application/json", ...args.headers || {} };
+      const resp = await fetch(args.url, {
+        method: "POST",
+        headers,
+        body: args.body ? JSON.stringify(args.body) : void 0,
+        signal: AbortSignal.timeout(httpTimeout)
+      });
+      const text = await resp.text();
+      const body = text.length > MAX_RESPONSE_LENGTH ? text.slice(0, MAX_RESPONSE_LENGTH) + "\n...[TRUNCATED]" : text;
+      return { status: resp.status, statusText: resp.statusText, body };
+    }
+    case "write_markdown": {
+      logger_default.debug(`write_markdown: ${args.filename}`);
+      if (onMarkdown) {
+        try {
+          onMarkdown(args.filename, args.content);
+        } catch (e) {
+          logger_default.warn(`onMarkdown callback error: ${e.message}`);
+        }
+      }
+      return { written: true, filename: args.filename, length: args.content.length };
+    }
+    default:
+      throw new Error(`Unknown tool: ${name}`);
+  }
+}
+
+// agent.js
 import_dotenv.default.config();
-var { NODE_ENV = "unknown", GEMINI_API_KEY, LOG_LEVEL = "" } = process.env;
+var { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
 var DEFAULT_SAFETY_SETTINGS = [
   { category: import_genai.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE },
   { category: import_genai.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE }
+];
+var DEFAULT_THINKING_CONFIG = {
+  thinkingBudget: 0
+};
+var THINKING_SUPPORTED_MODELS = [
+  /^gemini-3-flash(-preview)?$/,
+  /^gemini-3-pro(-preview|-image-preview)?$/,
+  /^gemini-2\.5-pro/,
+  /^gemini-2\.5-flash(-preview)?$/,
+  /^gemini-2\.5-flash-lite(-preview)?$/,
+  /^gemini-2\.0-flash$/
+];
+var AIAgent = class {
+  /**
+   * Create a new AIAgent instance.
+   *
+   * @param {AIAgentOptions} [options={}] - Configuration options
+   * @param {string} [options.apiKey] - Gemini API key (or set GEMINI_API_KEY env var)
+   * @param {string} [options.systemPrompt='You are a helpful AI assistant.'] - System prompt
+   * @param {string} [options.modelName='gemini-2.5-flash'] - Gemini model to use
+   * @param {number} [options.maxToolRounds=10] - Max tool-use loop iterations
+   * @param {number} [options.httpTimeout=30000] - HTTP request timeout in ms
+   * @param {Function} [options.onToolCall] - Callback fired before each tool execution
+   * @param {Function} [options.onMarkdown] - Callback fired when markdown is generated
+   * @param {boolean} [options.vertexai=false] - Use Vertex AI instead of Gemini API
+   * @param {string} [options.project] - GCP project ID (required for Vertex AI)
+   * @param {string} [options.location] - GCP region (defaults to 'global')
+   * @param {import('./types').GoogleAuthOptions} [options.googleAuthOptions] - Vertex AI auth
+   * @param {import('./types').ThinkingConfig} [options.thinkingConfig] - Extended thinking config
+   * @param {Record<string, string>} [options.labels] - Billing labels (Vertex AI only)
+   * @param {string} [options.logLevel] - Log level
+   */
+  constructor(options = {}) {
+    this.modelName = options.modelName || "gemini-2.5-flash";
+    this.systemPrompt = options.systemPrompt || "You are a helpful AI assistant.";
+    this.maxToolRounds = options.maxToolRounds || 10;
+    this.httpTimeout = options.httpTimeout || 3e4;
+    this.maxRetries = options.maxRetries || 3;
+    this.onToolCall = options.onToolCall || null;
+    this.onMarkdown = options.onMarkdown || null;
+    this.labels = options.labels || {};
+    this.vertexai = options.vertexai || false;
+    this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
+    this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || void 0;
+    this.googleAuthOptions = options.googleAuthOptions || null;
+    this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : process.env.GEMINI_API_KEY;
+    if (!this.vertexai && !this.apiKey) {
+      throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
+    }
+    if (this.vertexai && !this.project) {
+      throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
+    }
+    this._configureLogLevel(options.logLevel);
+    this.chatConfig = {
+      temperature: 0.7,
+      topP: 0.95,
+      topK: 64,
+      safetySettings: DEFAULT_SAFETY_SETTINGS,
+      systemInstruction: this.systemPrompt,
+      maxOutputTokens: options.chatConfig?.maxOutputTokens || 5e4,
+      ...options.chatConfig
+    };
+    this.chatConfig.systemInstruction = this.systemPrompt;
+    this._configureThinking(options.thinkingConfig);
+    this.chatConfig.tools = [{ functionDeclarations: BUILT_IN_DECLARATIONS }];
+    this.chatConfig.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
+    this.genAIClient = null;
+    this.chatSession = null;
+    this.lastResponseMetadata = null;
+    this._markdownFiles = [];
+    logger_default.debug(`AIAgent created with model: ${this.modelName}`);
+  }
+  /**
+   * Initialize the agent — creates the GenAI client and chat session.
+   * Called automatically by chat() and stream() if not called explicitly.
+   * Idempotent — safe to call multiple times.
+   * @returns {Promise<void>}
+   */
+  async init() {
+    if (this.chatSession) return;
+    const clientOptions = this.vertexai ? {
+      vertexai: true,
+      project: this.project,
+      ...this.location && { location: this.location },
+      ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
+    } : { apiKey: this.apiKey };
+    this.genAIClient = new import_genai.GoogleGenAI(clientOptions);
+    this.chatSession = this.genAIClient.chats.create({
+      model: this.modelName,
+      config: {
+        ...this.chatConfig,
+        ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
+      },
+      history: []
+    });
+    try {
+      await this.genAIClient.models.list();
+      logger_default.debug("AIAgent: Gemini API connection successful.");
+    } catch (e) {
+      throw new Error(`AIAgent initialization failed: ${e.message}`);
+    }
+    logger_default.debug("AIAgent: Chat session initialized.");
+  }
+  /**
+   * Send a message and get a complete response (non-streaming).
+   * Automatically handles the tool-use loop — if the model requests tool calls,
+   * they are executed and results sent back until the model produces a final response.
+   *
+   * @param {string} message - The user's message
+   * @returns {Promise<AgentResponse>} Response with text, toolCalls, markdownFiles, and usage
+   * @example
+   * const res = await agent.chat('Fetch https://api.example.com/users');
+   * console.log(res.text);      // Agent's summary
+   * console.log(res.toolCalls); // [{name: 'http_get', args: {...}, result: {...}}]
+   */
+  async chat(message) {
+    if (!this.chatSession) await this.init();
+    this._markdownFiles = [];
+    const allToolCalls = [];
+    let response = await this.chatSession.sendMessage({ message });
+    for (let round = 0; round < this.maxToolRounds; round++) {
+      const functionCalls = response.functionCalls;
+      if (!functionCalls || functionCalls.length === 0) break;
+      const toolResults = await Promise.all(
+        functionCalls.map(async (call) => {
+          let result;
+          try {
+            result = await executeBuiltInTool(call.name, call.args, {
+              httpTimeout: this.httpTimeout,
+              onToolCall: this.onToolCall,
+              onMarkdown: this.onMarkdown
+            });
+          } catch (err) {
+            logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
+            result = { error: err.message };
+          }
+          allToolCalls.push({ name: call.name, args: call.args, result });
+          if (call.name === "write_markdown" && call.args) {
+            this._markdownFiles.push({
+              filename: (
+                /** @type {string} */
+                call.args.filename
+              ),
+              content: (
+                /** @type {string} */
+                call.args.content
+              )
+            });
+          }
+          return { id: call.id, name: call.name, result };
+        })
+      );
+      response = await this.chatSession.sendMessage({
+        message: toolResults.map((r) => ({
+          functionResponse: {
+            id: r.id,
+            name: r.name,
+            response: { output: r.result }
+          }
+        }))
+      });
+    }
+    this._captureMetadata(response);
+    return {
+      text: response.text || "",
+      toolCalls: allToolCalls,
+      markdownFiles: [...this._markdownFiles],
+      usage: this.getLastUsage()
+    };
+  }
+  /**
+   * Send a message and stream the response as events.
+   * Automatically handles the tool-use loop between streamed rounds.
+   *
+   * Event types:
+   * - `text` — A chunk of the agent's text response (yield as it arrives)
+   * - `tool_call` — The agent is about to call a tool (includes toolName and args)
+   * - `tool_result` — A tool finished executing (includes toolName and result)
+   * - `markdown` — A markdown document was generated (includes filename and content)
+   * - `done` — The agent finished (includes fullText, markdownFiles, usage)
+   *
+   * @param {string} message - The user's message
+   * @yields {AgentStreamEvent}
+   * @example
+   * for await (const event of agent.stream('Analyze this API...')) {
+   *   if (event.type === 'text') process.stdout.write(event.text);
+   *   if (event.type === 'tool_call') console.log(`Calling: ${event.toolName}`);
+   *   if (event.type === 'done') console.log(`\nTokens: ${event.usage?.totalTokens}`);
+   * }
+   */
+  async *stream(message) {
+    if (!this.chatSession) await this.init();
+    this._markdownFiles = [];
+    const allToolCalls = [];
+    let fullText = "";
+    let streamResponse = await this.chatSession.sendMessageStream({ message });
+    for (let round = 0; round < this.maxToolRounds; round++) {
+      let roundText = "";
+      const functionCalls = [];
+      for await (const chunk of streamResponse) {
+        if (chunk.functionCalls) {
+          functionCalls.push(...chunk.functionCalls);
+        } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+          const text = chunk.candidates[0].content.parts[0].text;
+          roundText += text;
+          fullText += text;
+          yield { type: "text", text };
+        }
+      }
+      if (functionCalls.length === 0) {
+        yield {
+          type: "done",
+          fullText,
+          markdownFiles: [...this._markdownFiles],
+          usage: this.getLastUsage()
+        };
+        return;
+      }
+      const toolResults = [];
+      for (const call of functionCalls) {
+        yield { type: "tool_call", toolName: call.name, args: call.args };
+        let result;
+        try {
+          result = await executeBuiltInTool(call.name, call.args, {
+            httpTimeout: this.httpTimeout,
+            onToolCall: this.onToolCall,
+            onMarkdown: this.onMarkdown
+          });
+        } catch (err) {
+          logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
+          result = { error: err.message };
+        }
+        allToolCalls.push({ name: call.name, args: call.args, result });
+        yield { type: "tool_result", toolName: call.name, result };
+        if (call.name === "write_markdown" && call.args) {
+          const mdFilename = (
+            /** @type {string} */
+            call.args.filename
+          );
+          const mdContent = (
+            /** @type {string} */
+            call.args.content
+          );
+          this._markdownFiles.push({ filename: mdFilename, content: mdContent });
+          yield { type: "markdown", filename: mdFilename, content: mdContent };
+        }
+        toolResults.push({ id: call.id, name: call.name, result });
+      }
+      streamResponse = await this.chatSession.sendMessageStream({
+        message: toolResults.map((r) => ({
+          functionResponse: {
+            id: r.id,
+            name: r.name,
+            response: { output: r.result }
+          }
+        }))
+      });
+    }
+    yield {
+      type: "done",
+      fullText,
+      markdownFiles: [...this._markdownFiles],
+      usage: this.getLastUsage(),
+      warning: "Max tool rounds reached"
+    };
+  }
+  /**
+   * Clear conversation history while preserving tools and system prompt.
+   * Useful for starting a new user session without re-initializing the agent.
+   * @returns {Promise<void>}
+   */
+  async clearHistory() {
+    this.chatSession = this.genAIClient.chats.create({
+      model: this.modelName,
+      config: {
+        ...this.chatConfig,
+        ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
+      },
+      history: []
+    });
+    this._markdownFiles = [];
+    this.lastResponseMetadata = null;
+    logger_default.debug("AIAgent: Conversation history cleared.");
+  }
+  /**
+   * Get conversation history.
+   * @param {boolean} [curated=false]
+   * @returns {any[]}
+   */
+  getHistory(curated = false) {
+    if (!this.chatSession) return [];
+    return this.chatSession.getHistory(curated);
+  }
+  /**
+   * Get structured usage data from the last API call.
+   * Returns null if no API call has been made yet.
+   * @returns {UsageData|null} Usage data with promptTokens, responseTokens, totalTokens, etc.
+   */
+  getLastUsage() {
+    if (!this.lastResponseMetadata) return null;
+    const m = this.lastResponseMetadata;
+    return {
+      promptTokens: m.promptTokens,
+      responseTokens: m.responseTokens,
+      totalTokens: m.totalTokens,
+      attempts: 1,
+      modelVersion: m.modelVersion,
+      requestedModel: this.modelName,
+      timestamp: m.timestamp
+    };
+  }
+  // --- Private helpers ---
+  /**
+   * Capture response metadata (model version, token counts) from an API response.
+   * @param {import('@google/genai').GenerateContentResponse} response
+   * @private
+   */
+  _captureMetadata(response) {
+    this.lastResponseMetadata = {
+      modelVersion: response.modelVersion || null,
+      requestedModel: this.modelName,
+      promptTokens: response.usageMetadata?.promptTokenCount || 0,
+      responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
+      totalTokens: response.usageMetadata?.totalTokenCount || 0,
+      timestamp: Date.now()
+    };
+  }
+  /** @private */
+  _configureLogLevel(logLevel) {
+    if (logLevel) {
+      if (logLevel === "none") {
+        logger_default.level = "silent";
+      } else {
+        logger_default.level = logLevel;
+      }
+    } else if (LOG_LEVEL) {
+      logger_default.level = LOG_LEVEL;
+    } else if (NODE_ENV === "dev") {
+      logger_default.level = "debug";
+    } else if (NODE_ENV === "test") {
+      logger_default.level = "warn";
+    } else if (NODE_ENV.startsWith("prod")) {
+      logger_default.level = "error";
+    } else {
+      logger_default.level = "info";
+    }
+  }
+  /** @private */
+  _configureThinking(thinkingConfig) {
+    const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some((p) => p.test(this.modelName));
+    if (thinkingConfig === void 0) return;
+    if (thinkingConfig === null) {
+      delete this.chatConfig.thinkingConfig;
+      return;
+    }
+    if (!modelSupportsThinking) {
+      logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+      return;
+    }
+    const config = { ...DEFAULT_THINKING_CONFIG, ...thinkingConfig };
+    if (thinkingConfig.thinkingLevel !== void 0) {
+      delete config.thinkingBudget;
+    }
+    this.chatConfig.thinkingConfig = config;
+    logger_default.debug(`Thinking config applied: ${JSON.stringify(config)}`);
+  }
+};
+var agent_default = AIAgent;
+
+// index.js
+var import_meta = {};
+import_dotenv2.default.config();
+var { NODE_ENV: NODE_ENV2 = "unknown", GEMINI_API_KEY, LOG_LEVEL: LOG_LEVEL2 = "" } = process.env;
+var DEFAULT_SAFETY_SETTINGS2 = [
+  { category: import_genai2.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: import_genai2.HarmBlockThreshold.BLOCK_NONE },
+  { category: import_genai2.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: import_genai2.HarmBlockThreshold.BLOCK_NONE }
 ];
 var DEFAULT_SYSTEM_INSTRUCTIONS = `
 You are an expert JSON transformation engine. Your task is to accurately convert data payloads from one format to another.
@@ -80,11 +560,11 @@ Always respond ONLY with a valid JSON object that strictly adheres to the expect
 
 Do not include any additional text, explanations, or formatting before or after the JSON object.
 `;
-var DEFAULT_THINKING_CONFIG = {
+var DEFAULT_THINKING_CONFIG2 = {
   thinkingBudget: 0
 };
 var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
-var THINKING_SUPPORTED_MODELS = [
+var THINKING_SUPPORTED_MODELS2 = [
   /^gemini-3-flash(-preview)?$/,
   /^gemini-3-pro(-preview|-image-preview)?$/,
   /^gemini-2\.5-pro/,
@@ -99,7 +579,7 @@ var DEFAULT_CHAT_CONFIG = {
   topP: 0.95,
   topK: 64,
   systemInstruction: DEFAULT_SYSTEM_INSTRUCTIONS,
-  safetySettings: DEFAULT_SAFETY_SETTINGS
+  safetySettings: DEFAULT_SAFETY_SETTINGS2
 };
 var AITransformer = class {
   /**
@@ -162,16 +642,16 @@ function AITransformFactory(options = {}) {
     } else {
       logger_default.level = this.logLevel;
     }
-  } else if (LOG_LEVEL) {
-    this.logLevel = LOG_LEVEL;
-    logger_default.level = LOG_LEVEL;
-  } else if (NODE_ENV === "dev") {
+  } else if (LOG_LEVEL2) {
+    this.logLevel = LOG_LEVEL2;
+    logger_default.level = LOG_LEVEL2;
+  } else if (NODE_ENV2 === "dev") {
     this.logLevel = "debug";
     logger_default.level = "debug";
-  } else if (NODE_ENV === "test") {
+  } else if (NODE_ENV2 === "test") {
     this.logLevel = "warn";
     logger_default.level = "warn";
-  } else if (NODE_ENV.startsWith("prod")) {
+  } else if (NODE_ENV2.startsWith("prod")) {
     this.logLevel = "error";
     logger_default.level = "error";
   } else {
@@ -213,7 +693,7 @@ function AITransformFactory(options = {}) {
   } else {
     this.chatConfig.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
   }
-  const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some(
+  const modelSupportsThinking = THINKING_SUPPORTED_MODELS2.some(
     (pattern) => pattern.test(this.modelName)
   );
   if (options.thinkingConfig !== void 0) {
@@ -224,7 +704,7 @@ function AITransformFactory(options = {}) {
       }
     } else if (modelSupportsThinking) {
       const thinkingConfig = {
-        ...DEFAULT_THINKING_CONFIG,
+        ...DEFAULT_THINKING_CONFIG2,
         ...options.thinkingConfig
       };
       if (options.thinkingConfig?.thinkingLevel !== void 0) {
@@ -291,7 +771,7 @@ function AITransformFactory(options = {}) {
     ...this.location && { location: this.location },
     ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
   } : { apiKey: this.apiKey };
-  const ai = new import_genai.GoogleGenAI(clientOptions);
+  const ai = new import_genai2.GoogleGenAI(clientOptions);
   this.genAIClient = ai;
   this.chat = null;
 }
@@ -1038,15 +1518,16 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
         mockValidator
       );
       logger_default.info("Validated Payload Transformed", validatedResponse);
-      if (NODE_ENV === "dev") debugger;
+      if (NODE_ENV2 === "dev") debugger;
     } catch (error) {
       logger_default.error("Error in AI Transformer script:", error);
-      if (NODE_ENV === "dev") debugger;
+      if (NODE_ENV2 === "dev") debugger;
     }
   })();
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  AIAgent,
   HarmBlockThreshold,
   HarmCategory,
   ThinkingLevel,

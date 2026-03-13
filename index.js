@@ -150,6 +150,7 @@ class AITransformer {
 
 export default AITransformer;
 export { attemptJSONRecovery }; // Export for testing
+export { default as AIAgent } from './agent.js';
 
 /**
  * factory function to create an AI Transformer instance
@@ -277,7 +278,7 @@ function AITransformFactory(options = {}) {
 			this.chatConfig.thinkingConfig = thinkingConfig;
 
 			if (log.level !== 'silent') {
-				log.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
+				log.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig: ${JSON.stringify(thinkingConfig)}`);
 			}
 		} else {
 			if (log.level !== 'silent') {
@@ -559,13 +560,13 @@ async function rawMessage(sourcePayload, messageOptions = {}) {
 		};
 
 		if (result.usageMetadata && log.level !== 'silent') {
-			log.debug(`API response metadata:`, {
+			log.debug(`API response metadata: ${JSON.stringify({
 				modelVersion: result.modelVersion || 'not-provided',
 				requestedModel: this.modelName,
 				promptTokens: result.usageMetadata.promptTokenCount,
 				responseTokens: result.usageMetadata.candidatesTokenCount,
 				totalTokens: result.usageMetadata.totalTokenCount
-			});
+			})}`);
 		}
 
 		const modelResponse = result.text;
@@ -775,7 +776,7 @@ Respond with JSON only – no comments or explanations.
 		};
 
 		if (result.usageMetadata && log.level !== 'silent') {
-			log.debug(`Rebuild response metadata - tokens used:`, result.usageMetadata.totalTokenCount);
+			log.debug(`Rebuild response metadata - tokens used: ${result.usageMetadata.totalTokenCount}`);
 		}
 	} catch (err) {
 		throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
@@ -1077,11 +1078,11 @@ async function statelessMessage(sourcePayload, options = {}, validatorFn = null)
 	};
 
 	if (result.usageMetadata && log.level !== 'silent') {
-		log.debug(`Stateless message metadata:`, {
+		log.debug(`Stateless message metadata: ${JSON.stringify({
 			modelVersion: result.modelVersion || 'not-provided',
 			promptTokens: result.usageMetadata.promptTokenCount,
 			responseTokens: result.usageMetadata.candidatesTokenCount
-		});
+		})}`);
 	}
 
 	const modelResponse = result.text;
@@ -1473,7 +1474,7 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 
 				// Test normal transformation
 				const normalResponse = await transformer.message({ "name": "AK" });
-				log.info("Normal Payload Transformed", normalResponse);
+				log.info(`Normal Payload Transformed: ${JSON.stringify(normalResponse)}`);
 
 				// Test transformation with validation
 				const mockValidator = async (payload) => {
@@ -1492,11 +1493,11 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
 				{},
 					mockValidator
 				);
-				log.info("Validated Payload Transformed", validatedResponse);
+				log.info(`Validated Payload Transformed: ${JSON.stringify(validatedResponse)}`);
 
 				if (NODE_ENV === 'dev') debugger;
 			} catch (error) {
-				log.error("Error in AI Transformer script:", error);
+				log.error(`Error in AI Transformer script: ${error?.message || error}`);
 				if (NODE_ENV === 'dev') debugger;
 			}
 		})();

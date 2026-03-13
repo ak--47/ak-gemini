@@ -12,6 +12,6 @@ env.yaml
 .env
 env.yaml
 schema.json
-scratch.js
+scratch*
 coverage/*
 !coverage/.gitkeep
