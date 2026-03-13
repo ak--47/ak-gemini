@@ -66,6 +66,14 @@ var import_genai = require("@google/genai");
 
 // tools.js
 var MAX_RESPONSE_LENGTH = 5e4;
+function parseBody(text) {
+  const body = text.length > MAX_RESPONSE_LENGTH ? text.slice(0, MAX_RESPONSE_LENGTH) + "\n...[TRUNCATED]" : text;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
 var BUILT_IN_DECLARATIONS = [
   {
     name: "http_get",
@@ -132,8 +140,7 @@ async function executeBuiltInTool(name, args, options = {}) {
         signal: AbortSignal.timeout(httpTimeout)
       });
       const text = await resp.text();
-      const body = text.length > MAX_RESPONSE_LENGTH ? text.slice(0, MAX_RESPONSE_LENGTH) + "\n...[TRUNCATED]" : text;
-      return { status: resp.status, statusText: resp.statusText, body };
+      return { status: resp.status, statusText: resp.statusText, body: parseBody(text) };
     }
     case "http_post": {
       logger_default.debug(`http_post: ${args.url}`);
@@ -145,8 +152,7 @@ async function executeBuiltInTool(name, args, options = {}) {
         signal: AbortSignal.timeout(httpTimeout)
       });
       const text = await resp.text();
-      const body = text.length > MAX_RESPONSE_LENGTH ? text.slice(0, MAX_RESPONSE_LENGTH) + "\n...[TRUNCATED]" : text;
-      return { status: resp.status, statusText: resp.statusText, body };
+      return { status: resp.status, statusText: resp.statusText, body: parseBody(text) };
     }
     case "write_markdown": {
       logger_default.debug(`write_markdown: ${args.filename}`);
@@ -185,22 +191,7 @@ var THINKING_SUPPORTED_MODELS = [
 var AIAgent = class {
   /**
    * Create a new AIAgent instance.
-   *
-   * @param {AIAgentOptions} [options={}] - Configuration options
-   * @param {string} [options.apiKey] - Gemini API key (or set GEMINI_API_KEY env var)
-   * @param {string} [options.systemPrompt='You are a helpful AI assistant.'] - System prompt
-   * @param {string} [options.modelName='gemini-2.5-flash'] - Gemini model to use
-   * @param {number} [options.maxToolRounds=10] - Max tool-use loop iterations
-   * @param {number} [options.httpTimeout=30000] - HTTP request timeout in ms
-   * @param {Function} [options.onToolCall] - Callback fired before each tool execution
-   * @param {Function} [options.onMarkdown] - Callback fired when markdown is generated
-   * @param {boolean} [options.vertexai=false] - Use Vertex AI instead of Gemini API
-   * @param {string} [options.project] - GCP project ID (required for Vertex AI)
-   * @param {string} [options.location] - GCP region (defaults to 'global')
-   * @param {import('./types').GoogleAuthOptions} [options.googleAuthOptions] - Vertex AI auth
-   * @param {import('./types').ThinkingConfig} [options.thinkingConfig] - Extended thinking config
-   * @param {Record<string, string>} [options.labels] - Billing labels (Vertex AI only)
-   * @param {string} [options.logLevel] - Log level
+   * @param {AIAgentOptions} [options={}] - Configuration options (see AIAgentOptions in types.d.ts)
    */
   constructor(options = {}) {
     this.modelName = options.modelName || "gemini-2.5-flash";
@@ -712,7 +703,7 @@ function AITransformFactory(options = {}) {
       }
       this.chatConfig.thinkingConfig = thinkingConfig;
       if (logger_default.level !== "silent") {
-        logger_default.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig:`, thinkingConfig);
+        logger_default.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig: ${JSON.stringify(thinkingConfig)}`);
       }
     } else {
       if (logger_default.level !== "silent") {
@@ -897,13 +888,13 @@ async function rawMessage(sourcePayload, messageOptions = {}) {
       timestamp: Date.now()
     };
     if (result.usageMetadata && logger_default.level !== "silent") {
-      logger_default.debug(`API response metadata:`, {
+      logger_default.debug(`API response metadata: ${JSON.stringify({
         modelVersion: result.modelVersion || "not-provided",
         requestedModel: this.modelName,
         promptTokens: result.usageMetadata.promptTokenCount,
         responseTokens: result.usageMetadata.candidatesTokenCount,
         totalTokens: result.usageMetadata.totalTokenCount
-      });
+      })}`);
     }
     const modelResponse = result.text;
     const extractedJSON = extractJSON(modelResponse);
@@ -1037,7 +1028,7 @@ Respond with JSON only \u2013 no comments or explanations.
       timestamp: Date.now()
     };
     if (result.usageMetadata && logger_default.level !== "silent") {
-      logger_default.debug(`Rebuild response metadata - tokens used:`, result.usageMetadata.totalTokenCount);
+      logger_default.debug(`Rebuild response metadata - tokens used: ${result.usageMetadata.totalTokenCount}`);
     }
   } catch (err) {
     throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
@@ -1212,11 +1203,11 @@ async function statelessMessage(sourcePayload, options = {}, validatorFn = null)
     attempts: 1
   };
   if (result.usageMetadata && logger_default.level !== "silent") {
-    logger_default.debug(`Stateless message metadata:`, {
+    logger_default.debug(`Stateless message metadata: ${JSON.stringify({
       modelVersion: result.modelVersion || "not-provided",
       promptTokens: result.usageMetadata.promptTokenCount,
       responseTokens: result.usageMetadata.candidatesTokenCount
-    });
+    })}`);
   }
   const modelResponse = result.text;
   const extractedJSON = extractJSON(modelResponse);
@@ -1502,7 +1493,7 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
       await transformer.seed(examples);
       logger_default.info("AI Transformer initialized and seeded with examples.");
       const normalResponse = await transformer.message({ "name": "AK" });
-      logger_default.info("Normal Payload Transformed", normalResponse);
+      logger_default.info(`Normal Payload Transformed: ${JSON.stringify(normalResponse)}`);
       const mockValidator = async (payload) => {
         if (!payload.profession || !payload.life_as_told_by_emoji) {
           throw new Error("Missing required fields: profession or life_as_told_by_emoji");
@@ -1517,10 +1508,10 @@ if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
         {},
         mockValidator
       );
-      logger_default.info("Validated Payload Transformed", validatedResponse);
+      logger_default.info(`Validated Payload Transformed: ${JSON.stringify(validatedResponse)}`);
       if (NODE_ENV2 === "dev") debugger;
     } catch (error) {
-      logger_default.error("Error in AI Transformer script:", error);
+      logger_default.error(`Error in AI Transformer script: ${error?.message || error}`);
       if (NODE_ENV2 === "dev") debugger;
     }
   })();
