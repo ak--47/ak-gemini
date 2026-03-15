@@ -508,7 +508,8 @@ var BaseGemini = class {
     if (instructionExample) {
       logger_default.debug(`Found system prompt in examples; reinitializing chat.`);
       this.systemPrompt = instructionExample[systemPromptKey];
-      this.chatConfig.systemInstruction = this.systemPrompt;
+      this.chatConfig.systemInstruction = /** @type {string} */
+      this.systemPrompt;
       await this.init(true);
     }
     logger_default.debug(`Seeding chat with ${examples.length} examples...`);
@@ -781,12 +782,7 @@ var Transformer = class extends base_default {
    * Includes validation and automatic retry with AI-powered error correction.
    *
    * @param {Object|string} payload - The source payload to transform
-   * @param {Object} [opts={}] - Per-message options
-   * @param {number} [opts.maxRetries] - Override max retries
-   * @param {number} [opts.retryDelay] - Override retry delay
-   * @param {boolean} [opts.stateless] - Send without affecting chat history
-   * @param {boolean} [opts.enableGrounding] - Override grounding for this message
-   * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @param {import('./types').SendOptions} [opts={}] - Per-message options
    * @param {AsyncValidatorFunction|null} [validatorFn] - Validator for this call (overrides constructor validator)
    * @returns {Promise<Object>} The transformed payload
    */
@@ -1181,8 +1177,12 @@ var Message = class extends base_default {
     logger_default.warn("Message is stateless \u2014 seed() has no effect. Use Transformer or Chat for few-shot learning.");
     return [];
   }
-  /** Not supported on Message (stateless). */
-  async estimate() {
+  /**
+   * Not supported on Message (stateless).
+   * @param {any} [_nextPayload]
+   * @returns {Promise<{inputTokens: number}>}
+   */
+  async estimate(_nextPayload) {
     throw new Error("Message is stateless \u2014 use estimate() on Chat or Transformer which have conversation context.");
   }
 };

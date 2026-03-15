@@ -170,12 +170,7 @@ class Transformer extends BaseGemini {
 	 * Includes validation and automatic retry with AI-powered error correction.
 	 *
 	 * @param {Object|string} payload - The source payload to transform
-	 * @param {Object} [opts={}] - Per-message options
-	 * @param {number} [opts.maxRetries] - Override max retries
-	 * @param {number} [opts.retryDelay] - Override retry delay
-	 * @param {boolean} [opts.stateless] - Send without affecting chat history
-	 * @param {boolean} [opts.enableGrounding] - Override grounding for this message
-	 * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+	 * @param {import('./types').SendOptions} [opts={}] - Per-message options
 	 * @param {AsyncValidatorFunction|null} [validatorFn] - Validator for this call (overrides constructor validator)
 	 * @returns {Promise<Object>} The transformed payload
 	 */

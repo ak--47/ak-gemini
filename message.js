@@ -157,8 +157,12 @@ class Message extends BaseGemini {
 		return [];
 	}
 
-	/** Not supported on Message (stateless). */
-	async estimate() {
+	/**
+	 * Not supported on Message (stateless).
+	 * @param {any} [_nextPayload]
+	 * @returns {Promise<{inputTokens: number}>}
+	 */
+	async estimate(_nextPayload) {
 		throw new Error("Message is stateless — use estimate() on Chat or Transformer which have conversation context.");
 	}
 }

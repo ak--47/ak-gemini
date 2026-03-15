@@ -253,6 +253,9 @@ export interface SendOptions {
   enableGrounding?: boolean;
   /** Override grounding config for this message */
   groundingConfig?: Record<string, any>;
+  /** @internal Used to restore grounding state after per-message override */
+  _restoreGrounding?: () => Promise<void>;
+  [key: string]: any;
 }
 
 // ── Response Types ───────────────────────────────────────────────────────────

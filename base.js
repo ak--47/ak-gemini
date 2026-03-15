@@ -283,7 +283,7 @@ class BaseGemini {
 		if (instructionExample) {
 			log.debug(`Found system prompt in examples; reinitializing chat.`);
 			this.systemPrompt = instructionExample[systemPromptKey];
-			this.chatConfig.systemInstruction = this.systemPrompt;
+			this.chatConfig.systemInstruction = /** @type {string} */ (this.systemPrompt);
 			await this.init(true);
 		}
 
