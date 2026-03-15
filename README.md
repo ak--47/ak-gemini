@@ -1,391 +1,356 @@
-# AK-Gemini
+# ak-gemini
 
-**Generic, type-safe, and highly configurable wrapper for Google's Gemini AI JSON transformation.**
-Use this to power LLM-driven data pipelines, JSON mapping, or any automated AI transformation step, locally or in cloud functions.
-
----
-
-## Features
-
-* **Model-Agnostic:** Use any Gemini model (`gemini-2.5-flash` by default)
-* **Declarative Few-shot Examples:** Seed transformations using example mappings, with support for custom keys (`PROMPT`, `ANSWER`, `CONTEXT`, or your own)
-* **Automatic Validation & Repair:** Validate outputs with your own async function; auto-repair failed payloads with LLM feedback loop (exponential backoff, fully configurable)
-* **Token Counting & Safety:** Preview the *exact* Gemini token consumption for any operation—including all examples, instructions, and your input—before sending, so you can avoid window errors and manage costs.
-* **Conversation Management:** Clear conversation history while preserving examples, or send stateless one-off messages that don't affect history
-* **Response Metadata:** Access actual model version and token counts from API responses for billing verification and debugging
-* **Strong TypeScript/JSDoc Typings:** All public APIs fully typed (see `/types`)
-* **Minimal API Surface:** Dead simple, no ceremony—init, seed, transform, validate.
-* **Robust Logging:** Pluggable logger for all steps, easy debugging
-
----
-
-## Install
+**Modular, type-safe wrapper for Google's Gemini AI.** Five class exports for different interaction patterns — JSON transformation, chat, stateless messages, tool-using agents, and code-writing agents — all sharing a common base.
 
 ```sh
 npm install ak-gemini
 ```
 
-Requires Node.js 18+, and [@google/genai](https://www.npmjs.com/package/@google/genai).
+Requires Node.js 18+ and [@google/genai](https://www.npmjs.com/package/@google/genai).
 
 ---
 
-## Usage
-
-### 1. **Setup**
-
-Set your `GEMINI_API_KEY` environment variable:
+## Quick Start
 
 ```sh
-export GEMINI_API_KEY=sk-your-gemini-api-key
+export GEMINI_API_KEY=your-key
 ```
 
-or pass it directly in the constructor options.
-
----
-
-### 2. **Basic Example**
-
-```js
-import AITransformer from 'ak-gemini';
-
-const transformer = new AITransformer({
-  modelName: 'gemini-2.5-flash',    // or your preferred Gemini model
-  sourceKey: 'INPUT',               // Custom prompt key (default: 'PROMPT')
-  targetKey: 'OUTPUT',              // Custom answer key (default: 'ANSWER')
-  contextKey: 'CONTEXT',            // Optional, for per-example context
-  maxRetries: 2,                    // Optional, for validation-repair loops
-  // responseSchema: { ... },       // Optional, strict output typing
-});
-
-const examples = [
-  {
-    CONTEXT: "Generate professional profiles with emoji representations",
-    INPUT: { "name": "Alice" },
-    OUTPUT: { "name": "Alice", "profession": "data scientist", "life_as_told_by_emoji": ["🔬", "💡", "📊", "🧠", "🌟"] }
-  }
-];
-
-await transformer.init();
-await transformer.seed(examples);
-
-const result = await transformer.message({ name: "Bob" });
-console.log(result);
-// → { name: "Bob", profession: "...", life_as_told_by_emoji: [ ... ] }
+```javascript
+import { Transformer, Chat, Message, ToolAgent, CodeAgent } from 'ak-gemini';
 ```
 
 ---
 
-### 3. **Token Window Safety/Preview**
+## Classes
 
-Before calling `.message()` or `.seed()`, you can preview the INPUT token usage that will be sent to Gemini—*including* your system instructions, examples, and user input. This is vital for avoiding window errors and managing context size:
+### Transformer — JSON Transformation
 
-```js
-const { inputTokens } = await transformer.estimate({ name: "Bob" });
-console.log(`Input tokens: ${inputTokens}`);
+Transform structured data using few-shot examples with validation and retry.
 
-// Optional: abort or trim if over limit
-if (inputTokens > 32000) throw new Error("Request too large for selected Gemini model");
-
-// After the call, check actual usage (input + output)
-await transformer.message({ name: "Bob" });
-const usage = transformer.getLastUsage();
-console.log(`Actual usage: ${usage.promptTokens} in, ${usage.responseTokens} out`);
-```
-
----
-
-### 4. **Automatic Validation & Self-Healing**
-
-You can pass a custom async validator—if it fails, the transformer will attempt to self-correct using LLM feedback, retrying up to `maxRetries` times:
-
-```js
-const validator = async (payload) => {
-  if (!payload.profession || !Array.isArray(payload.life_as_told_by_emoji)) {
-    throw new Error('Invalid profile format');
-  }
-  return payload;
-};
-
-const validPayload = await transformer.transformWithValidation({ name: "Lynn" }, validator);
-console.log(validPayload);
-```
-
----
-
-### 5. **Conversation Management**
-
-Manage chat history to control costs and isolate requests:
-
-```js
-// Clear conversation history while preserving seeded examples
-await transformer.clearConversation();
-
-// Send a stateless message that doesn't affect chat history
-const result = await transformer.message({ query: "one-off question" }, { stateless: true });
-
-// Check actual model and token usage from last API call
-console.log(transformer.lastResponseMetadata);
-// → { modelVersion: 'gemini-2.5-flash-001', requestedModel: 'gemini-2.5-flash',
-//    promptTokens: 150, responseTokens: 42, totalTokens: 192, timestamp: 1703... }
-```
-
----
-
-## API
-
-### Constructor
-
-```js
-new AITransformer(options)
-```
-
-| Option             | Type   | Default            | Description                                       |
-| ------------------ | ------ | ------------------ | ------------------------------------------------- |
-| modelName          | string | 'gemini-2.5-flash' | Gemini model to use                               |
-| sourceKey          | string | 'PROMPT'           | Key for prompt/example input                      |
-| targetKey          | string | 'ANSWER'           | Key for expected output in examples               |
-| contextKey         | string | 'CONTEXT'          | Key for per-example context (optional)            |
-| examplesFile       | string | null               | Path to JSON file containing examples             |
-| exampleData        | array  | null               | Inline array of example objects                   |
-| responseSchema     | object | null               | Optional JSON schema for strict output validation |
-| maxRetries         | number | 3                  | Retries for validation+rebuild loop               |
-| retryDelay         | number | 1000               | Initial retry delay in ms (exponential backoff)   |
-| logLevel           | string | 'info'             | Log level: 'trace', 'debug', 'info', 'warn', 'error', 'fatal', or 'none' |
-| chatConfig         | object | ...                | Gemini chat config overrides                      |
-| systemInstructions | string/null/false | (default prompt) | System prompt for Gemini. Pass `null` or `false` to disable. |
-| maxOutputTokens    | number | 50000              | Maximum tokens in generated response              |
-| thinkingConfig     | object | null               | Thinking features config (see below)              |
-| enableGrounding    | boolean | false             | Enable Google Search grounding (WARNING: $35/1k queries) |
-| labels             | object | null               | Billing labels for cost attribution               |
-| apiKey             | string | env var            | Gemini API key (or use `GEMINI_API_KEY` env var)  |
-| vertexai           | boolean | false             | Use Vertex AI instead of Gemini API               |
-| project            | string | env var            | GCP project ID (for Vertex AI)                    |
-| location           | string | 'global'           | GCP region (for Vertex AI)                        |
-| googleAuthOptions  | object | null               | Auth options for Vertex AI (keyFilename, credentials) |
-
----
-
-### Methods
-
-#### `await transformer.init()`
-
-Initializes Gemini chat session (idempotent).
-
-#### `await transformer.seed(examples?)`
-
-Seeds the model with example transformations (uses keys from constructor).
-You can omit `examples` to use the `examplesFile` (if provided).
-
-#### `await transformer.message(sourcePayload, options?)`
-
-Transforms input JSON to output JSON using the seeded examples and system instructions. Throws if estimated token window would be exceeded.
-
-**Options:**
-- `stateless: true` — Send a one-off message without affecting chat history (uses `generateContent` instead of chat)
-- `labels: {}` — Per-message billing labels
-
-#### `await transformer.estimate(sourcePayload)`
-
-Returns `{ inputTokens }` — the estimated INPUT tokens for the request (system instructions + all examples + your sourcePayload).
-Use this to preview token window safety and manage costs before sending.
-
-**Note:** This only estimates input tokens. Output tokens cannot be predicted before the API call. Use `getLastUsage()` after `message()` to see actual consumption.
-
-#### `await transformer.transformWithValidation(sourcePayload, validatorFn, options?)`
-
-Runs transformation, validates with your async validator, and (optionally) repairs payload using LLM until valid or retries are exhausted.
-Throws if all attempts fail.
-
-#### `await transformer.rebuild(lastPayload, errorMessage)`
-
-Given a failed payload and error message, uses LLM to generate a corrected payload.
-
-#### `await transformer.reset()`
-
-Resets the Gemini chat session, clearing all history/examples.
-
-#### `transformer.getHistory()`
-
-Returns the current chat history (for debugging).
-
-#### `await transformer.clearConversation()`
-
-Clears conversation history while preserving seeded examples. Useful for starting fresh user sessions without re-seeding.
-
-#### `transformer.getLastUsage()`
-
-Returns structured usage data for billing verification. Token counts are **cumulative across all retry attempts** - if validation failed and a retry was needed, you see the total tokens consumed, not just the final successful call. Returns `null` if no API call has been made yet.
-
-```js
-const usage = transformer.getLastUsage();
-// {
-//   promptTokens: 300,      // CUMULATIVE input tokens across all attempts
-//   responseTokens: 84,     // CUMULATIVE output tokens across all attempts
-//   totalTokens: 384,       // CUMULATIVE total tokens
-//   attempts: 2,            // Number of attempts (1 = first try success, 2+ = retries needed)
-//   modelVersion: 'gemini-2.5-flash-001',  // Actual model that responded
-//   requestedModel: 'gemini-2.5-flash',    // Model you requested
-//   timestamp: 1703...      // When response was received
-// }
-```
-
----
-
-### Properties
-
-#### `transformer.lastResponseMetadata`
-
-After each API call, contains metadata from the response:
-
-```js
-{
-  modelVersion: string | null,  // Actual model version that responded (e.g., 'gemini-2.5-flash-001')
-  requestedModel: string,       // Model you requested (e.g., 'gemini-2.5-flash')
-  promptTokens: number,         // Tokens in the prompt
-  responseTokens: number,       // Tokens in the response
-  totalTokens: number,          // Total tokens used
-  timestamp: number             // When response was received
-}
-```
-
-Useful for verifying billing, debugging model behavior, and tracking token usage.
-
----
-
-## Examples
-
-### Seed with Custom Example Keys
-
-```js
-const transformer = new AITransformer({
+```javascript
+const transformer = new Transformer({
+  modelName: 'gemini-2.5-flash',
   sourceKey: 'INPUT',
-  targetKey: 'OUTPUT',
-  contextKey: 'CTX'
+  targetKey: 'OUTPUT'
 });
 
 await transformer.init();
 await transformer.seed([
   {
-    CTX: "You are a dog expert.",
-    INPUT: { breed: "golden retriever" },
-    OUTPUT: { breed: "golden retriever", size: "large", friendly: true }
+    INPUT: { name: 'Alice' },
+    OUTPUT: { name: 'Alice', role: 'engineer', emoji: '👩‍💻' }
   }
 ]);
 
-const dog = await transformer.message({ breed: "chihuahua" });
+const result = await transformer.send({ name: 'Bob' });
+// → { name: 'Bob', role: '...', emoji: '...' }
 ```
 
----
+**Validation & self-healing:**
 
-### Use With Validation and Retry
-
-```js
-const result = await transformer.transformWithValidation(
-  { name: "Bob" },
-  async (output) => {
-    if (!output.name || !output.profession) throw new Error("Missing fields");
-    return output;
-  }
-);
-```
-
----
-
-## Vertex AI Authentication
-
-Use Vertex AI instead of the Gemini API for enterprise features, VPC controls, and GCP billing integration.
-
-### With Service Account Key File
-
-```js
-const transformer = new AITransformer({
-  vertexai: true,
-  project: 'my-gcp-project',
-  location: 'us-central1',  // Optional: defaults to 'global' endpoint
-  googleAuthOptions: {
-    keyFilename: './service-account.json'
-  }
+```javascript
+const result = await transformer.send({ name: 'Bob' }, {}, async (output) => {
+  if (!output.role) throw new Error('Missing role field');
+  return output;
 });
 ```
 
-### With Application Default Credentials
+### Chat — Multi-Turn Conversation
 
-```js
-// Uses GOOGLE_APPLICATION_CREDENTIALS env var or `gcloud auth application-default login`
-const transformer = new AITransformer({
-  vertexai: true,
-  project: 'my-gcp-project'  // or GOOGLE_CLOUD_PROJECT env var
+```javascript
+const chat = new Chat({
+  systemPrompt: 'You are a helpful assistant.'
 });
+
+const r1 = await chat.send('My name is Alice.');
+const r2 = await chat.send('What is my name?');
+// r2.text → "Alice"
+```
+
+### Message — Stateless One-Off
+
+Each call is independent — no history maintained.
+
+```javascript
+const msg = new Message({
+  systemPrompt: 'Extract entities as JSON.',
+  responseMimeType: 'application/json',
+  responseSchema: {
+    type: 'object',
+    properties: {
+      entities: { type: 'array', items: { type: 'string' } }
+    }
+  }
+});
+
+const result = await msg.send('Alice works at Acme in New York.');
+// result.data → { entities: ['Alice', 'Acme', 'New York'] }
+```
+
+### ToolAgent — Agent with User-Provided Tools
+
+Provide tool declarations and an executor function. The agent manages the tool-use loop automatically.
+
+```javascript
+const agent = new ToolAgent({
+  systemPrompt: 'You are a research assistant.',
+  tools: [
+    {
+      name: 'http_get',
+      description: 'Fetch a URL',
+      parametersJsonSchema: {
+        type: 'object',
+        properties: { url: { type: 'string' } },
+        required: ['url']
+      }
+    }
+  ],
+  toolExecutor: async (toolName, args) => {
+    if (toolName === 'http_get') {
+      const res = await fetch(args.url);
+      return { status: res.status, body: await res.text() };
+    }
+  },
+  onBeforeExecution: async (toolName, args) => {
+    console.log(`About to call ${toolName}`);
+    return true; // return false to deny
+  }
+});
+
+const result = await agent.chat('Fetch https://api.example.com/data');
+console.log(result.text);       // Agent's summary
+console.log(result.toolCalls);  // [{ name, args, result }]
+```
+
+**Streaming:**
+
+```javascript
+for await (const event of agent.stream('Fetch the data')) {
+  if (event.type === 'text') process.stdout.write(event.text);
+  if (event.type === 'tool_call') console.log(`Calling ${event.toolName}...`);
+  if (event.type === 'tool_result') console.log(`Result:`, event.result);
+  if (event.type === 'done') console.log('Done!');
+}
+```
+
+### CodeAgent — Agent That Writes and Executes Code
+
+Instead of calling tools one by one, the model writes JavaScript that can do everything — read files, write files, run commands — in a single script. Inspired by the [code mode](https://blog.cloudflare.com/how-we-built-mcp-code-mode/) philosophy.
+
+```javascript
+const agent = new CodeAgent({
+  workingDirectory: '/path/to/my/project',
+  onCodeExecution: (code, output) => {
+    console.log('Ran:', code.slice(0, 100));
+    console.log('Output:', output.stdout);
+  },
+  onBeforeExecution: async (code) => {
+    // Review code before execution
+    console.log('About to run:', code);
+    return true; // return false to deny
+  }
+});
+
+const result = await agent.chat('Find all TODO comments in the codebase');
+console.log(result.text);             // Agent's summary
+console.log(result.codeExecutions);   // [{ code, output, stderr, exitCode }]
+```
+
+**How it works:**
+1. On `init()`, gathers codebase context (file tree + key files like package.json)
+2. Injects context into the system prompt so the model understands the project
+3. Model writes JavaScript using the `execute_code` tool
+4. Code runs in a Node.js child process that inherits `process.env`
+5. Output (stdout/stderr) feeds back to the model
+6. Model decides if more work is needed
+
+**Streaming:**
+
+```javascript
+for await (const event of agent.stream('Refactor the auth module')) {
+  if (event.type === 'text') process.stdout.write(event.text);
+  if (event.type === 'code') console.log('\n[Running code...]');
+  if (event.type === 'output') console.log('[Output]:', event.stdout);
+  if (event.type === 'done') console.log('\nDone!');
+}
 ```
 
 ---
 
-## Advanced Configuration
+## Stopping Agents
 
-### Disabling System Instructions
+Both `ToolAgent` and `CodeAgent` support a `stop()` method to cancel execution mid-loop. This is useful for implementing user-facing cancel buttons or safety limits.
 
-By default, the transformer uses built-in system instructions optimized for JSON transformation. You can provide custom instructions or disable them entirely:
+```javascript
+const agent = new CodeAgent({ workingDirectory: '.' });
 
-```js
-// Custom system instructions
-new AITransformer({ systemInstructions: "You are a helpful assistant..." });
+// Stop from a callback
+const agent = new ToolAgent({
+  tools: [...],
+  toolExecutor: myExecutor,
+  onBeforeExecution: async (toolName, args) => {
+    if (toolName === 'dangerous_tool') {
+      agent.stop(); // Stop the agent entirely
+      return false; // Deny this specific execution
+    }
+    return true;
+  }
+});
 
-// Disable system instructions entirely (use Gemini's default behavior)
-new AITransformer({ systemInstructions: null });
-new AITransformer({ systemInstructions: false });
+// Stop externally (e.g., from a timeout or user action)
+setTimeout(() => agent.stop(), 60_000);
+const result = await agent.chat('Do some work');
+```
+
+For `CodeAgent`, `stop()` also kills any currently running child process via SIGTERM.
+
+---
+
+## Shared Features
+
+All classes extend `BaseGemini` and share these features:
+
+### Authentication
+
+```javascript
+// Gemini API (default)
+new Chat({ apiKey: 'your-key' }); // or GEMINI_API_KEY env var
+
+// Vertex AI
+new Chat({ vertexai: true, project: 'my-gcp-project' });
+```
+
+### Token Estimation
+
+```javascript
+const { inputTokens } = await instance.estimate({ some: 'payload' });
+const cost = await instance.estimateCost({ some: 'payload' });
+```
+
+### Usage Tracking
+
+```javascript
+const usage = instance.getLastUsage();
+// { promptTokens, responseTokens, totalTokens, attempts, modelVersion, requestedModel, timestamp }
+```
+
+### Few-Shot Seeding
+
+```javascript
+await instance.seed([
+  { PROMPT: { x: 1 }, ANSWER: { y: 2 } }
+]);
 ```
 
 ### Thinking Configuration
 
-For models that support extended thinking (like `gemini-2.5-flash`):
-
-```js
-const transformer = new AITransformer({
+```javascript
+new Chat({
   modelName: 'gemini-2.5-flash',
-  thinkingConfig: {
-    thinkingBudget: 1024,  // Token budget for thinking
-  }
+  thinkingConfig: { thinkingBudget: 1024 }
 });
 ```
 
-### Billing Labels
+### Billing Labels (Vertex AI)
 
-Labels flow through to GCP billing reports for cost attribution:
-
-```js
-const transformer = new AITransformer({
-  labels: {
-    client: 'acme_corp',
-    app: 'data_pipeline',
-    environment: 'production'
-  }
+```javascript
+new Transformer({
+  vertexai: true,
+  project: 'my-project',
+  labels: { app: 'pipeline', env: 'prod' }
 });
-
-// Override per-message
-await transformer.message(payload, { labels: { request_type: 'batch' } });
 ```
 
 ---
 
-## Token Window Management & Error Handling
+## Constructor Options
 
-* Throws on missing credentials (API key for Gemini API, or project ID for Vertex AI)
-* `.message()` and `.seed()` will *estimate* and prevent calls that would exceed Gemini's model window
-* All API and parsing errors surfaced as `Error` with context
-* Validator and retry failures include the number of attempts and last error
+All classes accept `BaseGeminiOptions`:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `modelName` | string | `'gemini-2.5-flash'` | Gemini model to use |
+| `systemPrompt` | string | varies by class | System prompt |
+| `apiKey` | string | env var | Gemini API key |
+| `vertexai` | boolean | `false` | Use Vertex AI |
+| `project` | string | env var | GCP project ID |
+| `location` | string | `'global'` | GCP region |
+| `chatConfig` | object | — | Gemini chat config overrides |
+| `thinkingConfig` | object | — | Thinking features config |
+| `maxOutputTokens` | number | `50000` | Max tokens in response (`null` removes limit) |
+| `logLevel` | string | based on NODE_ENV | `'trace'`\|`'debug'`\|`'info'`\|`'warn'`\|`'error'`\|`'none'` |
+| `labels` | object | — | Billing labels (Vertex AI) |
+
+### Transformer-Specific
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `sourceKey`/`promptKey` | string | `'PROMPT'` | Key for input in examples |
+| `targetKey`/`answerKey` | string | `'ANSWER'` | Key for output in examples |
+| `contextKey` | string | `'CONTEXT'` | Key for context in examples |
+| `maxRetries` | number | `3` | Retry attempts for validation |
+| `retryDelay` | number | `1000` | Initial retry delay (ms) |
+| `responseSchema` | object | — | JSON schema for output validation |
+| `asyncValidator` | function | — | Global async validator |
+| `enableGrounding` | boolean | `false` | Enable Google Search grounding |
+
+### ToolAgent-Specific
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `tools` | array | — | Tool declarations (FunctionDeclaration format) |
+| `toolExecutor` | function | — | `async (toolName, args) => result` |
+| `maxToolRounds` | number | `10` | Max tool-use loop iterations |
+| `onToolCall` | function | — | Notification callback when tool is called |
+| `onBeforeExecution` | function | — | `async (toolName, args) => boolean` — gate execution |
+
+### CodeAgent-Specific
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `workingDirectory` | string | `process.cwd()` | Directory for code execution |
+| `maxRounds` | number | `10` | Max code execution loop iterations |
+| `timeout` | number | `30000` | Per-execution timeout (ms) |
+| `onBeforeExecution` | function | — | `async (code) => boolean` — gate execution |
+| `onCodeExecution` | function | — | Notification after execution |
+
+### Message-Specific
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `responseSchema` | object | — | Schema for structured output |
+| `responseMimeType` | string | — | e.g. `'application/json'` |
+
+---
+
+## Exports
+
+```javascript
+// Named exports
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, BaseGemini, log } from 'ak-gemini';
+import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
+
+// Default export (namespace)
+import AI from 'ak-gemini';
+new AI.Transformer({ ... });
+
+// CommonJS
+const { Transformer, Chat } = require('ak-gemini');
+```
 
 ---
 
 ## Testing
 
-* **Jest test suite included**
-* Real API integration tests as well as local unit tests
-* 100% coverage for all error cases, configuration options, edge cases
-
-Run tests with:
-
 ```sh
 npm test
 ```
 
+All tests use real Gemini API calls (no mocks). Rate limiting (429 errors) can cause intermittent failures.
+
 ---
+
+## Migration from v1.x
+
+See [MIGRATION.md](./MIGRATION.md) for a detailed guide on upgrading from v1.x to v2.0.

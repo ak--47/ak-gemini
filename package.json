@@ -1,14 +1,19 @@
 {
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
-	"description": "AK's Generative AI Helper for doing... transforms",
-	"version": "1.2.0",
+	"description": "AK's Generative AI Helper for doing... everything",
+	"version": "2.0.0",
 	"main": "index.js",
 	"files": [
 		"index.js",
 		"index.cjs",
-		"agent.js",
-		"tools.js",
+		"base.js",
+		"transformer.js",
+		"chat.js",
+		"message.js",
+		"tool-agent.js",
+		"code-agent.js",
+		"json-helpers.js",
 		"types.d.ts",
 		"logger.js"
 	],
@@ -40,7 +45,7 @@
 		"update-deps": "npx npm-check-updates -u && npm install",
 		"prune": "rm -rf tmp/*",
 		"test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js",
-		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:ak-tools --external:dotenv --external:pino-pretty --external:pino",
+		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@google/genai --external:dotenv --external:pino-pretty --external:pino",
 		"coverage": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
 		"typecheck": "tsc --noEmit",
 		"update:gemini": "npm install @google/genai@latest"
@@ -49,12 +54,14 @@
 	"keywords": [
 		"gemini",
 		"ai wrapper",
-		"json transform"
+		"json transform",
+		"chat",
+		"agent",
+		"tool agent"
 	],
 	"license": "ISC",
 	"dependencies": {
 		"@google/genai": "^1.44.0",
-		"ak-tools": "^1.1.12",
 		"dotenv": "^17.3.1",
 		"pino": "^10.3.1",
 		"pino-pretty": "^13.1.3"

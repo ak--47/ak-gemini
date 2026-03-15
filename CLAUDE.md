@@ -4,237 +4,183 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** is an AI-JSON-TRANSFORMER module that simplifies using Google's Gemini AI to transform JSON payloads through few-shot learning examples. The module provides a clean API for seeding transformations with examples and automatically handling validation, retries, and token management.
+**ak-gemini** (v2.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 5 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
-### Core Components
+### File Structure
 
-- **`index.js`** - Main AITransformer class with methods for initialization, seeding, transformation, and validation
-- **`types.d.ts`** - Complete TypeScript definitions for all interfaces and options
-- **`logger.js`** - Pino-based logging with configurable levels
+```
+ak-gemini/
+  index.js              ← Package entry point: re-exports all classes + helpers
+  base.js               ← BaseGemini class (shared logic for all classes)
+  transformer.js        ← Transformer class (JSON transformation, few-shot)
+  chat.js               ← Chat class (multi-turn text conversation)
+  message.js            ← Message class (stateless one-off messages)
+  tool-agent.js         ← ToolAgent class (agent with user-provided tools)
+  code-agent.js         ← CodeAgent class (agent that writes and executes code)
+  json-helpers.js       ← Pure functions: extractJSON, attemptJSONRecovery, etc.
+  logger.js             ← Pino-based logging with configurable levels
+  types.d.ts            ← TypeScript definitions for all classes and interfaces
+  index.cjs             ← Auto-generated CJS bundle via esbuild
+  tests/
+    base.test.js        ← Shared base class behavior
+    transformer.test.js ← JSON transformation tests
+    chat.test.js        ← Multi-turn conversation tests
+    message.test.js     ← Stateless message tests
+    tool-agent.test.js  ← Agent with user-provided tools tests
+    code-agent.test.js  ← CodeAgent tests
+    json-helpers.test.js ← Pure function unit tests
+```
 
-### Key Classes & APIs
+### Class Hierarchy
 
-**AITransformer Class** (`index.js`):
-- `init()` - Initialize Gemini chat session
-- `seed(examples)` - Load transformation examples using configurable keys
-- `message(payload, opts)` - Transform JSON with token estimation and validation
-- `messageAndValidate(payload, validator)` - Transform with custom async validation
-- `rebuild(payload, error)` - Auto-repair failed payloads using AI feedback
-- `estimate(payload)` - Estimate INPUT token consumption before sending
-- `estimateCost(payload)` - Estimate input cost based on tokens and model pricing
-- `clearConversation()` - Clear conversation history while preserving seeded examples
-- `getLastUsage()` - Get structured usage data (input/output tokens, model) from last API call
-- `lastResponseMetadata` - Property containing model version and token counts from last API call
+All classes extend `BaseGemini` which provides: auth, client init, chat session management, thinking config, log levels, safety settings, token estimation, cost tracking, usage reporting, and `seed()`.
 
+| Class | Primary Method | Description |
+|-------|---------------|-------------|
+| `Transformer` | `send(payload)` | JSON transformation with few-shot, validation, retry |
+| `Chat` | `send(message)` | Multi-turn text conversation with history |
+| `Message` | `send(payload)` | Stateless one-off messages via `generateContent()` |
+| `ToolAgent` | `chat(message)` / `stream(message)` | Agent with user-provided tools |
+| `CodeAgent` | `chat(message)` / `stream(message)` | Agent that writes and executes JavaScript |
+
+### Key Design Decisions
+
+- **`systemPrompt`** is the unified option name across all classes (replaces old `systemInstructions`)
+- **`send()`** is the primary method on Transformer, Chat, and Message
+- **ToolAgent** ships with zero built-in tools — users provide `tools` + `toolExecutor` via constructor
+- **CodeAgent** uses a single `execute_code` tool internally — the model writes JavaScript to accomplish tasks
+- **`seed()`** is available on BaseGemini (all classes get few-shot capability)
+- **`stop()`** is available on both ToolAgent and CodeAgent to cancel mid-execution
+- **`onBeforeExecution`** callback on both agents for gating/approval before execution
+- Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent }`
+
+## Key Classes & APIs
+
+### BaseGemini (`base.js`)
+Shared foundation. Not typically instantiated directly.
+- `init(force?)` — Creates chat session, validates API connection
+- `seed(examples, opts?)` — Add example pairs to chat history
+- `getHistory()` / `clearHistory()` — Manage chat history
+- `getLastUsage()` — Structured usage data after API calls
+- `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
+
+### Transformer (`transformer.js`)
+JSON transformation via few-shot learning. Extends BaseGemini.
+- `send(payload, opts?, validatorFn?)` — Transform with validation + retry
+- `rawSend(payload, opts?)` — Direct send, extract JSON
+- `rebuild(payload, error)` — AI-powered error correction
+- `seed(examples)` — Override with key mapping + file loading
+- `clearHistory()` — Preserves seeded examples
+- `reset()` — Full reset including examples
+- `updateSystemPrompt(instructions)` — Change system prompt, reinit
+
+### Chat (`chat.js`)
+Multi-turn text conversation. Extends BaseGemini.
+- `send(message, opts?)` → `{ text, usage }`
+
+### Message (`message.js`)
+Stateless one-off messages. Uses `generateContent()`. Extends BaseGemini.
+- `send(payload, opts?)` → `{ text, data?, usage }`
+- Supports structured output via `responseSchema` / `responseMimeType`
+- `getHistory()`, `clearHistory()`, `seed()` are no-ops
+
+### ToolAgent (`tool-agent.js`)
+Agent with user-provided tools. Extends BaseGemini.
+- `chat(message)` → `{ text, toolCalls, usage }`
+- `stream(message)` → AsyncGenerator yielding `{ type, text?, toolName?, args?, result? }`
+- `stop()` — Cancel the agent before the next tool execution round
+- Constructor requires: `tools` (FunctionDeclaration[]) + `toolExecutor` (async fn)
+- Optional: `maxToolRounds`, `onToolCall`, `onBeforeExecution`
+
+### CodeAgent (`code-agent.js`)
+Agent that writes and executes JavaScript autonomously. Extends BaseGemini.
+- `chat(message)` → `{ text, codeExecutions, usage }`
+- `stream(message)` → AsyncGenerator yielding `{ type: 'text'|'code'|'output'|'done', ... }`
+- `stop()` — Cancel the agent and kill any running child process
+- `init()` gathers codebase context (file tree + key files) and injects it into system prompt
+- Code executes in Node.js child processes that inherit `process.env`
+- Optional: `workingDirectory`, `maxRounds`, `timeout`, `onBeforeExecution`, `onCodeExecution`
 
 ## Development Commands
 
 ```bash
-# Testing
-npm test                    # Run all Jest tests
-npm run test:unit          # Unit tests only (tests/module.test.js)
-
-# Build & Release  
-npm run build:cjs         # Build CommonJS version using esbuild
-npm run release           # Version bump and publish to npm
+npm test                   # Run all Jest tests
+npm run build:cjs          # Build CommonJS version using esbuild
+npm run release            # Version bump and publish to npm
+npm run typecheck          # Verify TypeScript definitions
 ```
 
 ## Configuration & Environment
 
 ### Environment Variables
-- `GEMINI_API_KEY` - Google Gemini API key (for Gemini API)
-- `GOOGLE_CLOUD_PROJECT` - GCP project ID (for Vertex AI)
-- `GOOGLE_CLOUD_LOCATION` - GCP region (for Vertex AI, defaults to 'global' endpoint if not set)
-- `NODE_ENV` - Environment (dev/test/prod affects log levels)
-- `LOG_LEVEL` - Override log level (debug/info/warn/error)
+- `GEMINI_API_KEY` — Google Gemini API key (for Gemini API)
+- `GOOGLE_CLOUD_PROJECT` — GCP project ID (for Vertex AI)
+- `GOOGLE_CLOUD_LOCATION` — GCP region (for Vertex AI)
+- `NODE_ENV` — Environment (dev/test/prod affects log levels)
+- `LOG_LEVEL` — Override log level (debug/info/warn/error)
 
-### Authentication Options
-
-**Option 1: Gemini API (default)**
-```javascript
-const ai = new AITransformer({
-    apiKey: 'your-gemini-api-key'  // or use GEMINI_API_KEY env var
-});
-```
-
-**Option 2: Vertex AI with Service Account Key File**
-```javascript
-const ai = new AITransformer({
-    vertexai: true,
-    project: 'my-gcp-project',
-    // location: 'us-central1',  // Optional: defaults to 'global' endpoint
-    googleAuthOptions: {
-        keyFilename: './credentials.json'
-    }
-});
-```
-
-**Option 3: Vertex AI with Inline Credentials**
-```javascript
-const ai = new AITransformer({
-    vertexai: true,
-    project: 'my-gcp-project',
-    // location: 'us-central1',  // Optional: defaults to 'global' endpoint
-    googleAuthOptions: {
-        credentials: {
-            client_email: 'svc@project.iam.gserviceaccount.com',
-            private_key: '-----BEGIN PRIVATE KEY-----\n...'
-        }
-    }
-});
-```
-
-**Option 4: Vertex AI with Application Default Credentials (ADC)**
-```javascript
-// Uses GOOGLE_APPLICATION_CREDENTIALS env var or `gcloud auth application-default login`
-const ai = new AITransformer({
-    vertexai: true,
-    project: 'my-gcp-project'  // or GOOGLE_CLOUD_PROJECT env var
-});
-```
-
-## Key Design Patterns
-
-### Few-Shot Learning
-The module uses configurable key mappings for examples:
-- `sourceKey`/`promptKey` (default: 'PROMPT') - Input data
-- `targetKey`/`answerKey` (default: 'ANSWER') - Expected output
-- `contextKey` (default: 'CONTEXT') - Optional per-example context
-- `explanationKey` (default: 'EXPLANATION') - Optional reasoning
-
-### System Instructions
-The module uses default system instructions optimized for JSON transformation. This behavior can be customized:
-- **Not provided** (`undefined`): Uses built-in default instructions
-- **Custom string**: Uses your custom instructions
-- **`null` or `false`**: Disables system instructions entirely (uses Gemini's default behavior)
+### Authentication
 
 ```javascript
-// Default behavior - uses built-in JSON transformation instructions
-new AITransformer({});
+// Gemini API (default)
+new Transformer({ apiKey: 'your-key' }); // or GEMINI_API_KEY env var
 
-// Custom instructions
-new AITransformer({ systemInstructions: "You are a data extraction expert..." });
-
-// Disable system instructions entirely
-new AITransformer({ systemInstructions: null });
-new AITransformer({ systemInstructions: false });
+// Vertex AI
+new Transformer({ vertexai: true, project: 'my-gcp-project' });
 ```
-
-### Validation & Self-Healing
-- Custom async validator functions that throw on validation failure
-- Automatic retry with exponential backoff (configurable `maxRetries`, `retryDelay`)
-- AI-powered payload reconstruction using error feedback via `rebuild()`
-
-### Token Management
-- `estimate()` provides INPUT token counts before sending (returns `{ inputTokens }`)
-- Includes system instructions, chat history, examples, and user payload
-- `getLastUsage()` provides actual consumption AFTER the call (input + output tokens)
-- Prevents window size errors and helps manage API costs
-
-### Conversation Management
-Control chat history accumulation for cost optimization:
-
-**Clear conversation while preserving examples:**
-```javascript
-const ai = new AITransformer({ modelName: 'gemini-2.5-flash' });
-await ai.init();
-await ai.seed(examples);
-
-// Process multiple user requests
-await ai.message(userRequest1);
-await ai.message(userRequest2);
-
-// Start fresh for a new user session (examples preserved, messages cleared)
-await ai.clearConversation();
-
-// New conversation starts with clean history but same examples
-await ai.message(newUserRequest);
-```
-
-**Send stateless one-off messages (don't add to history):**
-```javascript
-// Normal message - adds to history
-const result1 = await ai.message(payload);
-
-// Stateless one-off - does NOT add to history
-const result2 = await ai.message(payload, { stateless: true });
-
-// History still only contains result1's exchange
-```
-
-**Verify model and track token usage:**
-```javascript
-await ai.message(payload);
-
-// Get structured usage data for billing verification
-const usage = ai.getLastUsage();
-console.log(usage);
-// { promptTokens, responseTokens, totalTokens, attempts, modelVersion, requestedModel, timestamp }
-// Note: Token counts are CUMULATIVE across all retry attempts
-// attempts = 1 means success on first try, 2+ means retries were needed
-```
-
-### Billing Labels & Cost Tracking
-Labels flow through to GCP billing reports for cost attribution by client/app/environment.
-
-**Constructor-level labels** (applied to all requests):
-```javascript
-const ai = new AITransformer({
-    labels: {
-        client: 'acme_corp',
-        app: 'dungeon_master',
-        environment: 'production'
-    }
-});
-```
-
-**Per-message label overrides**:
-```javascript
-await ai.message(payload, { labels: { request_type: 'character_gen' } });
-```
-
-**Cost estimation before sending**:
-```javascript
-const cost = await ai.estimateCost(payload);
-// Returns: { inputTokens, model, pricing, estimatedInputCost, note }
-console.log(`Estimated input cost: $${cost.estimatedInputCost.toFixed(6)}`);
-// Note: Output cost depends on response length and cannot be predicted
-```
-
-Label requirements:
-- Up to 64 labels per request
-- Keys: 1-63 chars, lowercase letters, numbers, underscores, dashes
-- Values: max 63 chars
-- Don't include sensitive information
-
-## Testing Strategy
-
-The project uses a "no mocks" approach with real API integration:
-- **Unit tests** - Test AITransformer class with real Gemini API calls
-- Test timeout: 30 seconds (AI calls take 5-15 seconds)
-- Sequential execution to avoid rate limits
 
 ## Module Exports
 
-**ES Module** (`index.js`):
 ```javascript
-import AITransformer from 'ak-gemini';
+// Named exports
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, BaseGemini, log } from 'ak-gemini';
+import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
+
+// Default export (namespace object)
+import AI from 'ak-gemini';
+new AI.Transformer({ ... });
+
+// CommonJS
+const { Transformer, Chat } = require('ak-gemini');
 ```
 
-**CommonJS** (`index.cjs`):
-```javascript  
-const AITransformer = require('ak-gemini');
-```
+## Testing Strategy
 
-Both formats support the same API with full TypeScript definitions.
+- "No mocks" approach — all tests use real Gemini API calls
+- Test timeout: 30 seconds (AI calls take 5-15 seconds)
+- Rate limiting (429 errors) can cause flaky failures — retry after waiting
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `json-helpers.test.js`
 
-## TypeScript Support
+## Key Design Patterns
 
-The module provides complete TypeScript definitions in `types.d.ts` that enable full intellisense when consuming from npm. Key features:
+### Few-Shot Learning (Transformer)
+Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default: 'ANSWER'), `contextKey` (default: 'CONTEXT'), `explanationKey` (default: 'EXPLANATION')
 
-- Complete method signatures with parameter types and return types
-- Documented constructor options with all supported properties
-- Support for both documented method names (`transformWithValidation`, `estimate`, `getLastUsage`) and internal aliases
-- Proper default export declaration for both ES modules and CommonJS
+### Validation & Self-Healing (Transformer)
+- Custom async validator functions that throw on failure
+- Automatic retry with exponential backoff (`maxRetries`, `retryDelay`)
+- AI-powered payload reconstruction via `rebuild()`
+
+### Code Execution (CodeAgent)
+- Single `execute_code` tool — model writes JavaScript, we execute it
+- Child processes inherit `process.env` for full environment access
+- `onBeforeExecution` async callback gates execution (return false to deny)
+- `onCodeExecution` notification callback after execution
+- File tree + key files gathered during `init()` for codebase awareness
+- `stop()` kills running child processes via SIGTERM
+
+### Agent Stop API (ToolAgent + CodeAgent)
+- `agent.stop()` — sets `_stopped` flag, breaks loop before next execution
+- Can be called from `onBeforeExecution` or `onToolCall` callbacks
+- CodeAgent also kills any running child process on stop
+
+### Token Management
+- `estimate()` — INPUT token counts before sending
+- `getLastUsage()` — actual consumption AFTER the call
+- `estimateCost()` — cost estimate using MODEL_PRICING table
+
+### Billing Labels (Vertex AI)
+- Constructor-level: `labels: { app: 'myapp', env: 'prod' }`
+- Per-message: `send(payload, { labels: { ... } })`

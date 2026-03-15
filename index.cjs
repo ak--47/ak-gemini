@@ -29,19 +29,25 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // index.js
 var index_exports = {};
 __export(index_exports, {
-  AIAgent: () => agent_default,
+  BaseGemini: () => base_default,
+  Chat: () => chat_default,
+  CodeAgent: () => code_agent_default,
   HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
   HarmCategory: () => import_genai2.HarmCategory,
+  Message: () => message_default,
   ThinkingLevel: () => import_genai2.ThinkingLevel,
+  ToolAgent: () => tool_agent_default,
+  Transformer: () => transformer_default,
   attemptJSONRecovery: () => attemptJSONRecovery,
   default: () => index_default,
+  extractJSON: () => extractJSON,
   log: () => logger_default
 });
 module.exports = __toCommonJS(index_exports);
-var import_dotenv2 = __toESM(require("dotenv"), 1);
-var import_genai2 = require("@google/genai");
-var import_ak_tools = __toESM(require("ak-tools"), 1);
-var import_path = __toESM(require("path"), 1);
+
+// base.js
+var import_dotenv = __toESM(require("dotenv"), 1);
+var import_genai = require("@google/genai");
 
 // logger.js
 var import_pino = __toESM(require("pino"), 1);
@@ -60,1162 +66,29 @@ var logger = (0, import_pino.default)({
 });
 var logger_default = logger;
 
-// agent.js
-var import_dotenv = __toESM(require("dotenv"), 1);
-var import_genai = require("@google/genai");
-
-// tools.js
-var MAX_RESPONSE_LENGTH = 5e4;
-function parseBody(text) {
-  const body = text.length > MAX_RESPONSE_LENGTH ? text.slice(0, MAX_RESPONSE_LENGTH) + "\n...[TRUNCATED]" : text;
+// json-helpers.js
+function isJSON(data) {
   try {
-    return JSON.parse(body);
-  } catch {
-    return body;
-  }
-}
-var BUILT_IN_DECLARATIONS = [
-  {
-    name: "http_get",
-    description: "Make an HTTP GET request to any URL. Returns the response status and body as text. Use for fetching web pages, REST APIs, or any HTTP resource.",
-    parametersJsonSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "The full URL to request (including https://)" },
-        headers: {
-          type: "object",
-          description: "Optional HTTP headers as key-value pairs",
-          additionalProperties: { type: "string" }
-        }
-      },
-      required: ["url"]
-    }
-  },
-  {
-    name: "http_post",
-    description: "Make an HTTP POST request to any URL with a JSON body. Returns the response status and body as text.",
-    parametersJsonSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "The full URL to request (including https://)" },
-        body: { type: "object", description: "The JSON body to send" },
-        headers: {
-          type: "object",
-          description: "Optional HTTP headers as key-value pairs",
-          additionalProperties: { type: "string" }
-        }
-      },
-      required: ["url"]
-    }
-  },
-  {
-    name: "write_markdown",
-    description: "Generate a structured markdown document such as a report, analysis, summary, or formatted findings. The content will be captured and returned to the caller.",
-    parametersJsonSchema: {
-      type: "object",
-      properties: {
-        filename: { type: "string", description: 'Suggested filename for the document (e.g. "report.md")' },
-        title: { type: "string", description: "Document title" },
-        content: { type: "string", description: "Full markdown content of the document" }
-      },
-      required: ["filename", "content"]
-    }
-  }
-];
-async function executeBuiltInTool(name, args, options = {}) {
-  const { httpTimeout = 3e4, onToolCall, onMarkdown } = options;
-  if (onToolCall) {
-    try {
-      onToolCall(name, args);
-    } catch (e) {
-      logger_default.warn(`onToolCall callback error: ${e.message}`);
-    }
-  }
-  switch (name) {
-    case "http_get": {
-      logger_default.debug(`http_get: ${args.url}`);
-      const resp = await fetch(args.url, {
-        method: "GET",
-        headers: args.headers || {},
-        signal: AbortSignal.timeout(httpTimeout)
-      });
-      const text = await resp.text();
-      return { status: resp.status, statusText: resp.statusText, body: parseBody(text) };
-    }
-    case "http_post": {
-      logger_default.debug(`http_post: ${args.url}`);
-      const headers = { "Content-Type": "application/json", ...args.headers || {} };
-      const resp = await fetch(args.url, {
-        method: "POST",
-        headers,
-        body: args.body ? JSON.stringify(args.body) : void 0,
-        signal: AbortSignal.timeout(httpTimeout)
-      });
-      const text = await resp.text();
-      return { status: resp.status, statusText: resp.statusText, body: parseBody(text) };
-    }
-    case "write_markdown": {
-      logger_default.debug(`write_markdown: ${args.filename}`);
-      if (onMarkdown) {
-        try {
-          onMarkdown(args.filename, args.content);
-        } catch (e) {
-          logger_default.warn(`onMarkdown callback error: ${e.message}`);
-        }
-      }
-      return { written: true, filename: args.filename, length: args.content.length };
-    }
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
-}
-
-// agent.js
-import_dotenv.default.config();
-var { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
-var DEFAULT_SAFETY_SETTINGS = [
-  { category: import_genai.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE },
-  { category: import_genai.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE }
-];
-var DEFAULT_THINKING_CONFIG = {
-  thinkingBudget: 0
-};
-var THINKING_SUPPORTED_MODELS = [
-  /^gemini-3-flash(-preview)?$/,
-  /^gemini-3-pro(-preview|-image-preview)?$/,
-  /^gemini-2\.5-pro/,
-  /^gemini-2\.5-flash(-preview)?$/,
-  /^gemini-2\.5-flash-lite(-preview)?$/,
-  /^gemini-2\.0-flash$/
-];
-var AIAgent = class {
-  /**
-   * Create a new AIAgent instance.
-   * @param {AIAgentOptions} [options={}] - Configuration options (see AIAgentOptions in types.d.ts)
-   */
-  constructor(options = {}) {
-    this.modelName = options.modelName || "gemini-2.5-flash";
-    this.systemPrompt = options.systemPrompt || "You are a helpful AI assistant.";
-    this.maxToolRounds = options.maxToolRounds || 10;
-    this.httpTimeout = options.httpTimeout || 3e4;
-    this.maxRetries = options.maxRetries || 3;
-    this.onToolCall = options.onToolCall || null;
-    this.onMarkdown = options.onMarkdown || null;
-    this.labels = options.labels || {};
-    this.vertexai = options.vertexai || false;
-    this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
-    this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || void 0;
-    this.googleAuthOptions = options.googleAuthOptions || null;
-    this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : process.env.GEMINI_API_KEY;
-    if (!this.vertexai && !this.apiKey) {
-      throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
-    }
-    if (this.vertexai && !this.project) {
-      throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
-    }
-    this._configureLogLevel(options.logLevel);
-    this.chatConfig = {
-      temperature: 0.7,
-      topP: 0.95,
-      topK: 64,
-      safetySettings: DEFAULT_SAFETY_SETTINGS,
-      systemInstruction: this.systemPrompt,
-      maxOutputTokens: options.chatConfig?.maxOutputTokens || 5e4,
-      ...options.chatConfig
-    };
-    this.chatConfig.systemInstruction = this.systemPrompt;
-    this._configureThinking(options.thinkingConfig);
-    this.chatConfig.tools = [{ functionDeclarations: BUILT_IN_DECLARATIONS }];
-    this.chatConfig.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
-    this.genAIClient = null;
-    this.chatSession = null;
-    this.lastResponseMetadata = null;
-    this._markdownFiles = [];
-    logger_default.debug(`AIAgent created with model: ${this.modelName}`);
-  }
-  /**
-   * Initialize the agent — creates the GenAI client and chat session.
-   * Called automatically by chat() and stream() if not called explicitly.
-   * Idempotent — safe to call multiple times.
-   * @returns {Promise<void>}
-   */
-  async init() {
-    if (this.chatSession) return;
-    const clientOptions = this.vertexai ? {
-      vertexai: true,
-      project: this.project,
-      ...this.location && { location: this.location },
-      ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
-    } : { apiKey: this.apiKey };
-    this.genAIClient = new import_genai.GoogleGenAI(clientOptions);
-    this.chatSession = this.genAIClient.chats.create({
-      model: this.modelName,
-      config: {
-        ...this.chatConfig,
-        ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
-      },
-      history: []
-    });
-    try {
-      await this.genAIClient.models.list();
-      logger_default.debug("AIAgent: Gemini API connection successful.");
-    } catch (e) {
-      throw new Error(`AIAgent initialization failed: ${e.message}`);
-    }
-    logger_default.debug("AIAgent: Chat session initialized.");
-  }
-  /**
-   * Send a message and get a complete response (non-streaming).
-   * Automatically handles the tool-use loop — if the model requests tool calls,
-   * they are executed and results sent back until the model produces a final response.
-   *
-   * @param {string} message - The user's message
-   * @returns {Promise<AgentResponse>} Response with text, toolCalls, markdownFiles, and usage
-   * @example
-   * const res = await agent.chat('Fetch https://api.example.com/users');
-   * console.log(res.text);      // Agent's summary
-   * console.log(res.toolCalls); // [{name: 'http_get', args: {...}, result: {...}}]
-   */
-  async chat(message) {
-    if (!this.chatSession) await this.init();
-    this._markdownFiles = [];
-    const allToolCalls = [];
-    let response = await this.chatSession.sendMessage({ message });
-    for (let round = 0; round < this.maxToolRounds; round++) {
-      const functionCalls = response.functionCalls;
-      if (!functionCalls || functionCalls.length === 0) break;
-      const toolResults = await Promise.all(
-        functionCalls.map(async (call) => {
-          let result;
-          try {
-            result = await executeBuiltInTool(call.name, call.args, {
-              httpTimeout: this.httpTimeout,
-              onToolCall: this.onToolCall,
-              onMarkdown: this.onMarkdown
-            });
-          } catch (err) {
-            logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
-            result = { error: err.message };
-          }
-          allToolCalls.push({ name: call.name, args: call.args, result });
-          if (call.name === "write_markdown" && call.args) {
-            this._markdownFiles.push({
-              filename: (
-                /** @type {string} */
-                call.args.filename
-              ),
-              content: (
-                /** @type {string} */
-                call.args.content
-              )
-            });
-          }
-          return { id: call.id, name: call.name, result };
-        })
-      );
-      response = await this.chatSession.sendMessage({
-        message: toolResults.map((r) => ({
-          functionResponse: {
-            id: r.id,
-            name: r.name,
-            response: { output: r.result }
-          }
-        }))
-      });
-    }
-    this._captureMetadata(response);
-    return {
-      text: response.text || "",
-      toolCalls: allToolCalls,
-      markdownFiles: [...this._markdownFiles],
-      usage: this.getLastUsage()
-    };
-  }
-  /**
-   * Send a message and stream the response as events.
-   * Automatically handles the tool-use loop between streamed rounds.
-   *
-   * Event types:
-   * - `text` — A chunk of the agent's text response (yield as it arrives)
-   * - `tool_call` — The agent is about to call a tool (includes toolName and args)
-   * - `tool_result` — A tool finished executing (includes toolName and result)
-   * - `markdown` — A markdown document was generated (includes filename and content)
-   * - `done` — The agent finished (includes fullText, markdownFiles, usage)
-   *
-   * @param {string} message - The user's message
-   * @yields {AgentStreamEvent}
-   * @example
-   * for await (const event of agent.stream('Analyze this API...')) {
-   *   if (event.type === 'text') process.stdout.write(event.text);
-   *   if (event.type === 'tool_call') console.log(`Calling: ${event.toolName}`);
-   *   if (event.type === 'done') console.log(`\nTokens: ${event.usage?.totalTokens}`);
-   * }
-   */
-  async *stream(message) {
-    if (!this.chatSession) await this.init();
-    this._markdownFiles = [];
-    const allToolCalls = [];
-    let fullText = "";
-    let streamResponse = await this.chatSession.sendMessageStream({ message });
-    for (let round = 0; round < this.maxToolRounds; round++) {
-      let roundText = "";
-      const functionCalls = [];
-      for await (const chunk of streamResponse) {
-        if (chunk.functionCalls) {
-          functionCalls.push(...chunk.functionCalls);
-        } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-          const text = chunk.candidates[0].content.parts[0].text;
-          roundText += text;
-          fullText += text;
-          yield { type: "text", text };
-        }
-      }
-      if (functionCalls.length === 0) {
-        yield {
-          type: "done",
-          fullText,
-          markdownFiles: [...this._markdownFiles],
-          usage: this.getLastUsage()
-        };
-        return;
-      }
-      const toolResults = [];
-      for (const call of functionCalls) {
-        yield { type: "tool_call", toolName: call.name, args: call.args };
-        let result;
-        try {
-          result = await executeBuiltInTool(call.name, call.args, {
-            httpTimeout: this.httpTimeout,
-            onToolCall: this.onToolCall,
-            onMarkdown: this.onMarkdown
-          });
-        } catch (err) {
-          logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
-          result = { error: err.message };
-        }
-        allToolCalls.push({ name: call.name, args: call.args, result });
-        yield { type: "tool_result", toolName: call.name, result };
-        if (call.name === "write_markdown" && call.args) {
-          const mdFilename = (
-            /** @type {string} */
-            call.args.filename
-          );
-          const mdContent = (
-            /** @type {string} */
-            call.args.content
-          );
-          this._markdownFiles.push({ filename: mdFilename, content: mdContent });
-          yield { type: "markdown", filename: mdFilename, content: mdContent };
-        }
-        toolResults.push({ id: call.id, name: call.name, result });
-      }
-      streamResponse = await this.chatSession.sendMessageStream({
-        message: toolResults.map((r) => ({
-          functionResponse: {
-            id: r.id,
-            name: r.name,
-            response: { output: r.result }
-          }
-        }))
-      });
-    }
-    yield {
-      type: "done",
-      fullText,
-      markdownFiles: [...this._markdownFiles],
-      usage: this.getLastUsage(),
-      warning: "Max tool rounds reached"
-    };
-  }
-  /**
-   * Clear conversation history while preserving tools and system prompt.
-   * Useful for starting a new user session without re-initializing the agent.
-   * @returns {Promise<void>}
-   */
-  async clearHistory() {
-    this.chatSession = this.genAIClient.chats.create({
-      model: this.modelName,
-      config: {
-        ...this.chatConfig,
-        ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
-      },
-      history: []
-    });
-    this._markdownFiles = [];
-    this.lastResponseMetadata = null;
-    logger_default.debug("AIAgent: Conversation history cleared.");
-  }
-  /**
-   * Get conversation history.
-   * @param {boolean} [curated=false]
-   * @returns {any[]}
-   */
-  getHistory(curated = false) {
-    if (!this.chatSession) return [];
-    return this.chatSession.getHistory(curated);
-  }
-  /**
-   * Get structured usage data from the last API call.
-   * Returns null if no API call has been made yet.
-   * @returns {UsageData|null} Usage data with promptTokens, responseTokens, totalTokens, etc.
-   */
-  getLastUsage() {
-    if (!this.lastResponseMetadata) return null;
-    const m = this.lastResponseMetadata;
-    return {
-      promptTokens: m.promptTokens,
-      responseTokens: m.responseTokens,
-      totalTokens: m.totalTokens,
-      attempts: 1,
-      modelVersion: m.modelVersion,
-      requestedModel: this.modelName,
-      timestamp: m.timestamp
-    };
-  }
-  // --- Private helpers ---
-  /**
-   * Capture response metadata (model version, token counts) from an API response.
-   * @param {import('@google/genai').GenerateContentResponse} response
-   * @private
-   */
-  _captureMetadata(response) {
-    this.lastResponseMetadata = {
-      modelVersion: response.modelVersion || null,
-      requestedModel: this.modelName,
-      promptTokens: response.usageMetadata?.promptTokenCount || 0,
-      responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
-      totalTokens: response.usageMetadata?.totalTokenCount || 0,
-      timestamp: Date.now()
-    };
-  }
-  /** @private */
-  _configureLogLevel(logLevel) {
-    if (logLevel) {
-      if (logLevel === "none") {
-        logger_default.level = "silent";
-      } else {
-        logger_default.level = logLevel;
-      }
-    } else if (LOG_LEVEL) {
-      logger_default.level = LOG_LEVEL;
-    } else if (NODE_ENV === "dev") {
-      logger_default.level = "debug";
-    } else if (NODE_ENV === "test") {
-      logger_default.level = "warn";
-    } else if (NODE_ENV.startsWith("prod")) {
-      logger_default.level = "error";
-    } else {
-      logger_default.level = "info";
-    }
-  }
-  /** @private */
-  _configureThinking(thinkingConfig) {
-    const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some((p) => p.test(this.modelName));
-    if (thinkingConfig === void 0) return;
-    if (thinkingConfig === null) {
-      delete this.chatConfig.thinkingConfig;
-      return;
-    }
-    if (!modelSupportsThinking) {
-      logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
-      return;
-    }
-    const config = { ...DEFAULT_THINKING_CONFIG, ...thinkingConfig };
-    if (thinkingConfig.thinkingLevel !== void 0) {
-      delete config.thinkingBudget;
-    }
-    this.chatConfig.thinkingConfig = config;
-    logger_default.debug(`Thinking config applied: ${JSON.stringify(config)}`);
-  }
-};
-var agent_default = AIAgent;
-
-// index.js
-var import_meta = {};
-import_dotenv2.default.config();
-var { NODE_ENV: NODE_ENV2 = "unknown", GEMINI_API_KEY, LOG_LEVEL: LOG_LEVEL2 = "" } = process.env;
-var DEFAULT_SAFETY_SETTINGS2 = [
-  { category: import_genai2.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: import_genai2.HarmBlockThreshold.BLOCK_NONE },
-  { category: import_genai2.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: import_genai2.HarmBlockThreshold.BLOCK_NONE }
-];
-var DEFAULT_SYSTEM_INSTRUCTIONS = `
-You are an expert JSON transformation engine. Your task is to accurately convert data payloads from one format to another.
-
-You will be provided with example transformations (Source JSON -> Target JSON).
-
-Learn the mapping rules from these examples.
-
-When presented with new Source JSON, apply the learned transformation rules to produce a new Target JSON payload.
-
-Always respond ONLY with a valid JSON object that strictly adheres to the expected output format.
-
-Do not include any additional text, explanations, or formatting before or after the JSON object.
-`;
-var DEFAULT_THINKING_CONFIG2 = {
-  thinkingBudget: 0
-};
-var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
-var THINKING_SUPPORTED_MODELS2 = [
-  /^gemini-3-flash(-preview)?$/,
-  /^gemini-3-pro(-preview|-image-preview)?$/,
-  /^gemini-2\.5-pro/,
-  /^gemini-2\.5-flash(-preview)?$/,
-  /^gemini-2\.5-flash-lite(-preview)?$/,
-  /^gemini-2\.0-flash$/
-  // Experimental support, exact match only
-];
-var DEFAULT_CHAT_CONFIG = {
-  responseMimeType: "application/json",
-  temperature: 0.2,
-  topP: 0.95,
-  topK: 64,
-  systemInstruction: DEFAULT_SYSTEM_INSTRUCTIONS,
-  safetySettings: DEFAULT_SAFETY_SETTINGS2
-};
-var AITransformer = class {
-  /**
-   * @param {AITransformerOptions} [options={}] - Configuration options for the transformer	
-   * 
-   */
-  constructor(options = {}) {
-    this.modelName = "";
-    this.promptKey = "";
-    this.answerKey = "";
-    this.contextKey = "";
-    this.explanationKey = "";
-    this.systemInstructionKey = "";
-    this.maxRetries = 3;
-    this.retryDelay = 1e3;
-    this.chatConfig = {};
-    this.apiKey = GEMINI_API_KEY;
-    this.onlyJSON = true;
-    this.asyncValidator = null;
-    this.logLevel = "info";
-    this.lastResponseMetadata = null;
-    this.exampleCount = 0;
-    this._cumulativeUsage = {
-      promptTokens: 0,
-      responseTokens: 0,
-      totalTokens: 0,
-      attempts: 0
-    };
-    AITransformFactory.call(this, options);
-    this.init = initChat.bind(this);
-    this.seed = seedWithExamples.bind(this);
-    this.rawMessage = rawMessage.bind(this);
-    this.message = (payload, opts = {}, validatorFn = null) => {
-      return prepareAndValidateMessage.call(this, payload, opts, validatorFn || this.asyncValidator);
-    };
-    this.rebuild = rebuildPayload.bind(this);
-    this.reset = resetChat.bind(this);
-    this.getHistory = getChatHistory.bind(this);
-    this.messageAndValidate = prepareAndValidateMessage.bind(this);
-    this.transformWithValidation = prepareAndValidateMessage.bind(this);
-    this.estimate = estimateInputTokens.bind(this);
-    this.updateSystemInstructions = updateSystemInstructions.bind(this);
-    this.estimateCost = estimateCost.bind(this);
-    this.clearConversation = clearConversation.bind(this);
-    this.getLastUsage = getLastUsage.bind(this);
-  }
-};
-var index_default = AITransformer;
-function AITransformFactory(options = {}) {
-  this.modelName = options.modelName || "gemini-2.5-flash";
-  if (options.systemInstructions === void 0) {
-    this.systemInstructions = DEFAULT_SYSTEM_INSTRUCTIONS;
-  } else {
-    this.systemInstructions = options.systemInstructions;
-  }
-  if (options.logLevel) {
-    this.logLevel = options.logLevel;
-    if (this.logLevel === "none") {
-      logger_default.level = "silent";
-    } else {
-      logger_default.level = this.logLevel;
-    }
-  } else if (LOG_LEVEL2) {
-    this.logLevel = LOG_LEVEL2;
-    logger_default.level = LOG_LEVEL2;
-  } else if (NODE_ENV2 === "dev") {
-    this.logLevel = "debug";
-    logger_default.level = "debug";
-  } else if (NODE_ENV2 === "test") {
-    this.logLevel = "warn";
-    logger_default.level = "warn";
-  } else if (NODE_ENV2.startsWith("prod")) {
-    this.logLevel = "error";
-    logger_default.level = "error";
-  } else {
-    this.logLevel = "info";
-    logger_default.level = "info";
-  }
-  this.vertexai = options.vertexai || false;
-  this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
-  this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || void 0;
-  this.googleAuthOptions = options.googleAuthOptions || null;
-  this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : GEMINI_API_KEY;
-  if (!this.vertexai && !this.apiKey) {
-    throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
-  }
-  if (this.vertexai && !this.project) {
-    throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
-  }
-  this.chatConfig = {
-    ...DEFAULT_CHAT_CONFIG,
-    ...options.chatConfig
-  };
-  if (this.systemInstructions) {
-    this.chatConfig.systemInstruction = this.systemInstructions;
-  } else if (options.systemInstructions !== void 0) {
-    delete this.chatConfig.systemInstruction;
-  }
-  if (options.maxOutputTokens !== void 0) {
-    if (options.maxOutputTokens === null) {
-      delete this.chatConfig.maxOutputTokens;
-    } else {
-      this.chatConfig.maxOutputTokens = options.maxOutputTokens;
-    }
-  } else if (options.chatConfig?.maxOutputTokens !== void 0) {
-    if (options.chatConfig.maxOutputTokens === null) {
-      delete this.chatConfig.maxOutputTokens;
-    } else {
-      this.chatConfig.maxOutputTokens = options.chatConfig.maxOutputTokens;
-    }
-  } else {
-    this.chatConfig.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
-  }
-  const modelSupportsThinking = THINKING_SUPPORTED_MODELS2.some(
-    (pattern) => pattern.test(this.modelName)
-  );
-  if (options.thinkingConfig !== void 0) {
-    if (options.thinkingConfig === null) {
-      delete this.chatConfig.thinkingConfig;
-      if (logger_default.level !== "silent") {
-        logger_default.debug(`thinkingConfig set to null - removed from configuration`);
-      }
-    } else if (modelSupportsThinking) {
-      const thinkingConfig = {
-        ...DEFAULT_THINKING_CONFIG2,
-        ...options.thinkingConfig
-      };
-      if (options.thinkingConfig?.thinkingLevel !== void 0) {
-        delete thinkingConfig.thinkingBudget;
-      }
-      this.chatConfig.thinkingConfig = thinkingConfig;
-      if (logger_default.level !== "silent") {
-        logger_default.debug(`Model ${this.modelName} supports thinking. Applied thinkingConfig: ${JSON.stringify(thinkingConfig)}`);
-      }
-    } else {
-      if (logger_default.level !== "silent") {
-        logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+    const attempt = JSON.stringify(data);
+    if (attempt?.startsWith("{") || attempt?.startsWith("[")) {
+      if (attempt?.endsWith("}") || attempt?.endsWith("]")) {
+        return true;
       }
     }
-  }
-  if (options.responseSchema) {
-    this.chatConfig.responseSchema = options.responseSchema;
-  }
-  this.examplesFile = options.examplesFile || null;
-  this.exampleData = options.exampleData || null;
-  this.promptKey = options.promptKey || options.sourceKey || "PROMPT";
-  this.answerKey = options.answerKey || options.targetKey || "ANSWER";
-  this.contextKey = options.contextKey || "CONTEXT";
-  this.explanationKey = options.explanationKey || "EXPLANATION";
-  this.systemInstructionsKey = options.systemInstructionsKey || "SYSTEM";
-  this.maxRetries = options.maxRetries || 3;
-  this.retryDelay = options.retryDelay || 1e3;
-  this.asyncValidator = options.asyncValidator || null;
-  this.onlyJSON = options.onlyJSON !== void 0 ? options.onlyJSON : true;
-  this.enableGrounding = options.enableGrounding || false;
-  this.groundingConfig = options.groundingConfig || {};
-  this.labels = options.labels || {};
-  if (Object.keys(this.labels).length > 0 && logger_default.level !== "silent") {
-    if (!this.vertexai) {
-      logger_default.warn(`Billing labels are only supported with Vertex AI. Labels will be ignored.`);
-    } else {
-      logger_default.debug(`Billing labels configured: ${JSON.stringify(this.labels)}`);
-    }
-  }
-  if (this.promptKey === this.answerKey) {
-    throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
-  }
-  if (logger_default.level !== "silent") {
-    logger_default.debug(`Creating AI Transformer with model: ${this.modelName}`);
-    logger_default.debug(`Using keys - Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
-    logger_default.debug(`Max output tokens set to: ${this.chatConfig.maxOutputTokens}`);
-    if (this.vertexai) {
-      logger_default.debug(`Using Vertex AI - Project: ${this.project}, Location: ${this.location || "global (default)"}`);
-      if (this.googleAuthOptions?.keyFilename) {
-        logger_default.debug(`Auth: Service account key file: ${this.googleAuthOptions.keyFilename}`);
-      } else if (this.googleAuthOptions?.credentials) {
-        logger_default.debug(`Auth: Inline credentials provided`);
-      } else {
-        logger_default.debug(`Auth: Application Default Credentials (ADC)`);
-      }
-    } else {
-      logger_default.debug(`Using Gemini API with key: ${this.apiKey.substring(0, 10)}...`);
-    }
-    logger_default.debug(`Grounding ${this.enableGrounding ? "ENABLED" : "DISABLED"} (costs $35/1k queries)`);
-  }
-  const clientOptions = this.vertexai ? {
-    vertexai: true,
-    project: this.project,
-    ...this.location && { location: this.location },
-    ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
-  } : { apiKey: this.apiKey };
-  const ai = new import_genai2.GoogleGenAI(clientOptions);
-  this.genAIClient = ai;
-  this.chat = null;
-}
-async function initChat(force = false) {
-  if (this.chat && !force) return;
-  logger_default.debug(`Initializing Gemini chat session with model: ${this.modelName}...`);
-  const chatOptions = {
-    model: this.modelName,
-    // @ts-ignore
-    config: {
-      ...this.chatConfig,
-      ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
-    },
-    history: []
-  };
-  if (this.enableGrounding) {
-    chatOptions.config.tools = [{
-      googleSearch: this.groundingConfig
-    }];
-    logger_default.debug(`Search grounding ENABLED for this session (WARNING: costs $35/1k queries)`);
-  }
-  this.chat = await this.genAIClient.chats.create(chatOptions);
-  try {
-    await this.genAIClient.models.list();
-    logger_default.debug("Gemini API connection successful.");
+    return false;
   } catch (e) {
-    throw new Error(`Gemini chat initialization failed: ${e.message}`);
+    return false;
   }
-  logger_default.debug("Gemini chat session initialized.");
 }
-async function seedWithExamples(examples) {
-  await this.init();
-  if (!examples || !Array.isArray(examples) || examples.length === 0) {
-    if (this.examplesFile) {
-      logger_default.debug(`No examples provided, loading from file: ${this.examplesFile}`);
-      try {
-        examples = await import_ak_tools.default.load(import_path.default.resolve(this.examplesFile), true);
-      } catch (err) {
-        throw new Error(`Could not load examples from file: ${this.examplesFile}. Please check the file path and format.`);
-      }
-    } else if (this.exampleData) {
-      logger_default.debug(`Using example data provided in options.`);
-      if (Array.isArray(this.exampleData)) {
-        examples = this.exampleData;
-      } else {
-        throw new Error(`Invalid example data provided. Expected an array of examples.`);
-      }
-    } else {
-      logger_default.debug("No examples provided and no examples file specified. Skipping seeding.");
-      return;
-    }
-  }
-  const instructionExample = examples.find((ex) => ex[this.systemInstructionsKey]);
-  if (instructionExample) {
-    logger_default.debug(`Found system instructions in examples; reinitializing chat with new instructions.`);
-    this.systemInstructions = instructionExample[this.systemInstructionsKey];
-    this.chatConfig.systemInstruction = this.systemInstructions;
-    await this.init(true);
-  }
-  logger_default.debug(`Seeding chat with ${examples.length} transformation examples...`);
-  const historyToAdd = [];
-  for (const example of examples) {
-    const contextValue = example[this.contextKey] || "";
-    const promptValue = example[this.promptKey] || "";
-    const answerValue = example[this.answerKey] || "";
-    const explanationValue = example[this.explanationKey] || "";
-    let userText = "";
-    let modelResponse = {};
-    if (contextValue) {
-      let contextText = isJSON(contextValue) ? JSON.stringify(contextValue, null, 2) : contextValue;
-      userText += `CONTEXT:
-${contextText}
-
-`;
-    }
-    if (promptValue) {
-      let promptText = isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
-      userText += promptText;
-    }
-    if (answerValue) modelResponse.data = answerValue;
-    if (explanationValue) modelResponse.explanation = explanationValue;
-    const modelText = JSON.stringify(modelResponse, null, 2);
-    if (userText.trim().length && modelText.trim().length > 0) {
-      historyToAdd.push({ role: "user", parts: [{ text: userText.trim() }] });
-      historyToAdd.push({ role: "model", parts: [{ text: modelText.trim() }] });
-    }
-  }
-  const currentHistory = this?.chat?.getHistory() || [];
-  logger_default.debug(`Adding ${historyToAdd.length} examples to chat history (${currentHistory.length} current examples)...`);
-  this.chat = await this.genAIClient.chats.create({
-    model: this.modelName,
-    // @ts-ignore
-    config: {
-      ...this.chatConfig,
-      ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
-    },
-    history: [...currentHistory, ...historyToAdd]
-  });
-  this.exampleCount = currentHistory.length + historyToAdd.length;
-  const newHistory = this.chat.getHistory();
-  logger_default.debug(`Created new chat session with ${newHistory.length} examples.`);
-  return newHistory;
-}
-async function rawMessage(sourcePayload, messageOptions = {}) {
-  if (!this.chat) {
-    throw new Error("Chat session not initialized.");
-  }
-  const actualPayload = typeof sourcePayload === "string" ? sourcePayload : JSON.stringify(sourcePayload, null, 2);
-  const mergedLabels = { ...this.labels, ...messageOptions.labels || {} };
-  const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
+function isJSONStr(string) {
+  if (typeof string !== "string") return false;
   try {
-    const sendParams = { message: actualPayload };
-    if (hasLabels) {
-      sendParams.config = { labels: mergedLabels };
-    }
-    const result = await this.chat.sendMessage(sendParams);
-    this.lastResponseMetadata = {
-      modelVersion: result.modelVersion || null,
-      requestedModel: this.modelName,
-      promptTokens: result.usageMetadata?.promptTokenCount || 0,
-      responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
-      totalTokens: result.usageMetadata?.totalTokenCount || 0,
-      timestamp: Date.now()
-    };
-    if (result.usageMetadata && logger_default.level !== "silent") {
-      logger_default.debug(`API response metadata: ${JSON.stringify({
-        modelVersion: result.modelVersion || "not-provided",
-        requestedModel: this.modelName,
-        promptTokens: result.usageMetadata.promptTokenCount,
-        responseTokens: result.usageMetadata.candidatesTokenCount,
-        totalTokens: result.usageMetadata.totalTokenCount
-      })}`);
-    }
-    const modelResponse = result.text;
-    const extractedJSON = extractJSON(modelResponse);
-    if (extractedJSON?.data) {
-      return extractedJSON.data;
-    }
-    return extractedJSON;
-  } catch (error) {
-    if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
-      throw new Error(`Invalid JSON response from Gemini: ${error.message}`);
-    }
-    throw new Error(`Transformation failed: ${error.message}`);
-  }
-}
-async function prepareAndValidateMessage(sourcePayload, options = {}, validatorFn = null) {
-  if (!this.chat) {
-    throw new Error("Chat session not initialized. Please call init() first.");
-  }
-  if (options.stateless) {
-    return await statelessMessage.call(this, sourcePayload, options, validatorFn);
-  }
-  const maxRetries = options.maxRetries ?? this.maxRetries;
-  const retryDelay = options.retryDelay ?? this.retryDelay;
-  const enableGroundingForMessage = options.enableGrounding ?? this.enableGrounding;
-  const groundingConfigForMessage = options.groundingConfig ?? this.groundingConfig;
-  if (enableGroundingForMessage !== this.enableGrounding) {
-    const originalGrounding = this.enableGrounding;
-    const originalConfig = this.groundingConfig;
-    try {
-      this.enableGrounding = enableGroundingForMessage;
-      this.groundingConfig = groundingConfigForMessage;
-      await this.init(true);
-      if (enableGroundingForMessage) {
-        logger_default.warn(`Search grounding ENABLED for this message (WARNING: costs $35/1k queries)`);
-      } else {
-        logger_default.debug(`Search grounding DISABLED for this message`);
-      }
-    } catch (error) {
-      this.enableGrounding = originalGrounding;
-      this.groundingConfig = originalConfig;
-      throw error;
-    }
-    const restoreGrounding = async () => {
-      this.enableGrounding = originalGrounding;
-      this.groundingConfig = originalConfig;
-      await this.init(true);
-    };
-    options._restoreGrounding = restoreGrounding;
-  }
-  let lastError = null;
-  let lastPayload = null;
-  if (sourcePayload && isJSON(sourcePayload)) {
-    lastPayload = JSON.stringify(sourcePayload, null, 2);
-  } else if (typeof sourcePayload === "string") {
-    lastPayload = sourcePayload;
-  } else if (typeof sourcePayload === "boolean" || typeof sourcePayload === "number") {
-    lastPayload = sourcePayload.toString();
-  } else if (sourcePayload === null || sourcePayload === void 0) {
-    lastPayload = JSON.stringify({});
-  } else {
-    throw new Error("Invalid source payload. Must be a JSON object or string.");
-  }
-  const messageOptions = {};
-  if (options.labels) {
-    messageOptions.labels = options.labels;
-  }
-  this._cumulativeUsage = {
-    promptTokens: 0,
-    responseTokens: 0,
-    totalTokens: 0,
-    attempts: 0
-  };
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const transformedPayload = attempt === 0 ? await this.rawMessage(lastPayload, messageOptions) : await this.rebuild(lastPayload, lastError.message);
-      if (this.lastResponseMetadata) {
-        this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
-        this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
-        this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
-        this._cumulativeUsage.attempts = attempt + 1;
-      }
-      lastPayload = transformedPayload;
-      if (validatorFn) {
-        await validatorFn(transformedPayload);
-      }
-      logger_default.debug(`Transformation succeeded on attempt ${attempt + 1}`);
-      if (options._restoreGrounding) {
-        await options._restoreGrounding();
-      }
-      return transformedPayload;
-    } catch (error) {
-      lastError = error;
-      logger_default.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
-      if (attempt >= maxRetries) {
-        logger_default.error(`All ${maxRetries + 1} attempts failed.`);
-        if (options._restoreGrounding) {
-          await options._restoreGrounding();
-        }
-        throw new Error(`Transformation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
-      }
-      const delay = retryDelay * Math.pow(2, attempt);
-      await new Promise((res) => setTimeout(res, delay));
-    }
-  }
-}
-async function rebuildPayload(lastPayload, serverError) {
-  await this.init();
-  const prompt = `
-The previous JSON payload (below) failed validation.
-The server's error message is quoted afterward.
-
----------------- BAD PAYLOAD ----------------
-${JSON.stringify(lastPayload, null, 2)}
-
-
----------------- SERVER ERROR ----------------
-${serverError}
-
-Please return a NEW JSON payload that corrects the issue.
-Respond with JSON only \u2013 no comments or explanations.
-`;
-  let result;
-  try {
-    result = await this.chat.sendMessage({ message: prompt });
-    this.lastResponseMetadata = {
-      modelVersion: result.modelVersion || null,
-      requestedModel: this.modelName,
-      promptTokens: result.usageMetadata?.promptTokenCount || 0,
-      responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
-      totalTokens: result.usageMetadata?.totalTokenCount || 0,
-      timestamp: Date.now()
-    };
-    if (result.usageMetadata && logger_default.level !== "silent") {
-      logger_default.debug(`Rebuild response metadata - tokens used: ${result.usageMetadata.totalTokenCount}`);
-    }
+    const result = JSON.parse(string);
+    const type = Object.prototype.toString.call(result);
+    return type === "[object Object]" || type === "[object Array]";
   } catch (err) {
-    throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
+    return false;
   }
-  try {
-    const text = result.text ?? result.response ?? "";
-    return typeof text === "object" ? text : JSON.parse(text);
-  } catch (parseErr) {
-    throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
-  }
-}
-async function estimateInputTokens(nextPayload) {
-  const contents = [];
-  if (this.systemInstructions) {
-    contents.push({ parts: [{ text: this.systemInstructions }] });
-  }
-  if (this.chat && typeof this.chat.getHistory === "function") {
-    const history = this.chat.getHistory();
-    if (Array.isArray(history) && history.length > 0) {
-      contents.push(...history);
-    }
-  }
-  const nextMessage = typeof nextPayload === "string" ? nextPayload : JSON.stringify(nextPayload, null, 2);
-  contents.push({ parts: [{ text: nextMessage }] });
-  const resp = await this.genAIClient.models.countTokens({
-    model: this.modelName,
-    contents
-  });
-  return { inputTokens: resp.totalTokens };
-}
-var MODEL_PRICING = {
-  "gemini-2.5-flash": { input: 0.15, output: 0.6 },
-  "gemini-2.5-flash-lite": { input: 0.02, output: 0.1 },
-  "gemini-2.5-pro": { input: 2.5, output: 10 },
-  "gemini-3-pro": { input: 2, output: 12 },
-  "gemini-3-pro-preview": { input: 2, output: 12 },
-  "gemini-2.0-flash": { input: 0.1, output: 0.4 },
-  "gemini-2.0-flash-lite": { input: 0.02, output: 0.1 }
-};
-async function estimateCost(nextPayload) {
-  const tokenInfo = await this.estimate(nextPayload);
-  const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
-  return {
-    inputTokens: tokenInfo.inputTokens,
-    model: this.modelName,
-    pricing,
-    estimatedInputCost: tokenInfo.inputTokens / 1e6 * pricing.input,
-    note: "Cost is for input tokens only; output cost depends on response length"
-  };
-}
-async function resetChat() {
-  if (this.chat) {
-    logger_default.debug("Resetting Gemini chat session...");
-    const chatOptions = {
-      model: this.modelName,
-      // @ts-ignore
-      config: {
-        ...this.chatConfig,
-        ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
-      },
-      history: []
-    };
-    if (this.enableGrounding) {
-      chatOptions.config.tools = [{
-        googleSearch: this.groundingConfig
-      }];
-      logger_default.debug(`Search grounding preserved during reset (WARNING: costs $35/1k queries)`);
-    }
-    this.chat = await this.genAIClient.chats.create(chatOptions);
-    logger_default.debug("Chat session reset.");
-  } else {
-    logger_default.warn("Cannot reset chat session: chat not yet initialized.");
-  }
-}
-function getChatHistory() {
-  if (!this.chat) {
-    logger_default.warn("Chat session not initialized. No history available.");
-    return [];
-  }
-  return this.chat.getHistory();
-}
-async function updateSystemInstructions(newInstructions) {
-  if (!newInstructions || typeof newInstructions !== "string") {
-    throw new Error("System instructions must be a non-empty string");
-  }
-  this.systemInstructions = newInstructions.trim();
-  this.chatConfig.systemInstruction = this.systemInstructions;
-  logger_default.debug("Updating system instructions and reinitializing chat...");
-  await this.init(true);
-}
-async function clearConversation() {
-  if (!this.chat) {
-    logger_default.warn("Cannot clear conversation: chat not initialized.");
-    return;
-  }
-  const history = this.chat.getHistory();
-  const exampleHistory = history.slice(0, this.exampleCount || 0);
-  this.chat = await this.genAIClient.chats.create({
-    model: this.modelName,
-    // @ts-ignore
-    config: {
-      ...this.chatConfig,
-      ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
-    },
-    history: exampleHistory
-  });
-  this.lastResponseMetadata = null;
-  this._cumulativeUsage = {
-    promptTokens: 0,
-    responseTokens: 0,
-    totalTokens: 0,
-    attempts: 0
-  };
-  logger_default.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
-}
-function getLastUsage() {
-  if (!this.lastResponseMetadata) {
-    return null;
-  }
-  const meta = this.lastResponseMetadata;
-  const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
-  const useCumulative = cumulative.attempts > 0;
-  return {
-    // Token breakdown for billing - CUMULATIVE across all retry attempts
-    promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
-    responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
-    totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
-    // Number of attempts (1 = success on first try, 2+ = retries were needed)
-    attempts: useCumulative ? cumulative.attempts : 1,
-    // Model verification for billing cross-check
-    modelVersion: meta.modelVersion,
-    // Actual model that responded (e.g., 'gemini-2.5-flash-001')
-    requestedModel: meta.requestedModel,
-    // Model you requested (e.g., 'gemini-2.5-flash')
-    // Timestamp for audit trail
-    timestamp: meta.timestamp
-  };
-}
-async function statelessMessage(sourcePayload, options = {}, validatorFn = null) {
-  if (!this.chat) {
-    throw new Error("Chat session not initialized. Please call init() first.");
-  }
-  const payloadStr = typeof sourcePayload === "string" ? sourcePayload : JSON.stringify(sourcePayload, null, 2);
-  const contents = [];
-  if (this.exampleCount > 0) {
-    const history = this.chat.getHistory();
-    const exampleHistory = history.slice(0, this.exampleCount);
-    contents.push(...exampleHistory);
-  }
-  contents.push({ role: "user", parts: [{ text: payloadStr }] });
-  const mergedLabels = { ...this.labels, ...options.labels || {} };
-  const result = await this.genAIClient.models.generateContent({
-    model: this.modelName,
-    contents,
-    config: {
-      ...this.chatConfig,
-      ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
-    }
-  });
-  this.lastResponseMetadata = {
-    modelVersion: result.modelVersion || null,
-    requestedModel: this.modelName,
-    promptTokens: result.usageMetadata?.promptTokenCount || 0,
-    responseTokens: result.usageMetadata?.candidatesTokenCount || 0,
-    totalTokens: result.usageMetadata?.totalTokenCount || 0,
-    timestamp: Date.now()
-  };
-  this._cumulativeUsage = {
-    promptTokens: this.lastResponseMetadata.promptTokens,
-    responseTokens: this.lastResponseMetadata.responseTokens,
-    totalTokens: this.lastResponseMetadata.totalTokens,
-    attempts: 1
-  };
-  if (result.usageMetadata && logger_default.level !== "silent") {
-    logger_default.debug(`Stateless message metadata: ${JSON.stringify({
-      modelVersion: result.modelVersion || "not-provided",
-      promptTokens: result.usageMetadata.promptTokenCount,
-      responseTokens: result.usageMetadata.candidatesTokenCount
-    })}`);
-  }
-  const modelResponse = result.text;
-  const extractedJSON = extractJSON(modelResponse);
-  let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
-  if (validatorFn) {
-    await validatorFn(transformedPayload);
-  }
-  return transformedPayload;
 }
 function attemptJSONRecovery(text, maxAttempts = 100) {
   if (!text || typeof text !== "string") return null;
@@ -1333,99 +206,6 @@ function attemptJSONRecovery(text, maxAttempts = 100) {
   }
   return null;
 }
-function isJSON(data) {
-  try {
-    const attempt = JSON.stringify(data);
-    if (attempt?.startsWith("{") || attempt?.startsWith("[")) {
-      if (attempt?.endsWith("}") || attempt?.endsWith("]")) {
-        return true;
-      }
-    }
-    return false;
-  } catch (e) {
-    return false;
-  }
-}
-function isJSONStr(string) {
-  if (typeof string !== "string") return false;
-  try {
-    const result = JSON.parse(string);
-    const type = Object.prototype.toString.call(result);
-    return type === "[object Object]" || type === "[object Array]";
-  } catch (err) {
-    return false;
-  }
-}
-function extractJSON(text) {
-  if (!text || typeof text !== "string") {
-    throw new Error("No text provided for JSON extraction");
-  }
-  if (isJSONStr(text.trim())) {
-    return JSON.parse(text.trim());
-  }
-  const codeBlockPatterns = [
-    /```json\s*\n?([\s\S]*?)\n?\s*```/gi,
-    /```\s*\n?([\s\S]*?)\n?\s*```/gi
-  ];
-  for (const pattern of codeBlockPatterns) {
-    const matches = text.match(pattern);
-    if (matches) {
-      for (const match of matches) {
-        const jsonContent = match.replace(/```json\s*\n?/gi, "").replace(/```\s*\n?/gi, "").trim();
-        if (isJSONStr(jsonContent)) {
-          return JSON.parse(jsonContent);
-        }
-      }
-    }
-  }
-  const jsonPatterns = [
-    // Match complete JSON objects
-    /\{[\s\S]*\}/g,
-    // Match complete JSON arrays
-    /\[[\s\S]*\]/g
-  ];
-  for (const pattern of jsonPatterns) {
-    const matches = text.match(pattern);
-    if (matches) {
-      for (const match of matches) {
-        const candidate = match.trim();
-        if (isJSONStr(candidate)) {
-          return JSON.parse(candidate);
-        }
-      }
-    }
-  }
-  const advancedExtract = findCompleteJSONStructures(text);
-  if (advancedExtract.length > 0) {
-    for (const candidate of advancedExtract) {
-      if (isJSONStr(candidate)) {
-        return JSON.parse(candidate);
-      }
-    }
-  }
-  const cleanedText = text.replace(/^\s*Sure,?\s*here\s+is\s+your?\s+.*?[:\n]/gi, "").replace(/^\s*Here\s+is\s+the\s+.*?[:\n]/gi, "").replace(/^\s*The\s+.*?is\s*[:\n]/gi, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "").trim();
-  if (isJSONStr(cleanedText)) {
-    return JSON.parse(cleanedText);
-  }
-  const recoveredJSON = attemptJSONRecovery(text);
-  if (recoveredJSON !== null) {
-    return recoveredJSON;
-  }
-  throw new Error(`Could not extract valid JSON from model response. Response preview: ${text.substring(0, 200)}...`);
-}
-function findCompleteJSONStructures(text) {
-  const results = [];
-  const startChars = ["{", "["];
-  for (let i = 0; i < text.length; i++) {
-    if (startChars.includes(text[i])) {
-      const extracted = extractCompleteStructure(text, i);
-      if (extracted) {
-        results.push(extracted);
-      }
-    }
-  }
-  return results;
-}
 function extractCompleteStructure(text, startPos) {
   const startChar = text[startPos];
   const endChar = startChar === "{" ? "}" : "]";
@@ -1459,69 +239,1627 @@ function extractCompleteStructure(text, startPos) {
   }
   return null;
 }
-if (import_meta.url === new URL(`file://${process.argv[1]}`).href) {
-  logger_default.info("RUNNING AI Transformer as standalone script...");
-  (async () => {
-    try {
-      logger_default.info("Initializing AI Transformer...");
-      const transformer = new AITransformer({
-        modelName: "gemini-2.5-flash",
-        sourceKey: "INPUT",
-        // Custom source key
-        targetKey: "OUTPUT",
-        // Custom target key
-        contextKey: "CONTEXT",
-        // Custom context key
-        maxRetries: 2
-      });
-      const examples = [
-        {
-          CONTEXT: "Generate professional profiles with emoji representations",
-          INPUT: { "name": "Alice" },
-          OUTPUT: { "name": "Alice", "profession": "data scientist", "life_as_told_by_emoji": ["\u{1F52C}", "\u{1F4A1}", "\u{1F4CA}", "\u{1F9E0}", "\u{1F31F}"] }
-        },
-        {
-          INPUT: { "name": "Bob" },
-          OUTPUT: { "name": "Bob", "profession": "product manager", "life_as_told_by_emoji": ["\u{1F4CB}", "\u{1F91D}", "\u{1F680}", "\u{1F4AC}", "\u{1F3AF}"] }
-        },
-        {
-          INPUT: { "name": "Eve" },
-          OUTPUT: { "name": "Even", "profession": "security analyst", "life_as_told_by_emoji": ["\u{1F575}\uFE0F\u200D\u2640\uFE0F", "\u{1F512}", "\u{1F4BB}", "\u{1F440}", "\u26A1\uFE0F"] }
-        }
-      ];
-      await transformer.init();
-      await transformer.seed(examples);
-      logger_default.info("AI Transformer initialized and seeded with examples.");
-      const normalResponse = await transformer.message({ "name": "AK" });
-      logger_default.info(`Normal Payload Transformed: ${JSON.stringify(normalResponse)}`);
-      const mockValidator = async (payload) => {
-        if (!payload.profession || !payload.life_as_told_by_emoji) {
-          throw new Error("Missing required fields: profession or life_as_told_by_emoji");
-        }
-        if (!Array.isArray(payload.life_as_told_by_emoji)) {
-          throw new Error("life_as_told_by_emoji must be an array");
-        }
-        return payload;
-      };
-      const validatedResponse = await transformer.messageAndValidate(
-        { "name": "Lynn" },
-        {},
-        mockValidator
-      );
-      logger_default.info(`Validated Payload Transformed: ${JSON.stringify(validatedResponse)}`);
-      if (NODE_ENV2 === "dev") debugger;
-    } catch (error) {
-      logger_default.error(`Error in AI Transformer script: ${error?.message || error}`);
-      if (NODE_ENV2 === "dev") debugger;
+function findCompleteJSONStructures(text) {
+  const results = [];
+  const startChars = ["{", "["];
+  for (let i = 0; i < text.length; i++) {
+    if (startChars.includes(text[i])) {
+      const extracted = extractCompleteStructure(text, i);
+      if (extracted) {
+        results.push(extracted);
+      }
     }
-  })();
+  }
+  return results;
 }
+function extractJSON(text) {
+  if (!text || typeof text !== "string") {
+    throw new Error("No text provided for JSON extraction");
+  }
+  if (isJSONStr(text.trim())) {
+    return JSON.parse(text.trim());
+  }
+  const codeBlockPatterns = [
+    /```json\s*\n?([\s\S]*?)\n?\s*```/gi,
+    /```\s*\n?([\s\S]*?)\n?\s*```/gi
+  ];
+  for (const pattern of codeBlockPatterns) {
+    const matches = text.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        const jsonContent = match.replace(/```json\s*\n?/gi, "").replace(/```\s*\n?/gi, "").trim();
+        if (isJSONStr(jsonContent)) {
+          return JSON.parse(jsonContent);
+        }
+      }
+    }
+  }
+  const jsonPatterns = [
+    /\{[\s\S]*\}/g,
+    /\[[\s\S]*\]/g
+  ];
+  for (const pattern of jsonPatterns) {
+    const matches = text.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        const candidate = match.trim();
+        if (isJSONStr(candidate)) {
+          return JSON.parse(candidate);
+        }
+      }
+    }
+  }
+  const advancedExtract = findCompleteJSONStructures(text);
+  if (advancedExtract.length > 0) {
+    for (const candidate of advancedExtract) {
+      if (isJSONStr(candidate)) {
+        return JSON.parse(candidate);
+      }
+    }
+  }
+  const cleanedText = text.replace(/^\s*Sure,?\s*here\s+is\s+your?\s+.*?[:\n]/gi, "").replace(/^\s*Here\s+is\s+the\s+.*?[:\n]/gi, "").replace(/^\s*The\s+.*?is\s*[:\n]/gi, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "").trim();
+  if (isJSONStr(cleanedText)) {
+    return JSON.parse(cleanedText);
+  }
+  const recoveredJSON = attemptJSONRecovery(text);
+  if (recoveredJSON !== null) {
+    return recoveredJSON;
+  }
+  throw new Error(`Could not extract valid JSON from model response. Response preview: ${text.substring(0, 200)}...`);
+}
+
+// base.js
+import_dotenv.default.config();
+var { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
+var DEFAULT_SAFETY_SETTINGS = [
+  { category: import_genai.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE },
+  { category: import_genai.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: import_genai.HarmBlockThreshold.BLOCK_NONE }
+];
+var DEFAULT_THINKING_CONFIG = {
+  thinkingBudget: 0
+};
+var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
+var THINKING_SUPPORTED_MODELS = [
+  /^gemini-3-flash(-preview)?$/,
+  /^gemini-3-pro(-preview|-image-preview)?$/,
+  /^gemini-2\.5-pro/,
+  /^gemini-2\.5-flash(-preview)?$/,
+  /^gemini-2\.5-flash-lite(-preview)?$/,
+  /^gemini-2\.0-flash$/
+];
+var MODEL_PRICING = {
+  "gemini-2.5-flash": { input: 0.15, output: 0.6 },
+  "gemini-2.5-flash-lite": { input: 0.02, output: 0.1 },
+  "gemini-2.5-pro": { input: 2.5, output: 10 },
+  "gemini-3-pro": { input: 2, output: 12 },
+  "gemini-3-pro-preview": { input: 2, output: 12 },
+  "gemini-2.0-flash": { input: 0.1, output: 0.4 },
+  "gemini-2.0-flash-lite": { input: 0.02, output: 0.1 }
+};
+var BaseGemini = class {
+  /**
+   * @param {BaseGeminiOptions} [options={}]
+   */
+  constructor(options = {}) {
+    this.modelName = options.modelName || "gemini-2.5-flash";
+    if (options.systemPrompt !== void 0) {
+      this.systemPrompt = options.systemPrompt;
+    } else {
+      this.systemPrompt = null;
+    }
+    this.vertexai = options.vertexai || false;
+    this.project = options.project || process.env.GOOGLE_CLOUD_PROJECT || null;
+    this.location = options.location || process.env.GOOGLE_CLOUD_LOCATION || void 0;
+    this.googleAuthOptions = options.googleAuthOptions || null;
+    this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : process.env.GEMINI_API_KEY;
+    if (!this.vertexai && !this.apiKey) {
+      throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
+    }
+    if (this.vertexai && !this.project) {
+      throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
+    }
+    this._configureLogLevel(options.logLevel);
+    this.labels = options.labels || {};
+    this.chatConfig = {
+      temperature: 0.7,
+      topP: 0.95,
+      topK: 64,
+      safetySettings: DEFAULT_SAFETY_SETTINGS,
+      ...options.chatConfig
+    };
+    if (this.systemPrompt) {
+      this.chatConfig.systemInstruction = this.systemPrompt;
+    } else if (this.systemPrompt === null && options.systemPrompt === void 0) {
+    } else if (options.systemPrompt === null || options.systemPrompt === false) {
+      delete this.chatConfig.systemInstruction;
+    }
+    if (options.maxOutputTokens !== void 0) {
+      if (options.maxOutputTokens === null) {
+        delete this.chatConfig.maxOutputTokens;
+      } else {
+        this.chatConfig.maxOutputTokens = options.maxOutputTokens;
+      }
+    } else if (options.chatConfig?.maxOutputTokens !== void 0) {
+      if (options.chatConfig.maxOutputTokens === null) {
+        delete this.chatConfig.maxOutputTokens;
+      }
+    } else {
+      this.chatConfig.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+    }
+    this._configureThinking(options.thinkingConfig);
+    const clientOptions = this.vertexai ? {
+      vertexai: true,
+      project: this.project,
+      ...this.location && { location: this.location },
+      ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
+    } : { apiKey: this.apiKey };
+    this.genAIClient = new import_genai.GoogleGenAI(clientOptions);
+    this.chatSession = null;
+    this.lastResponseMetadata = null;
+    this.exampleCount = 0;
+    this._cumulativeUsage = {
+      promptTokens: 0,
+      responseTokens: 0,
+      totalTokens: 0,
+      attempts: 0
+    };
+    logger_default.debug(`${this.constructor.name} created with model: ${this.modelName}`);
+  }
+  // ── Initialization ───────────────────────────────────────────────────────
+  /**
+   * Initializes the chat session. Idempotent unless force=true.
+   * Subclasses can override `_getChatCreateOptions()` to customize.
+   * @param {boolean} [force=false]
+   * @returns {Promise<void>}
+   */
+  async init(force = false) {
+    if (this.chatSession && !force) return;
+    logger_default.debug(`Initializing ${this.constructor.name} chat session with model: ${this.modelName}...`);
+    const chatOptions = this._getChatCreateOptions();
+    this.chatSession = this.genAIClient.chats.create(chatOptions);
+    try {
+      await this.genAIClient.models.list();
+      logger_default.debug(`${this.constructor.name}: API connection successful.`);
+    } catch (e) {
+      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    }
+    logger_default.debug(`${this.constructor.name}: Chat session initialized.`);
+  }
+  /**
+   * Builds the options object for `genAIClient.chats.create()`.
+   * Override in subclasses to add tools, grounding, etc.
+   * @returns {Object}
+   * @protected
+   */
+  _getChatCreateOptions() {
+    return {
+      model: this.modelName,
+      config: {
+        ...this.chatConfig,
+        ...this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }
+      },
+      history: []
+    };
+  }
+  // ── Chat Session Management ──────────────────────────────────────────────
+  /**
+   * Creates a new chat session with the given history.
+   * Internal helper used by init, seed, clearHistory, reset.
+   * @param {Array} [history=[]]
+   * @returns {Object} The new chat session
+   * @protected
+   */
+  _createChatSession(history = []) {
+    const opts = this._getChatCreateOptions();
+    opts.history = history;
+    return this.genAIClient.chats.create(opts);
+  }
+  /**
+   * Retrieves the current conversation history.
+   * @param {boolean} [curated=false]
+   * @returns {Array<Object>}
+   */
+  getHistory(curated = false) {
+    if (!this.chatSession) {
+      logger_default.warn("Chat session not initialized. No history available.");
+      return [];
+    }
+    return this.chatSession.getHistory(curated);
+  }
+  /**
+   * Clears conversation history. Recreates chat session with empty history.
+   * Subclasses may override to preserve seeded examples.
+   * @returns {Promise<void>}
+   */
+  async clearHistory() {
+    if (!this.chatSession) {
+      logger_default.warn(`Cannot clear history: chat not initialized.`);
+      return;
+    }
+    this.chatSession = this._createChatSession([]);
+    this.lastResponseMetadata = null;
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    logger_default.debug(`${this.constructor.name}: Conversation history cleared.`);
+  }
+  // ── Few-Shot Seeding ─────────────────────────────────────────────────────
+  /**
+   * Seeds the chat session with example input/output pairs for few-shot learning.
+   * @param {TransformationExample[]} examples - Array of example objects
+   * @param {Object} [opts={}] - Key configuration
+   * @param {string} [opts.promptKey='PROMPT'] - Key for input data in examples
+   * @param {string} [opts.answerKey='ANSWER'] - Key for output data in examples
+   * @param {string} [opts.contextKey='CONTEXT'] - Key for optional context
+   * @param {string} [opts.explanationKey='EXPLANATION'] - Key for optional explanations
+   * @param {string} [opts.systemPromptKey='SYSTEM'] - Key for system prompt overrides in examples
+   * @returns {Promise<Array>} The updated chat history
+   */
+  async seed(examples, opts = {}) {
+    await this.init();
+    if (!examples || !Array.isArray(examples) || examples.length === 0) {
+      logger_default.debug("No examples provided. Skipping seeding.");
+      return this.getHistory();
+    }
+    const promptKey = opts.promptKey || "PROMPT";
+    const answerKey = opts.answerKey || "ANSWER";
+    const contextKey = opts.contextKey || "CONTEXT";
+    const explanationKey = opts.explanationKey || "EXPLANATION";
+    const systemPromptKey = opts.systemPromptKey || "SYSTEM";
+    const instructionExample = examples.find((ex) => ex[systemPromptKey]);
+    if (instructionExample) {
+      logger_default.debug(`Found system prompt in examples; reinitializing chat.`);
+      this.systemPrompt = instructionExample[systemPromptKey];
+      this.chatConfig.systemInstruction = this.systemPrompt;
+      await this.init(true);
+    }
+    logger_default.debug(`Seeding chat with ${examples.length} examples...`);
+    const historyToAdd = [];
+    for (const example of examples) {
+      const contextValue = example[contextKey] || "";
+      const promptValue = example[promptKey] || "";
+      const answerValue = example[answerKey] || "";
+      const explanationValue = example[explanationKey] || "";
+      let userText = "";
+      let modelResponse = {};
+      if (contextValue) {
+        let contextText = isJSON(contextValue) ? JSON.stringify(contextValue, null, 2) : contextValue;
+        userText += `CONTEXT:
+${contextText}
+
+`;
+      }
+      if (promptValue) {
+        let promptText = isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
+        userText += promptText;
+      }
+      if (answerValue) modelResponse.data = answerValue;
+      if (explanationValue) modelResponse.explanation = explanationValue;
+      const modelText = JSON.stringify(modelResponse, null, 2);
+      if (userText.trim().length && modelText.trim().length > 0) {
+        historyToAdd.push({ role: "user", parts: [{ text: userText.trim() }] });
+        historyToAdd.push({ role: "model", parts: [{ text: modelText.trim() }] });
+      }
+    }
+    const currentHistory = this.chatSession?.getHistory() || [];
+    logger_default.debug(`Adding ${historyToAdd.length} items to chat history (${currentHistory.length} existing)...`);
+    this.chatSession = this._createChatSession([...currentHistory, ...historyToAdd]);
+    this.exampleCount = currentHistory.length + historyToAdd.length;
+    const newHistory = this.chatSession.getHistory();
+    logger_default.debug(`Chat session now has ${newHistory.length} history items.`);
+    return newHistory;
+  }
+  // ── Response Metadata ────────────────────────────────────────────────────
+  /**
+   * Captures response metadata (model version, token counts) from an API response.
+   * @param {Object} response - The API response object
+   * @protected
+   */
+  _captureMetadata(response) {
+    this.lastResponseMetadata = {
+      modelVersion: response.modelVersion || null,
+      requestedModel: this.modelName,
+      promptTokens: response.usageMetadata?.promptTokenCount || 0,
+      responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
+      totalTokens: response.usageMetadata?.totalTokenCount || 0,
+      timestamp: Date.now()
+    };
+  }
+  /**
+   * Returns structured usage data from the last API call for billing verification.
+   * Includes CUMULATIVE token counts across all retry attempts.
+   * @returns {UsageData|null} Usage data or null if no API call has been made.
+   */
+  getLastUsage() {
+    if (!this.lastResponseMetadata) return null;
+    const meta = this.lastResponseMetadata;
+    const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
+    const useCumulative = cumulative.attempts > 0;
+    return {
+      promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
+      responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
+      totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
+      attempts: useCumulative ? cumulative.attempts : 1,
+      modelVersion: meta.modelVersion,
+      requestedModel: meta.requestedModel,
+      timestamp: meta.timestamp
+    };
+  }
+  // ── Token Estimation ─────────────────────────────────────────────────────
+  /**
+   * Estimates INPUT token count for a payload before sending.
+   * Includes system prompt + chat history + your new message.
+   * @param {Object|string} nextPayload - The next message to estimate
+   * @returns {Promise<{ inputTokens: number }>}
+   */
+  async estimate(nextPayload) {
+    const contents = [];
+    if (this.systemPrompt) {
+      contents.push({ parts: [{ text: this.systemPrompt }] });
+    }
+    if (this.chatSession && typeof this.chatSession.getHistory === "function") {
+      const history = this.chatSession.getHistory();
+      if (Array.isArray(history) && history.length > 0) {
+        contents.push(...history);
+      }
+    }
+    const nextMessage = typeof nextPayload === "string" ? nextPayload : JSON.stringify(nextPayload, null, 2);
+    contents.push({ parts: [{ text: nextMessage }] });
+    const resp = await this.genAIClient.models.countTokens({
+      model: this.modelName,
+      contents
+    });
+    return { inputTokens: resp.totalTokens };
+  }
+  /**
+   * Estimates the INPUT cost of sending a payload based on model pricing.
+   * @param {Object|string} nextPayload - The next message to estimate
+   * @returns {Promise<Object>} Cost estimation
+   */
+  async estimateCost(nextPayload) {
+    const tokenInfo = await this.estimate(nextPayload);
+    const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+    return {
+      inputTokens: tokenInfo.inputTokens,
+      model: this.modelName,
+      pricing,
+      estimatedInputCost: tokenInfo.inputTokens / 1e6 * pricing.input,
+      note: "Cost is for input tokens only; output cost depends on response length"
+    };
+  }
+  // ── Private Helpers ──────────────────────────────────────────────────────
+  /**
+   * Configures the log level based on options, env vars, or NODE_ENV.
+   * @param {string} [logLevel]
+   * @private
+   */
+  _configureLogLevel(logLevel) {
+    if (logLevel) {
+      if (logLevel === "none") {
+        logger_default.level = "silent";
+      } else {
+        logger_default.level = logLevel;
+      }
+    } else if (LOG_LEVEL) {
+      logger_default.level = LOG_LEVEL;
+    } else if (NODE_ENV === "dev") {
+      logger_default.level = "debug";
+    } else if (NODE_ENV === "test") {
+      logger_default.level = "warn";
+    } else if (NODE_ENV.startsWith("prod")) {
+      logger_default.level = "error";
+    } else {
+      logger_default.level = "info";
+    }
+  }
+  /**
+   * Configures thinking settings based on model support.
+   * @param {Object|null|undefined} thinkingConfig
+   * @private
+   */
+  _configureThinking(thinkingConfig) {
+    const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some((p) => p.test(this.modelName));
+    if (thinkingConfig === void 0) return;
+    if (thinkingConfig === null) {
+      delete this.chatConfig.thinkingConfig;
+      logger_default.debug(`thinkingConfig set to null - removed from configuration`);
+      return;
+    }
+    if (!modelSupportsThinking) {
+      logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+      return;
+    }
+    const config = { ...DEFAULT_THINKING_CONFIG, ...thinkingConfig };
+    if (thinkingConfig.thinkingLevel !== void 0) {
+      delete config.thinkingBudget;
+    }
+    this.chatConfig.thinkingConfig = config;
+    logger_default.debug(`Thinking config applied: ${JSON.stringify(config)}`);
+  }
+};
+var base_default = BaseGemini;
+
+// transformer.js
+var import_promises = __toESM(require("fs/promises"), 1);
+var import_path = __toESM(require("path"), 1);
+var DEFAULT_SYSTEM_INSTRUCTIONS = `
+You are an expert JSON transformation engine. Your task is to accurately convert data payloads from one format to another.
+
+You will be provided with example transformations (Source JSON -> Target JSON).
+
+Learn the mapping rules from these examples.
+
+When presented with new Source JSON, apply the learned transformation rules to produce a new Target JSON payload.
+
+Always respond ONLY with a valid JSON object that strictly adheres to the expected output format.
+
+Do not include any additional text, explanations, or formatting before or after the JSON object.
+`;
+var Transformer = class extends base_default {
+  /**
+   * @param {TransformerOptions} [options={}]
+   */
+  constructor(options = {}) {
+    if (options.systemPrompt === void 0) {
+      options = { ...options, systemPrompt: DEFAULT_SYSTEM_INSTRUCTIONS };
+    }
+    super(options);
+    this.chatConfig.responseMimeType = "application/json";
+    this.onlyJSON = options.onlyJSON !== void 0 ? options.onlyJSON : true;
+    if (options.responseSchema) {
+      this.chatConfig.responseSchema = options.responseSchema;
+    }
+    this.promptKey = options.promptKey || options.sourceKey || "PROMPT";
+    this.answerKey = options.answerKey || options.targetKey || "ANSWER";
+    this.contextKey = options.contextKey || "CONTEXT";
+    this.explanationKey = options.explanationKey || "EXPLANATION";
+    this.systemPromptKey = options.systemPromptKey || "SYSTEM";
+    if (this.promptKey === this.answerKey) {
+      throw new Error("Source and target keys cannot be the same. Please provide distinct keys.");
+    }
+    this.examplesFile = options.examplesFile || null;
+    this.exampleData = options.exampleData || null;
+    this.asyncValidator = options.asyncValidator || null;
+    this.maxRetries = options.maxRetries || 3;
+    this.retryDelay = options.retryDelay || 1e3;
+    this.enableGrounding = options.enableGrounding || false;
+    this.groundingConfig = options.groundingConfig || {};
+    logger_default.debug(`Transformer keys \u2014 Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
+  }
+  // ── Chat Create Options Override ──────────────────────────────────────────
+  /** @protected */
+  _getChatCreateOptions() {
+    const opts = super._getChatCreateOptions();
+    if (this.enableGrounding) {
+      opts.config.tools = [{ googleSearch: this.groundingConfig }];
+      logger_default.debug(`Search grounding ENABLED (WARNING: costs $35/1k queries)`);
+    }
+    return opts;
+  }
+  // ── Seeding ──────────────────────────────────────────────────────────────
+  /**
+   * Seeds the chat with transformation examples using the configured key mapping.
+   * Overrides base seed() to use Transformer-specific keys and support
+   * examplesFile/exampleData fallbacks.
+   *
+   * @param {TransformationExample[]} [examples] - Array of example objects
+   * @returns {Promise<Array>} The updated chat history
+   */
+  async seed(examples) {
+    await this.init();
+    if (!examples || !Array.isArray(examples) || examples.length === 0) {
+      if (this.examplesFile) {
+        logger_default.debug(`No examples provided, loading from file: ${this.examplesFile}`);
+        try {
+          const filePath = import_path.default.resolve(this.examplesFile);
+          const raw = await import_promises.default.readFile(filePath, "utf-8");
+          examples = JSON.parse(raw);
+        } catch (err) {
+          throw new Error(`Could not load examples from file: ${this.examplesFile}. ${err.message}`);
+        }
+      } else if (this.exampleData) {
+        logger_default.debug(`Using example data provided in options.`);
+        if (Array.isArray(this.exampleData)) {
+          examples = this.exampleData;
+        } else {
+          throw new Error(`Invalid example data provided. Expected an array of examples.`);
+        }
+      } else {
+        logger_default.debug("No examples provided and no examples file specified. Skipping seeding.");
+        return this.getHistory();
+      }
+    }
+    return await super.seed(examples, {
+      promptKey: this.promptKey,
+      answerKey: this.answerKey,
+      contextKey: this.contextKey,
+      explanationKey: this.explanationKey,
+      systemPromptKey: this.systemPromptKey
+    });
+  }
+  // ── Primary Send Method ──────────────────────────────────────────────────
+  /**
+   * Transforms a payload using the seeded examples and model.
+   * Includes validation and automatic retry with AI-powered error correction.
+   *
+   * @param {Object|string} payload - The source payload to transform
+   * @param {Object} [opts={}] - Per-message options
+   * @param {number} [opts.maxRetries] - Override max retries
+   * @param {number} [opts.retryDelay] - Override retry delay
+   * @param {boolean} [opts.stateless] - Send without affecting chat history
+   * @param {boolean} [opts.enableGrounding] - Override grounding for this message
+   * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @param {AsyncValidatorFunction|null} [validatorFn] - Validator for this call (overrides constructor validator)
+   * @returns {Promise<Object>} The transformed payload
+   */
+  async send(payload, opts = {}, validatorFn = null) {
+    if (!this.chatSession) {
+      throw new Error("Chat session not initialized. Please call init() first.");
+    }
+    const validator = validatorFn || this.asyncValidator;
+    if (opts.stateless) {
+      return await this._statelessSend(payload, opts, validator);
+    }
+    const maxRetries = opts.maxRetries ?? this.maxRetries;
+    const retryDelay = opts.retryDelay ?? this.retryDelay;
+    if (opts.enableGrounding !== void 0 && opts.enableGrounding !== this.enableGrounding) {
+      const originalGrounding = this.enableGrounding;
+      const originalConfig = this.groundingConfig;
+      try {
+        this.enableGrounding = opts.enableGrounding;
+        this.groundingConfig = opts.groundingConfig ?? this.groundingConfig;
+        await this.init(true);
+      } catch (error) {
+        this.enableGrounding = originalGrounding;
+        this.groundingConfig = originalConfig;
+        throw error;
+      }
+      opts._restoreGrounding = async () => {
+        this.enableGrounding = originalGrounding;
+        this.groundingConfig = originalConfig;
+        await this.init(true);
+      };
+    }
+    let lastPayload = this._preparePayload(payload);
+    const messageOptions = {};
+    if (opts.labels) messageOptions.labels = opts.labels;
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const transformedPayload = attempt === 0 ? await this.rawSend(lastPayload, messageOptions) : await this.rebuild(lastPayload, lastError.message);
+        if (this.lastResponseMetadata) {
+          this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
+          this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
+          this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
+          this._cumulativeUsage.attempts = attempt + 1;
+        }
+        lastPayload = transformedPayload;
+        if (validator) {
+          await validator(transformedPayload);
+        }
+        logger_default.debug(`Transformation succeeded on attempt ${attempt + 1}`);
+        if (opts._restoreGrounding) await opts._restoreGrounding();
+        return transformedPayload;
+      } catch (error) {
+        lastError = error;
+        logger_default.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
+        if (attempt >= maxRetries) {
+          logger_default.error(`All ${maxRetries + 1} attempts failed.`);
+          if (opts._restoreGrounding) await opts._restoreGrounding();
+          throw new Error(`Transformation failed after ${maxRetries + 1} attempts. Last error: ${error.message}`);
+        }
+        const delay = retryDelay * Math.pow(2, attempt);
+        await new Promise((res) => setTimeout(res, delay));
+      }
+    }
+  }
+  // ── Raw Send ─────────────────────────────────────────────────────────────
+  /**
+   * Sends a single prompt to the model and parses the JSON response.
+   * No validation or retry logic.
+   *
+   * @param {Object|string} payload - The source payload
+   * @param {Object} [messageOptions={}] - Per-message options (e.g., labels)
+   * @returns {Promise<Object>} The transformed payload
+   */
+  async rawSend(payload, messageOptions = {}) {
+    if (!this.chatSession) {
+      throw new Error("Chat session not initialized.");
+    }
+    const actualPayload = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    const mergedLabels = { ...this.labels, ...messageOptions.labels || {} };
+    const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
+    try {
+      const sendParams = { message: actualPayload };
+      if (hasLabels) {
+        sendParams.config = { labels: mergedLabels };
+      }
+      const result = await this.chatSession.sendMessage(sendParams);
+      this._captureMetadata(result);
+      if (result.usageMetadata && logger_default.level !== "silent") {
+        logger_default.debug(`API response: model=${result.modelVersion || "unknown"}, tokens=${result.usageMetadata.totalTokenCount}`);
+      }
+      const modelResponse = result.text;
+      const extractedJSON = extractJSON(modelResponse);
+      if (extractedJSON?.data) {
+        return extractedJSON.data;
+      }
+      return extractedJSON;
+    } catch (error) {
+      if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
+        throw new Error(`Invalid JSON response from Gemini: ${error.message}`);
+      }
+      throw new Error(`Transformation failed: ${error.message}`);
+    }
+  }
+  // ── Rebuild ──────────────────────────────────────────────────────────────
+  /**
+   * Asks the model to fix a payload that failed validation.
+   *
+   * @param {Object} lastPayload - The payload that failed
+   * @param {string} serverError - The error message
+   * @returns {Promise<Object>} Corrected payload
+   */
+  async rebuild(lastPayload, serverError) {
+    await this.init();
+    const prompt = `
+The previous JSON payload (below) failed validation.
+The server's error message is quoted afterward.
+
+---------------- BAD PAYLOAD ----------------
+${JSON.stringify(lastPayload, null, 2)}
+
+
+---------------- SERVER ERROR ----------------
+${serverError}
+
+Please return a NEW JSON payload that corrects the issue.
+Respond with JSON only \u2013 no comments or explanations.
+`;
+    let result;
+    try {
+      result = await this.chatSession.sendMessage({ message: prompt });
+      this._captureMetadata(result);
+    } catch (err) {
+      throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
+    }
+    try {
+      const text = result.text ?? result.response ?? "";
+      return typeof text === "object" ? text : JSON.parse(text);
+    } catch (parseErr) {
+      throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
+    }
+  }
+  // ── Stateless Send ───────────────────────────────────────────────────────
+  /**
+   * Sends a one-off message using generateContent (not chat).
+   * Does NOT affect chat history.
+   * @param {Object|string} payload
+   * @param {Object} [opts={}]
+   * @param {AsyncValidatorFunction|null} [validatorFn]
+   * @returns {Promise<Object>}
+   * @private
+   */
+  async _statelessSend(payload, opts = {}, validatorFn = null) {
+    if (!this.chatSession) {
+      throw new Error("Chat session not initialized. Please call init() first.");
+    }
+    const payloadStr = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    const contents = [];
+    if (this.exampleCount > 0) {
+      const history = this.chatSession.getHistory();
+      const exampleHistory = history.slice(0, this.exampleCount);
+      contents.push(...exampleHistory);
+    }
+    contents.push({ role: "user", parts: [{ text: payloadStr }] });
+    const mergedLabels = { ...this.labels, ...opts.labels || {} };
+    const result = await this.genAIClient.models.generateContent({
+      model: this.modelName,
+      contents,
+      config: {
+        ...this.chatConfig,
+        ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
+      }
+    });
+    this._captureMetadata(result);
+    this._cumulativeUsage = {
+      promptTokens: this.lastResponseMetadata.promptTokens,
+      responseTokens: this.lastResponseMetadata.responseTokens,
+      totalTokens: this.lastResponseMetadata.totalTokens,
+      attempts: 1
+    };
+    const modelResponse = result.text;
+    const extractedJSON = extractJSON(modelResponse);
+    let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
+    if (validatorFn) {
+      await validatorFn(transformedPayload);
+    }
+    return transformedPayload;
+  }
+  // ── History Management ───────────────────────────────────────────────────
+  /**
+   * Clears conversation history while preserving seeded examples.
+   * @returns {Promise<void>}
+   */
+  async clearHistory() {
+    if (!this.chatSession) {
+      logger_default.warn("Cannot clear history: chat not initialized.");
+      return;
+    }
+    const history = this.chatSession.getHistory();
+    const exampleHistory = history.slice(0, this.exampleCount || 0);
+    this.chatSession = this._createChatSession(exampleHistory);
+    this.lastResponseMetadata = null;
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    logger_default.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
+  }
+  /**
+   * Fully resets the chat session, clearing all history including examples.
+   * @returns {Promise<void>}
+   */
+  async reset() {
+    if (this.chatSession) {
+      logger_default.debug("Resetting chat session...");
+      this.chatSession = this._createChatSession([]);
+      this.exampleCount = 0;
+      logger_default.debug("Chat session reset.");
+    } else {
+      logger_default.warn("Cannot reset: chat not yet initialized.");
+    }
+  }
+  /**
+   * Updates system prompt and reinitializes the chat session.
+   * @param {string} newPrompt - The new system prompt
+   * @returns {Promise<void>}
+   */
+  async updateSystemPrompt(newPrompt) {
+    if (!newPrompt || typeof newPrompt !== "string") {
+      throw new Error("System prompt must be a non-empty string");
+    }
+    this.systemPrompt = newPrompt.trim();
+    this.chatConfig.systemInstruction = this.systemPrompt;
+    logger_default.debug("Updating system prompt and reinitializing chat...");
+    await this.init(true);
+  }
+  // ── Private Helpers ──────────────────────────────────────────────────────
+  /**
+   * Normalizes a payload to a string for sending.
+   * @param {*} payload
+   * @returns {string}
+   * @private
+   */
+  _preparePayload(payload) {
+    if (payload && isJSON(payload)) {
+      return JSON.stringify(payload, null, 2);
+    } else if (typeof payload === "string") {
+      return payload;
+    } else if (typeof payload === "boolean" || typeof payload === "number") {
+      return payload.toString();
+    } else if (payload === null || payload === void 0) {
+      return JSON.stringify({});
+    } else {
+      throw new Error("Invalid source payload. Must be a JSON object or string.");
+    }
+  }
+};
+var transformer_default = Transformer;
+
+// chat.js
+var Chat = class extends base_default {
+  /**
+   * @param {ChatOptions} [options={}]
+   */
+  constructor(options = {}) {
+    if (options.systemPrompt === void 0) {
+      options = { ...options, systemPrompt: "You are a helpful AI assistant." };
+    }
+    super(options);
+    logger_default.debug(`Chat created with model: ${this.modelName}`);
+  }
+  /**
+   * Send a text message and get a response. Adds to conversation history.
+   *
+   * @param {string} message - The user's message
+   * @param {Object} [opts={}] - Per-message options
+   * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @returns {Promise<ChatResponse>} Response with text and usage data
+   */
+  async send(message, opts = {}) {
+    if (!this.chatSession) await this.init();
+    const mergedLabels = { ...this.labels, ...opts.labels || {} };
+    const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
+    const sendParams = { message };
+    if (hasLabels) {
+      sendParams.config = { labels: mergedLabels };
+    }
+    const result = await this.chatSession.sendMessage(sendParams);
+    this._captureMetadata(result);
+    this._cumulativeUsage = {
+      promptTokens: this.lastResponseMetadata.promptTokens,
+      responseTokens: this.lastResponseMetadata.responseTokens,
+      totalTokens: this.lastResponseMetadata.totalTokens,
+      attempts: 1
+    };
+    return {
+      text: result.text || "",
+      usage: this.getLastUsage()
+    };
+  }
+};
+var chat_default = Chat;
+
+// message.js
+var Message = class extends base_default {
+  /**
+   * @param {MessageOptions} [options={}]
+   */
+  constructor(options = {}) {
+    super(options);
+    if (options.responseSchema) {
+      this.chatConfig.responseSchema = options.responseSchema;
+    }
+    if (options.responseMimeType) {
+      this.chatConfig.responseMimeType = options.responseMimeType;
+    }
+    this._isStructured = !!(options.responseSchema || options.responseMimeType === "application/json");
+    logger_default.debug(`Message created (structured=${this._isStructured})`);
+  }
+  /**
+   * Initialize the Message client.
+   * Override: creates genAIClient only, NO chat session (stateless).
+   * @param {boolean} [force=false]
+   * @returns {Promise<void>}
+   */
+  async init(force = false) {
+    if (this._initialized && !force) return;
+    logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
+    try {
+      await this.genAIClient.models.list();
+      logger_default.debug(`${this.constructor.name}: API connection successful.`);
+    } catch (e) {
+      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    }
+    this._initialized = true;
+    logger_default.debug(`${this.constructor.name}: Initialized (stateless mode).`);
+  }
+  /**
+   * Send a stateless message and get a response.
+   * Each call is independent — no history is maintained.
+   *
+   * @param {Object|string} payload - The message or data to send
+   * @param {Object} [opts={}] - Per-message options
+   * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @returns {Promise<MessageResponse>} Response with text, optional data, and usage
+   */
+  async send(payload, opts = {}) {
+    if (!this._initialized) await this.init();
+    const payloadStr = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    const contents = [{ role: "user", parts: [{ text: payloadStr }] }];
+    const mergedLabels = { ...this.labels, ...opts.labels || {} };
+    const result = await this.genAIClient.models.generateContent({
+      model: this.modelName,
+      contents,
+      config: {
+        ...this.chatConfig,
+        ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
+      }
+    });
+    this._captureMetadata(result);
+    this._cumulativeUsage = {
+      promptTokens: this.lastResponseMetadata.promptTokens,
+      responseTokens: this.lastResponseMetadata.responseTokens,
+      totalTokens: this.lastResponseMetadata.totalTokens,
+      attempts: 1
+    };
+    if (result.usageMetadata && logger_default.level !== "silent") {
+      logger_default.debug(`Message response: model=${result.modelVersion || "unknown"}, tokens=${result.usageMetadata.totalTokenCount}`);
+    }
+    const text = result.text || "";
+    const response = {
+      text,
+      usage: this.getLastUsage()
+    };
+    if (this._isStructured) {
+      try {
+        response.data = extractJSON(text);
+      } catch (e) {
+        logger_default.warn(`Could not parse structured response: ${e.message}`);
+        response.data = null;
+      }
+    }
+    return response;
+  }
+  // ── No-ops for stateless class ──
+  /** @returns {Array} Always returns empty array (stateless). */
+  getHistory() {
+    return [];
+  }
+  /** No-op (stateless). */
+  async clearHistory() {
+  }
+  /** Not supported on Message (stateless). */
+  async seed() {
+    logger_default.warn("Message is stateless \u2014 seed() has no effect. Use Transformer or Chat for few-shot learning.");
+    return [];
+  }
+  /** Not supported on Message (stateless). */
+  async estimate() {
+    throw new Error("Message is stateless \u2014 use estimate() on Chat or Transformer which have conversation context.");
+  }
+};
+var message_default = Message;
+
+// tool-agent.js
+var ToolAgent = class extends base_default {
+  /**
+   * @param {ToolAgentOptions} [options={}]
+   */
+  constructor(options = {}) {
+    if (options.systemPrompt === void 0) {
+      options = { ...options, systemPrompt: "You are a helpful AI assistant." };
+    }
+    super(options);
+    this.tools = options.tools || [];
+    this.toolExecutor = options.toolExecutor || null;
+    if (this.tools.length > 0 && !this.toolExecutor) {
+      throw new Error("ToolAgent: tools provided without a toolExecutor. Provide a toolExecutor function to handle tool calls.");
+    }
+    if (this.toolExecutor && this.tools.length === 0) {
+      throw new Error("ToolAgent: toolExecutor provided without tools. Provide tool declarations so the model knows what tools are available.");
+    }
+    this.maxToolRounds = options.maxToolRounds || 10;
+    this.onToolCall = options.onToolCall || null;
+    this.onBeforeExecution = options.onBeforeExecution || null;
+    this._stopped = false;
+    if (this.tools.length > 0) {
+      this.chatConfig.tools = [{ functionDeclarations: this.tools }];
+      this.chatConfig.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
+    }
+    logger_default.debug(`ToolAgent created with ${this.tools.length} tools`);
+  }
+  // ── Non-Streaming Chat ───────────────────────────────────────────────────
+  /**
+   * Send a message and get a complete response (non-streaming).
+   * Automatically handles the tool-use loop.
+   *
+   * @param {string} message - The user's message
+   * @param {Object} [opts={}] - Per-message options
+   * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @returns {Promise<AgentResponse>} Response with text, toolCalls, and usage
+   */
+  async chat(message, opts = {}) {
+    if (!this.chatSession) await this.init();
+    this._stopped = false;
+    const allToolCalls = [];
+    let response = await this.chatSession.sendMessage({ message });
+    for (let round = 0; round < this.maxToolRounds; round++) {
+      if (this._stopped) break;
+      const functionCalls = response.functionCalls;
+      if (!functionCalls || functionCalls.length === 0) break;
+      const toolResults = await Promise.all(
+        functionCalls.map(async (call) => {
+          if (this.onToolCall) {
+            try {
+              this.onToolCall(call.name, call.args);
+            } catch (e) {
+              logger_default.warn(`onToolCall callback error: ${e.message}`);
+            }
+          }
+          if (this.onBeforeExecution) {
+            try {
+              const allowed = await this.onBeforeExecution(call.name, call.args);
+              if (allowed === false) {
+                const result2 = { error: "Execution denied by onBeforeExecution callback" };
+                allToolCalls.push({ name: call.name, args: call.args, result: result2 });
+                return { id: call.id, name: call.name, result: result2 };
+              }
+            } catch (e) {
+              logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+            }
+          }
+          let result;
+          try {
+            result = await this.toolExecutor(call.name, call.args);
+          } catch (err) {
+            logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
+            result = { error: err.message };
+          }
+          allToolCalls.push({ name: call.name, args: call.args, result });
+          return { id: call.id, name: call.name, result };
+        })
+      );
+      response = await this.chatSession.sendMessage({
+        message: toolResults.map((r) => ({
+          functionResponse: {
+            id: r.id,
+            name: r.name,
+            response: { output: r.result }
+          }
+        }))
+      });
+    }
+    this._captureMetadata(response);
+    this._cumulativeUsage = {
+      promptTokens: this.lastResponseMetadata.promptTokens,
+      responseTokens: this.lastResponseMetadata.responseTokens,
+      totalTokens: this.lastResponseMetadata.totalTokens,
+      attempts: 1
+    };
+    return {
+      text: response.text || "",
+      toolCalls: allToolCalls,
+      usage: this.getLastUsage()
+    };
+  }
+  // ── Streaming ────────────────────────────────────────────────────────────
+  /**
+   * Send a message and stream the response as events.
+   * Automatically handles the tool-use loop between streamed rounds.
+   *
+   * Event types:
+   * - `text` — A chunk of the agent's text response
+   * - `tool_call` — The agent is about to call a tool
+   * - `tool_result` — A tool finished executing
+   * - `done` — The agent finished
+   *
+   * @param {string} message - The user's message
+   * @param {Object} [opts={}] - Per-message options
+   * @yields {AgentStreamEvent}
+   */
+  async *stream(message, opts = {}) {
+    if (!this.chatSession) await this.init();
+    this._stopped = false;
+    const allToolCalls = [];
+    let fullText = "";
+    let streamResponse = await this.chatSession.sendMessageStream({ message });
+    for (let round = 0; round < this.maxToolRounds; round++) {
+      if (this._stopped) break;
+      let roundText = "";
+      const functionCalls = [];
+      for await (const chunk of streamResponse) {
+        if (chunk.functionCalls) {
+          functionCalls.push(...chunk.functionCalls);
+        } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+          const text = chunk.candidates[0].content.parts[0].text;
+          roundText += text;
+          fullText += text;
+          yield { type: "text", text };
+        }
+      }
+      if (functionCalls.length === 0) {
+        yield {
+          type: "done",
+          fullText,
+          usage: this.getLastUsage()
+        };
+        return;
+      }
+      const toolResults = [];
+      for (const call of functionCalls) {
+        if (this._stopped) break;
+        yield { type: "tool_call", toolName: call.name, args: call.args };
+        if (this.onToolCall) {
+          try {
+            this.onToolCall(call.name, call.args);
+          } catch (e) {
+            logger_default.warn(`onToolCall callback error: ${e.message}`);
+          }
+        }
+        let denied = false;
+        if (this.onBeforeExecution) {
+          try {
+            const allowed = await this.onBeforeExecution(call.name, call.args);
+            if (allowed === false) denied = true;
+          } catch (e) {
+            logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+          }
+        }
+        let result;
+        if (denied) {
+          result = { error: "Execution denied by onBeforeExecution callback" };
+        } else {
+          try {
+            result = await this.toolExecutor(call.name, call.args);
+          } catch (err) {
+            logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
+            result = { error: err.message };
+          }
+        }
+        allToolCalls.push({ name: call.name, args: call.args, result });
+        yield { type: "tool_result", toolName: call.name, result };
+        toolResults.push({ id: call.id, name: call.name, result });
+      }
+      streamResponse = await this.chatSession.sendMessageStream({
+        message: toolResults.map((r) => ({
+          functionResponse: {
+            id: r.id,
+            name: r.name,
+            response: { output: r.result }
+          }
+        }))
+      });
+    }
+    yield {
+      type: "done",
+      fullText,
+      usage: this.getLastUsage(),
+      warning: this._stopped ? "Agent was stopped" : "Max tool rounds reached"
+    };
+  }
+  // ── Stop ────────────────────────────────────────────────────────────────
+  /**
+   * Stop the agent before the next tool execution round.
+   * If called during a chat() or stream() loop, the agent will finish
+   * the current round and then stop.
+   */
+  stop() {
+    this._stopped = true;
+    logger_default.info("ToolAgent stopped");
+  }
+};
+var tool_agent_default = ToolAgent;
+
+// code-agent.js
+var import_node_child_process = require("node:child_process");
+var import_promises2 = require("node:fs/promises");
+var import_node_path = require("node:path");
+var import_node_crypto = require("node:crypto");
+var MAX_OUTPUT_CHARS = 5e4;
+var MAX_FILE_TREE_LINES = 500;
+var IGNORE_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "coverage", ".next", "build", "__pycache__"]);
+var CodeAgent = class extends base_default {
+  /**
+   * @param {CodeAgentOptions} [options={}]
+   */
+  constructor(options = {}) {
+    if (options.systemPrompt === void 0) {
+      options = { ...options, systemPrompt: "" };
+    }
+    super(options);
+    this.workingDirectory = options.workingDirectory || process.cwd();
+    this.maxRounds = options.maxRounds || 10;
+    this.timeout = options.timeout || 3e4;
+    this.onBeforeExecution = options.onBeforeExecution || null;
+    this.onCodeExecution = options.onCodeExecution || null;
+    this._codebaseContext = null;
+    this._contextGathered = false;
+    this._stopped = false;
+    this._activeProcess = null;
+    this._userSystemPrompt = options.systemPrompt || "";
+    this._allExecutions = [];
+    this.chatConfig.tools = [{
+      functionDeclarations: [{
+        name: "execute_code",
+        description: "Execute JavaScript code in a Node.js child process. The code has access to all Node.js built-in modules (fs, path, child_process, http, etc.). Use console.log() to produce output that will be returned to you. The code runs in the working directory with the same environment variables as the parent process.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            code: {
+              type: "string",
+              description: "JavaScript code to execute. Use console.log() for output. You can import any built-in Node.js module."
+            }
+          },
+          required: ["code"]
+        }
+      }]
+    }];
+    this.chatConfig.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
+    logger_default.debug(`CodeAgent created for directory: ${this.workingDirectory}`);
+  }
+  // ── Init ─────────────────────────────────────────────────────────────────
+  /**
+   * Initialize the agent: gather codebase context, build system prompt,
+   * and create the chat session.
+   * @param {boolean} [force=false]
+   */
+  async init(force = false) {
+    if (this.chatSession && !force) return;
+    if (!this._contextGathered || force) {
+      await this._gatherCodebaseContext();
+    }
+    const systemPrompt = this._buildSystemPrompt();
+    this.chatConfig.systemInstruction = systemPrompt;
+    await super.init(force);
+  }
+  // ── Context Gathering ────────────────────────────────────────────────────
+  /**
+   * Gather file tree and key file contents from the working directory.
+   * @private
+   */
+  async _gatherCodebaseContext() {
+    let fileTree = "";
+    try {
+      fileTree = await this._getFileTreeGit();
+    } catch {
+      logger_default.debug("git ls-files failed, falling back to readdir");
+      fileTree = await this._getFileTreeReaddir(this.workingDirectory, 0, 3);
+    }
+    const lines = fileTree.split("\n");
+    if (lines.length > MAX_FILE_TREE_LINES) {
+      const truncated = lines.slice(0, MAX_FILE_TREE_LINES).join("\n");
+      fileTree = `${truncated}
+... (${lines.length - MAX_FILE_TREE_LINES} more files)`;
+    }
+    let npmPackages = [];
+    try {
+      const pkgPath = (0, import_node_path.join)(this.workingDirectory, "package.json");
+      const pkg = JSON.parse(await (0, import_promises2.readFile)(pkgPath, "utf-8"));
+      npmPackages = [
+        ...Object.keys(pkg.dependencies || {}),
+        ...Object.keys(pkg.devDependencies || {})
+      ];
+    } catch {
+    }
+    this._codebaseContext = { fileTree, npmPackages };
+    this._contextGathered = true;
+  }
+  /**
+   * Get file tree using git ls-files.
+   * @private
+   * @returns {Promise<string>}
+   */
+  async _getFileTreeGit() {
+    return new Promise((resolve, reject) => {
+      (0, import_node_child_process.execFile)("git", ["ls-files"], {
+        cwd: this.workingDirectory,
+        timeout: 5e3,
+        maxBuffer: 5 * 1024 * 1024
+      }, (err, stdout) => {
+        if (err) return reject(err);
+        resolve(stdout.trim());
+      });
+    });
+  }
+  /**
+   * Fallback file tree via recursive readdir.
+   * @private
+   * @param {string} dir
+   * @param {number} depth
+   * @param {number} maxDepth
+   * @returns {Promise<string>}
+   */
+  async _getFileTreeReaddir(dir, depth, maxDepth) {
+    if (depth >= maxDepth) return "";
+    const entries = [];
+    try {
+      const items = await (0, import_promises2.readdir)(dir, { withFileTypes: true });
+      for (const item of items) {
+        if (IGNORE_DIRS.has(item.name)) continue;
+        if (item.name.startsWith(".") && depth === 0 && item.isDirectory()) continue;
+        const relativePath = (0, import_node_path.join)(dir, item.name).replace(this.workingDirectory + "/", "");
+        if (item.isFile()) {
+          entries.push(relativePath);
+        } else if (item.isDirectory()) {
+          entries.push(relativePath + "/");
+          const subEntries = await this._getFileTreeReaddir((0, import_node_path.join)(dir, item.name), depth + 1, maxDepth);
+          if (subEntries) entries.push(subEntries);
+        }
+      }
+    } catch {
+    }
+    return entries.join("\n");
+  }
+  /**
+   * Build the full system prompt with codebase context.
+   * @private
+   * @returns {string}
+   */
+  _buildSystemPrompt() {
+    const { fileTree, npmPackages } = this._codebaseContext || { fileTree: "", npmPackages: [] };
+    let prompt = `You are a coding agent working in ${this.workingDirectory}.
+
+## Instructions
+- Use the execute_code tool to accomplish tasks by writing JavaScript code
+- Your code runs in a Node.js child process with access to all built-in modules
+- IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
+  - import fs from 'fs';
+  - import path from 'path';
+  - import { execSync } from 'child_process';
+- Use console.log() to produce output \u2014 that's how results are returned to you
+- Write efficient scripts that do multiple things per execution when possible
+- For parallel async operations, use Promise.all():
+  const [a, b] = await Promise.all([fetchA(), fetchB()]);
+- Read files with fs.readFileSync() when you need to understand their contents
+- Handle errors in your scripts with try/catch so you get useful error messages
+- Top-level await is supported
+- The working directory is: ${this.workingDirectory}`;
+    if (fileTree) {
+      prompt += `
+
+## File Tree
+\`\`\`
+${fileTree}
+\`\`\``;
+    }
+    if (npmPackages.length > 0) {
+      prompt += `
+
+## Available Packages
+These npm packages are installed and can be imported: ${npmPackages.join(", ")}`;
+    }
+    if (this._userSystemPrompt) {
+      prompt += `
+
+## Additional Instructions
+${this._userSystemPrompt}`;
+    }
+    return prompt;
+  }
+  // ── Code Execution ───────────────────────────────────────────────────────
+  /**
+   * Execute a JavaScript code string in a child process.
+   * @private
+   * @param {string} code - JavaScript code to execute
+   * @returns {Promise<{stdout: string, stderr: string, exitCode: number, denied?: boolean}>}
+   */
+  async _executeCode(code) {
+    if (this._stopped) {
+      return { stdout: "", stderr: "Agent was stopped", exitCode: -1 };
+    }
+    if (this.onBeforeExecution) {
+      try {
+        const allowed = await this.onBeforeExecution(code);
+        if (allowed === false) {
+          return { stdout: "", stderr: "Execution denied by onBeforeExecution callback", exitCode: -1, denied: true };
+        }
+      } catch (e) {
+        logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+      }
+    }
+    const tempFile = (0, import_node_path.join)(this.workingDirectory, `.code-agent-tmp-${(0, import_node_crypto.randomUUID)()}.mjs`);
+    try {
+      await (0, import_promises2.writeFile)(tempFile, code, "utf-8");
+      const result = await new Promise((resolve) => {
+        const child = (0, import_node_child_process.execFile)("node", [tempFile], {
+          cwd: this.workingDirectory,
+          timeout: this.timeout,
+          env: process.env,
+          maxBuffer: 10 * 1024 * 1024
+        }, (err, stdout, stderr) => {
+          this._activeProcess = null;
+          if (err) {
+            resolve({
+              stdout: err.stdout || stdout || "",
+              stderr: (err.stderr || stderr || "") + (err.killed ? "\n[EXECUTION TIMED OUT]" : ""),
+              exitCode: err.code || 1
+            });
+          } else {
+            resolve({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
+          }
+        });
+        this._activeProcess = child;
+      });
+      const totalLen = result.stdout.length + result.stderr.length;
+      if (totalLen > MAX_OUTPUT_CHARS) {
+        const half = Math.floor(MAX_OUTPUT_CHARS / 2);
+        if (result.stdout.length > half) {
+          result.stdout = result.stdout.slice(0, half) + "\n...[OUTPUT TRUNCATED]";
+        }
+        if (result.stderr.length > half) {
+          result.stderr = result.stderr.slice(0, half) + "\n...[STDERR TRUNCATED]";
+        }
+      }
+      if (this.onCodeExecution) {
+        try {
+          this.onCodeExecution(code, result);
+        } catch (e) {
+          logger_default.warn(`onCodeExecution callback error: ${e.message}`);
+        }
+      }
+      return result;
+    } finally {
+      try {
+        await (0, import_promises2.unlink)(tempFile);
+      } catch {
+      }
+    }
+  }
+  /**
+   * Format execution result as a string for the model.
+   * @private
+   * @param {{stdout: string, stderr: string, exitCode: number}} result
+   * @returns {string}
+   */
+  _formatOutput(result) {
+    let output = "";
+    if (result.stdout) output += result.stdout;
+    if (result.stderr) output += (output ? "\n" : "") + `[STDERR]: ${result.stderr}`;
+    if (result.exitCode !== 0) output += (output ? "\n" : "") + `[EXIT CODE]: ${result.exitCode}`;
+    return output || "(no output)";
+  }
+  // ── Non-Streaming Chat ───────────────────────────────────────────────────
+  /**
+   * Send a message and get a complete response (non-streaming).
+   * Automatically handles the code execution loop.
+   *
+   * @param {string} message - The user's message
+   * @param {Object} [opts={}] - Per-message options
+   * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @returns {Promise<CodeAgentResponse>} Response with text, codeExecutions, and usage
+   */
+  async chat(message, opts = {}) {
+    if (!this.chatSession) await this.init();
+    this._stopped = false;
+    const codeExecutions = [];
+    let response = await this.chatSession.sendMessage({ message });
+    for (let round = 0; round < this.maxRounds; round++) {
+      if (this._stopped) break;
+      const functionCalls = response.functionCalls;
+      if (!functionCalls || functionCalls.length === 0) break;
+      const results = [];
+      for (const call of functionCalls) {
+        if (this._stopped) break;
+        const code = call.args?.code || "";
+        const result = await this._executeCode(code);
+        const execution = {
+          code,
+          output: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode
+        };
+        codeExecutions.push(execution);
+        this._allExecutions.push(execution);
+        results.push({
+          id: call.id,
+          name: call.name,
+          result: this._formatOutput(result)
+        });
+      }
+      if (this._stopped) break;
+      response = await this.chatSession.sendMessage({
+        message: results.map((r) => ({
+          functionResponse: {
+            id: r.id,
+            name: r.name,
+            response: { output: r.result }
+          }
+        }))
+      });
+    }
+    this._captureMetadata(response);
+    this._cumulativeUsage = {
+      promptTokens: this.lastResponseMetadata.promptTokens,
+      responseTokens: this.lastResponseMetadata.responseTokens,
+      totalTokens: this.lastResponseMetadata.totalTokens,
+      attempts: 1
+    };
+    return {
+      text: response.text || "",
+      codeExecutions,
+      usage: this.getLastUsage()
+    };
+  }
+  // ── Streaming ────────────────────────────────────────────────────────────
+  /**
+   * Send a message and stream the response as events.
+   * Automatically handles the code execution loop between streamed rounds.
+   *
+   * Event types:
+   * - `text` — A chunk of the agent's text response
+   * - `code` — The agent is about to execute code
+   * - `output` — Code finished executing
+   * - `done` — The agent finished
+   *
+   * @param {string} message - The user's message
+   * @param {Object} [opts={}] - Per-message options
+   * @yields {CodeAgentStreamEvent}
+   */
+  async *stream(message, opts = {}) {
+    if (!this.chatSession) await this.init();
+    this._stopped = false;
+    const codeExecutions = [];
+    let fullText = "";
+    let streamResponse = await this.chatSession.sendMessageStream({ message });
+    for (let round = 0; round < this.maxRounds; round++) {
+      if (this._stopped) break;
+      const functionCalls = [];
+      for await (const chunk of streamResponse) {
+        if (chunk.functionCalls) {
+          functionCalls.push(...chunk.functionCalls);
+        } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+          const text = chunk.candidates[0].content.parts[0].text;
+          fullText += text;
+          yield { type: "text", text };
+        }
+      }
+      if (functionCalls.length === 0) {
+        yield {
+          type: "done",
+          fullText,
+          codeExecutions,
+          usage: this.getLastUsage()
+        };
+        return;
+      }
+      const results = [];
+      for (const call of functionCalls) {
+        if (this._stopped) break;
+        const code = call.args?.code || "";
+        yield { type: "code", code };
+        const result = await this._executeCode(code);
+        const execution = {
+          code,
+          output: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode
+        };
+        codeExecutions.push(execution);
+        this._allExecutions.push(execution);
+        yield {
+          type: "output",
+          code,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode
+        };
+        results.push({
+          id: call.id,
+          name: call.name,
+          result: this._formatOutput(result)
+        });
+      }
+      if (this._stopped) break;
+      streamResponse = await this.chatSession.sendMessageStream({
+        message: results.map((r) => ({
+          functionResponse: {
+            id: r.id,
+            name: r.name,
+            response: { output: r.result }
+          }
+        }))
+      });
+    }
+    yield {
+      type: "done",
+      fullText,
+      codeExecutions,
+      usage: this.getLastUsage(),
+      warning: this._stopped ? "Agent was stopped" : "Max tool rounds reached"
+    };
+  }
+  // ── Dump ─────────────────────────────────────────────────────────────────
+  /**
+   * Returns all code scripts the agent has written across all chat/stream calls.
+   * @returns {Array<{fileName: string, script: string}>}
+   */
+  dump() {
+    return this._allExecutions.map((exec, i) => ({
+      fileName: `script-${i + 1}.mjs`,
+      script: exec.code
+    }));
+  }
+  // ── Stop ─────────────────────────────────────────────────────────────────
+  /**
+   * Stop the agent before the next code execution.
+   * If a child process is currently running, it will be killed.
+   */
+  stop() {
+    this._stopped = true;
+    if (this._activeProcess) {
+      try {
+        this._activeProcess.kill("SIGTERM");
+      } catch {
+      }
+    }
+    logger_default.info("CodeAgent stopped");
+  }
+};
+var code_agent_default = CodeAgent;
+
+// index.js
+var import_genai2 = require("@google/genai");
+var index_default = { Transformer: transformer_default, Chat: chat_default, Message: message_default, ToolAgent: tool_agent_default, CodeAgent: code_agent_default };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  AIAgent,
+  BaseGemini,
+  Chat,
+  CodeAgent,
   HarmBlockThreshold,
   HarmCategory,
+  Message,
   ThinkingLevel,
+  ToolAgent,
+  Transformer,
   attemptJSONRecovery,
+  extractJSON,
   log
 });

@@ -30,11 +30,17 @@
 		"build",
 		"coverage",
 		"tests/**/*",
-		"**/*.test.js",
-		"node_modules/ak-tools/**/*"
+		"**/*.test.js"
 	],
 	"include": [
 		"index.js",
+		"base.js",
+		"transformer.js",
+		"chat.js",
+		"message.js",
+		"tool-agent.js",
+		"code-agent.js",
+		"json-helpers.js",
 		"logger.js",
 		"types.d.ts"
 	]

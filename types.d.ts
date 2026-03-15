@@ -1,225 +1,336 @@
-import type { GoogleGenAI, ThinkingLevel, HarmCategory, HarmBlockThreshold } from '@google/genai';
+import type { ThinkingLevel, HarmCategory, HarmBlockThreshold } from '@google/genai';
 
 export { ThinkingLevel, HarmCategory, HarmBlockThreshold };
 
+// ── Shared Types ─────────────────────────────────────────────────────────────
+
 export interface ThinkingConfig {
-  /** Indicates whether to include thoughts in the response. If true, thoughts are returned only if the model supports thought and thoughts are available. */
   includeThoughts?: boolean;
-  /** Indicates the thinking budget in tokens. 0 is DISABLED. -1 is AUTOMATIC. The default values and allowed ranges are model dependent. */
+  /** Token budget for thinking. 0 = disabled, -1 = automatic. */
   thinkingBudget?: number;
-  /** Optional. The number of thoughts tokens that the model should generate. */
   thinkingLevel?: ThinkingLevel;
 }
 
 export interface SafetySetting {
-  category: HarmCategory; // The harm category
-  threshold: HarmBlockThreshold; // The blocking threshold
+  category: HarmCategory;
+  threshold: HarmBlockThreshold;
 }
 
 export interface ChatConfig {
-  responseMimeType?: string; // MIME type for responses
-  temperature?: number; // Controls randomness (0.0 to 1.0)
-  topP?: number; // Controls diversity via nucleus sampling
-  topK?: number; // Controls diversity by limiting top-k tokens
-  maxOutputTokens?: number; // Maximum number of tokens that can be generated in the response
-  systemInstruction?: string; // System instruction for the model
-  safetySettings?: SafetySetting[]; // Safety settings array
-  responseSchema?: Object; // Schema for validating model responses
-  thinkingConfig?: ThinkingConfig; // Thinking features configuration
-  labels?: Record<string, string>; // Labels for billing segmentation
-  tools?: any[]; // Tools configuration (e.g., grounding)
-  toolConfig?: any; // Tool configuration (e.g., function calling mode)
-  [key: string]: any; // Additional properties for flexibility
+  responseMimeType?: string;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxOutputTokens?: number;
+  systemInstruction?: string;
+  safetySettings?: SafetySetting[];
+  responseSchema?: Object;
+  thinkingConfig?: ThinkingConfig;
+  labels?: Record<string, string>;
+  tools?: any[];
+  toolConfig?: any;
+  [key: string]: any;
 }
 
-/** Metadata from the last API response, useful for debugging and cost tracking */
 export interface ResponseMetadata {
-  modelVersion: string | null; // The actual model version that responded
-  requestedModel: string; // The model that was requested
-  promptTokens: number; // Number of tokens in the prompt
-  responseTokens: number; // Number of tokens in the response
-  totalTokens: number; // Total tokens used
-  timestamp: number; // Timestamp of when the response was received
+  modelVersion: string | null;
+  requestedModel: string;
+  promptTokens: number;
+  responseTokens: number;
+  totalTokens: number;
+  timestamp: number;
 }
 
-/** Structured usage data returned by getLastUsage() for billing verification */
 export interface UsageData {
-  promptTokens: number;       // CUMULATIVE input tokens across all retry attempts
-  responseTokens: number;     // CUMULATIVE output tokens across all retry attempts
-  totalTokens: number;        // CUMULATIVE total tokens across all retry attempts
-  attempts: number;           // Number of attempts (1 = first try success, 2+ = retries needed)
-  modelVersion: string | null; // Actual model that responded (e.g., 'gemini-2.5-flash-001')
-  requestedModel: string;     // Model you requested (e.g., 'gemini-2.5-flash')
-  timestamp: number;          // When response was received
+  /** CUMULATIVE input tokens across all retry attempts */
+  promptTokens: number;
+  /** CUMULATIVE output tokens across all retry attempts */
+  responseTokens: number;
+  /** CUMULATIVE total tokens across all retry attempts */
+  totalTokens: number;
+  /** Number of attempts (1 = first try success, 2+ = retries needed) */
+  attempts: number;
+  /** Actual model that responded (e.g., 'gemini-2.5-flash-001') */
+  modelVersion: string | null;
+  /** Model you requested (e.g., 'gemini-2.5-flash') */
+  requestedModel: string;
+  timestamp: number;
 }
 
-/** Options for per-message configuration */
-export interface MessageOptions {
-  labels?: Record<string, string>; // Per-message billing labels
-  stateless?: boolean; // If true, send message without affecting chat history
-  maxRetries?: number; // Override max retries for this message
-  retryDelay?: number; // Override retry delay for this message
-  enableGrounding?: boolean; // Override grounding setting for this message
-  groundingConfig?: Record<string, any>; // Override grounding config for this message
+export interface TransformationExample {
+  CONTEXT?: Record<string, unknown> | string;
+  PROMPT?: Record<string, unknown>;
+  ANSWER?: Record<string, unknown>;
+  INPUT?: Record<string, unknown>;
+  OUTPUT?: Record<string, unknown>;
+  SYSTEM?: string;
+  EXPLANATION?: string;
+  [key: string]: any;
 }
 
-export interface AITransformerContext {
+export interface GoogleAuthOptions {
+  keyFilename?: string;
+  keyFile?: string;
+  credentials?: { client_email?: string; private_key?: string; [key: string]: any };
+  scopes?: string | string[];
+  projectId?: string;
+  universeDomain?: string;
+}
+
+export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<unknown>;
+export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
+
+// ── Constructor Options ──────────────────────────────────────────────────────
+
+export interface BaseGeminiOptions {
+  /** Gemini model to use (default: 'gemini-2.5-flash') */
   modelName?: string;
-  systemInstructions?: string;
-  chatConfig?: ChatConfig;
-  genAI?: any;
-  chat?: any;
-  examplesFile?: string | null;
-  exampleData?: TransformationExample[] | null;
+  /** System prompt for the model */
+  systemPrompt?: string | null | false;
+  /** Chat session configuration overrides */
+  chatConfig?: Partial<ChatConfig>;
+  /** Thinking features configuration */
+  thinkingConfig?: ThinkingConfig | null;
+  /** Maximum output tokens (default: 50000, null removes limit) */
+  maxOutputTokens?: number | null;
+  /** Log level (default: based on NODE_ENV) */
+  logLevel?: LogLevel;
+
+  // Authentication
+  /** API key for Gemini API */
+  apiKey?: string;
+  /** Use Vertex AI instead of Gemini API */
+  vertexai?: boolean;
+  /** Google Cloud project ID (required for Vertex AI) */
+  project?: string;
+  /** Google Cloud location/region */
+  location?: string;
+  /** Authentication options for Vertex AI */
+  googleAuthOptions?: GoogleAuthOptions;
+
+  /** Billing labels for cost segmentation (Vertex AI only) */
+  labels?: Record<string, string>;
+}
+
+export interface TransformerOptions extends BaseGeminiOptions {
+  /** Path to JSON file containing transformation examples */
+  examplesFile?: string;
+  /** Inline examples to seed the transformer */
+  exampleData?: TransformationExample[];
+  /** Key for source/input data in examples (default: 'PROMPT') */
+  sourceKey?: string;
+  /** Alias for sourceKey */
+  promptKey?: string;
+  /** Key for target/output data in examples (default: 'ANSWER') */
+  targetKey?: string;
+  /** Alias for targetKey */
+  answerKey?: string;
+  /** Key for context data in examples (default: 'CONTEXT') */
+  contextKey?: string;
+  /** Key for explanation data in examples (default: 'EXPLANATION') */
+  explanationKey?: string;
+  /** Key for system prompt overrides in examples (default: 'SYSTEM') */
+  systemPromptKey?: string;
+  /** Maximum retry attempts for validation failures (default: 3) */
+  maxRetries?: number;
+  /** Initial retry delay in milliseconds (default: 1000) */
+  retryDelay?: number;
+  /** Schema for validating model responses */
+  responseSchema?: Object;
+  /** If true, only JSON responses are allowed (default: true) */
+  onlyJSON?: boolean;
+  /** Global async validator function for response validation */
+  asyncValidator?: AsyncValidatorFunction;
+  /** Enable Google Search grounding (WARNING: costs $35/1k queries) */
+  enableGrounding?: boolean;
+  /** Additional grounding configuration */
+  groundingConfig?: Record<string, any>;
+}
+
+export interface ChatOptions extends BaseGeminiOptions {
+  // Chat uses base options only — no additional fields needed
+}
+
+export interface MessageOptions extends BaseGeminiOptions {
+  /** Schema for structured output validation */
+  responseSchema?: Object;
+  /** MIME type for responses (e.g., 'application/json' for structured output) */
+  responseMimeType?: string;
+}
+
+/** Tool declaration in @google/genai FunctionDeclaration format */
+export interface ToolDeclaration {
+  name: string;
+  description: string;
+  parametersJsonSchema: {
+    type: string;
+    properties: Record<string, any>;
+    required?: string[];
+    [key: string]: any;
+  };
+}
+
+export interface ToolAgentOptions extends BaseGeminiOptions {
+  /** Tool declarations for the model */
+  tools?: ToolDeclaration[];
+  /** Function to execute tool calls: (toolName, args) => result */
+  toolExecutor?: (toolName: string, args: Record<string, any>) => Promise<any>;
+  /** Max tool-use loop iterations (default: 10) */
+  maxToolRounds?: number;
+  /** Callback fired when a tool is called */
+  onToolCall?: (toolName: string, args: Record<string, any>) => void;
+  /** Async callback before tool execution; return false to deny */
+  onBeforeExecution?: (toolName: string, args: Record<string, any>) => Promise<boolean>;
+}
+
+export interface CodeAgentOptions extends BaseGeminiOptions {
+  /** Working directory for code execution (default: process.cwd()) */
+  workingDirectory?: string;
+  /** Max code execution loop iterations (default: 10) */
+  maxRounds?: number;
+  /** Per-execution timeout in milliseconds (default: 30000) */
+  timeout?: number;
+  /** Async callback before code execution; return false to deny */
+  onBeforeExecution?: (code: string) => Promise<boolean>;
+  /** Notification callback after code execution */
+  onCodeExecution?: (code: string, output: { stdout: string; stderr: string; exitCode: number }) => void;
+}
+
+export interface CodeExecution {
+  /** The JavaScript code that was executed */
+  code: string;
+  /** stdout from the execution */
+  output: string;
+  /** stderr from the execution */
+  stderr: string;
+  /** Process exit code (0 = success) */
+  exitCode: number;
+}
+
+export interface CodeAgentResponse {
+  /** The agent's final text response */
+  text: string;
+  /** All code executions during this interaction */
+  codeExecutions: CodeExecution[];
+  /** Token usage data */
+  usage: UsageData | null;
+}
+
+export interface CodeAgentStreamEvent {
+  type: 'text' | 'code' | 'output' | 'done';
+  /** For 'text' events: the text chunk */
+  text?: string;
+  /** For 'code' events: the code about to be executed */
+  code?: string;
+  /** For 'output' events: stdout from execution */
+  stdout?: string;
+  /** For 'output' events: stderr from execution */
+  stderr?: string;
+  /** For 'output' events: process exit code */
+  exitCode?: number;
+  /** For 'done' events: complete accumulated text */
+  fullText?: string;
+  /** For 'done' events: all code executions */
+  codeExecutions?: CodeExecution[];
+  /** For 'done' events: token usage */
+  usage?: UsageData | null;
+  /** For 'done' events: e.g. "Max tool rounds reached" or "Agent was stopped" */
+  warning?: string;
+}
+
+// ── Per-Message Options ──────────────────────────────────────────────────────
+
+export interface SendOptions {
+  /** Per-message billing labels */
+  labels?: Record<string, string>;
+  /** Send without affecting chat history (Transformer only) */
+  stateless?: boolean;
+  /** Override max retries for this message */
+  maxRetries?: number;
+  /** Override retry delay for this message */
+  retryDelay?: number;
+  /** Override grounding setting for this message */
+  enableGrounding?: boolean;
+  /** Override grounding config for this message */
+  groundingConfig?: Record<string, any>;
+}
+
+// ── Response Types ───────────────────────────────────────────────────────────
+
+export interface ChatResponse {
+  /** The model's text response */
+  text: string;
+  /** Token usage data */
+  usage: UsageData | null;
+}
+
+export interface MessageResponse {
+  /** The model's text response */
+  text: string;
+  /** Parsed structured data (when responseSchema or responseMimeType is set) */
+  data?: any;
+  /** Token usage data */
+  usage: UsageData | null;
+}
+
+export interface AgentResponse {
+  /** The agent's final text response */
+  text: string;
+  /** All tool calls made during this interaction */
+  toolCalls: Array<{ name: string; args: Record<string, any>; result: any }>;
+  /** Token usage data */
+  usage: UsageData | null;
+}
+
+export interface AgentStreamEvent {
+  type: 'text' | 'tool_call' | 'tool_result' | 'done';
+  /** For 'text' events: the text chunk */
+  text?: string;
+  /** For 'tool_call' and 'tool_result' events */
+  toolName?: string;
+  /** For 'tool_call' events: the tool arguments */
+  args?: Record<string, any>;
+  /** For 'tool_result' events: the tool result */
+  result?: any;
+  /** For 'done' events: the complete accumulated text */
+  fullText?: string;
+  /** For 'done' events: token usage */
+  usage?: UsageData | null;
+  /** For 'done' events: e.g. "Max tool rounds reached" */
+  warning?: string;
+}
+
+// ── Seed Options ─────────────────────────────────────────────────────────────
+
+export interface SeedOptions {
   promptKey?: string;
   answerKey?: string;
   contextKey?: string;
   explanationKey?: string;
-  systemInstructionsKey?: string;
-  maxRetries?: number;
-  retryDelay?: number;
-  init?: (force?: boolean) => Promise<void>; // Initialization function
-  seed?: () => Promise<void>; // Function to seed the transformer with examples
-  message?: (payload: Record<string, unknown>, opts?: MessageOptions, validatorFn?: AsyncValidatorFunction | null) => Promise<Record<string, unknown>>; // Function to send messages to the model
-  rebuild?: (lastPayload: Record<string, unknown>, serverError: string) => Promise<Record<string, unknown>>; // Function to rebuild the transformer
-  rawMessage?: (payload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }) => Promise<Record<string, unknown>>; // Function to send raw messages to the model
-  genAIClient?: GoogleGenAI; // Google GenAI client instance
-  onlyJSON?: boolean; // If true, only JSON responses are allowed
-  enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
-  groundingConfig?: Record<string, any>; // Additional grounding configuration options
-  labels?: Record<string, string>; // Custom labels for billing segmentation (keys: 1-63 chars lowercase, values: max 63 chars)
-  vertexai?: boolean; // Whether using Vertex AI (true) or Gemini API (false)
-  estimate?: (nextPayload: Record<string, unknown> | string) => Promise<{ inputTokens: number }>;
-  getLastUsage?: () => UsageData | null;
-  lastResponseMetadata?: ResponseMetadata | null; // Metadata from the last API response
-  exampleCount?: number; // Number of example history items from seed()
-  clearConversation?: () => Promise<void>; // Clears conversation history while preserving examples
-  _cumulativeUsage?: { promptTokens: number; responseTokens: number; totalTokens: number; attempts: number }; // Internal cumulative tracking
+  systemPromptKey?: string;
 }
 
-export interface TransformationExample {
-  CONTEXT?: Record<string, unknown> | string; // optional context for the transformation
-  PROMPT?: Record<string, unknown>; // what the user provides as input
-  ANSWER?: Record<string, unknown>; // what the model should return as output
-  INPUT?: Record<string, unknown>; // alias for PROMPT
-  OUTPUT?: Record<string, unknown>; // alias for ANSWER
-  SYSTEM?: string; // system instructions for this example
-  EXPLANATION?: string; // explanation for this example
-  [key: string]: any; // allow additional properties for flexible key mapping
-}
+// ── Class Declarations ───────────────────────────────────────────────────────
 
-export interface ExampleFileContent {
-  examples: TransformationExample[];
-}
+export declare class BaseGemini {
+  constructor(options?: BaseGeminiOptions);
 
-// Google Auth options for Vertex AI authentication
-// See: https://github.com/googleapis/google-auth-library-nodejs/blob/main/src/auth/googleauth.ts
-export interface GoogleAuthOptions {
-  keyFilename?: string; // Path to a .json, .pem, or .p12 key file
-  keyFile?: string; // Alias for keyFilename
-  credentials?: { client_email?: string; private_key?: string; [key: string]: any }; // Object containing client_email and private_key
-  scopes?: string | string[]; // Required scopes for the API request
-  projectId?: string; // Your project ID (alias for project)
-  universeDomain?: string; // The default service domain for a Cloud universe
-}
-
-export interface AITransformerOptions {
-	// ? https://ai.google.dev/gemini-api/docs/models
-  modelName?: string; // The Gemini model to use
-  systemInstructions?: string | null | false; // Custom system instructions for the model (null/false = no instructions)
-  chatConfig?: ChatConfig; // Configuration object for the chat session
-  thinkingConfig?: ThinkingConfig; // Thinking features configuration (defaults to thinkingBudget: 0, thinkingLevel: "MINIMAL")
-  maxOutputTokens?: number; // Maximum number of tokens that can be generated in the response (defaults to 50000)
-  examplesFile?: string; // Path to JSON file containing transformation examples
-  exampleData?: TransformationExample[]; // Inline examples to seed the transformer
-  sourceKey?: string; // Key name for source data in examples (alias for promptKey)
-  targetKey?: string; // Key name for target data in examples (alias for answerKey)
-  promptKey?: string; // Key for the prompt in examples
-  answerKey?: string; // Key for the answer in examples
-  contextKey?: string; // Key name for context data in examples
-  explanationKey?: string; // Key name for explanation data in examples
-  systemInstructionsKey?: string; // Key for system instructions in examples
-  maxRetries?: number; // Maximum retry attempts for auto-retry functionality
-  retryDelay?: number; // Initial retry delay in milliseconds
-  // ? https://ai.google.dev/gemini-api/docs/structured-output
-  responseSchema?: Object; // Schema for validating model responses
-  apiKey?: string; // API key for Google GenAI (Gemini API)
-  onlyJSON?: boolean; // If true, only JSON responses are allowed
-  asyncValidator?: AsyncValidatorFunction; // Optional async validator function for response validation
-  logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none'; // Log level for the logger (defaults to 'info', 'none' disables logging)
-  enableGrounding?: boolean; // Enable Google Search grounding (default: false, WARNING: costs $35/1k queries)
-  groundingConfig?: Record<string, any>; // Additional grounding configuration options
-  labels?: Record<string, string>; // Custom labels for billing segmentation
-
-  // Vertex AI Authentication Options
-  // Use these instead of apiKey for Vertex AI with service account authentication
-  vertexai?: boolean; // Set to true to use Vertex AI instead of Gemini API
-  project?: string; // Google Cloud project ID (required for Vertex AI)
-  location?: string; // Google Cloud location/region (e.g., 'us-central1'). If not set, defaults to 'global' endpoint
-  googleAuthOptions?: GoogleAuthOptions; // Authentication options for Vertex AI (keyFilename, credentials, etc.)
-}
-
-// Async validator function type
-export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<unknown>;
-
-
-export declare class AITransformer {
-  // Constructor
-  constructor(options?: AITransformerOptions);
-
-  // Properties
   modelName: string;
-  promptKey: string;
-  answerKey: string;
-  contextKey: string;
-  explanationKey: string;
-  systemInstructionKey: string;
-  maxRetries: number;
-  retryDelay: number;
-  systemInstructions: string | null | false;
+  systemPrompt: string | null;
   chatConfig: ChatConfig;
-  apiKey: string;
-  onlyJSON: boolean;
-  asyncValidator: AsyncValidatorFunction | null;
   genAIClient: any;
-  chat: any;
-  logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
-  enableGrounding: boolean;
-  groundingConfig: Record<string, any>;
+  chatSession: any;
+  lastResponseMetadata: ResponseMetadata | null;
+  exampleCount: number;
   labels: Record<string, string>;
   vertexai: boolean;
-  /** Metadata from the last API response (model version, token counts, etc.) */
-  lastResponseMetadata: ResponseMetadata | null;
-  /** Number of history items that are seeded examples (used by clearConversation) */
-  exampleCount: number;
 
-  // Methods
   init(force?: boolean): Promise<void>;
-  seed(examples?: TransformationExample[]): Promise<any>;
-  /**
-   * Send a message to the model.
-   * @param payload - The payload to transform
-   * @param opts - Options including { stateless: true } to send without affecting history
-   * @param validatorFn - Optional validator function
-   */
-  message(payload: Record<string, unknown>, opts?: MessageOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
-  rawMessage(sourcePayload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }): Promise<Record<string, unknown> | any>;
-  transformWithValidation(sourcePayload: Record<string, unknown>, options?: MessageOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
-  messageAndValidate(sourcePayload: Record<string, unknown>, options?: MessageOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
-  rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
-  reset(): Promise<void>;
-  getHistory(): Array<any>;
-  /**
-   * Estimate INPUT tokens only for a payload before sending.
-   * NOTE: Output tokens cannot be predicted before the API call.
-   * Use getLastUsage() after message() to see actual consumption.
-   */
+  seed(examples?: TransformationExample[], opts?: SeedOptions): Promise<any[]>;
+  getHistory(curated?: boolean): any[];
+  clearHistory(): Promise<void>;
+  getLastUsage(): UsageData | null;
   estimate(nextPayload: Record<string, unknown> | string): Promise<{ inputTokens: number }>;
-  updateSystemInstructions(newInstructions: string): Promise<void>;
-  /**
-   * Estimates the INPUT cost of sending a payload.
-   * NOTE: Output cost depends on response length and cannot be predicted.
-   */
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
     inputTokens: number;
     model: string;
@@ -227,76 +338,86 @@ export declare class AITransformer {
     estimatedInputCost: number;
     note: string;
   }>;
-  /** Clears conversation history while preserving seeded examples */
-  clearConversation(): Promise<void>;
-  /**
-   * Returns structured usage data from the last API response for billing verification.
-   * Returns null if no API call has been made yet.
-   */
-  getLastUsage(): UsageData | null;
 }
 
-// --- AIAgent Types ---
+export declare class Transformer extends BaseGemini {
+  constructor(options?: TransformerOptions);
 
-export interface AIAgentOptions {
-  // Authentication (same as AITransformer)
-  apiKey?: string;
-  vertexai?: boolean;
-  project?: string;
-  location?: string;
-  googleAuthOptions?: GoogleAuthOptions;
+  promptKey: string;
+  answerKey: string;
+  contextKey: string;
+  explanationKey: string;
+  onlyJSON: boolean;
+  asyncValidator: AsyncValidatorFunction | null;
+  maxRetries: number;
+  retryDelay: number;
+  enableGrounding: boolean;
 
-  // Agent configuration
-  systemPrompt?: string; // System prompt for the agent
-  modelName?: string; // Gemini model to use (default: 'gemini-2.5-flash')
-  maxToolRounds?: number; // Max tool-use loop iterations (default: 10)
-  httpTimeout?: number; // Timeout for HTTP tool requests in ms (default: 30000)
-  maxRetries?: number; // Retries on transient API errors (default: 3)
-  logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
-  labels?: Record<string, string>; // Billing labels (Vertex AI)
-  thinkingConfig?: ThinkingConfig;
-  chatConfig?: Partial<ChatConfig>;
-
-  // Callbacks
-  onToolCall?: (toolName: string, args: Record<string, any>) => void;
-  onMarkdown?: (filename: string, content: string) => void;
+  seed(examples?: TransformationExample[]): Promise<any[]>;
+  send(payload: Record<string, unknown> | string, opts?: SendOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
+  rawSend(payload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }): Promise<Record<string, unknown>>;
+  rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
+  reset(): Promise<void>;
+  updateSystemPrompt(newPrompt: string): Promise<void>;
 }
 
-export interface AgentResponse {
-  text: string; // The agent's final text response
-  toolCalls: Array<{ name: string; args: Record<string, any>; result: any }>; // All tool calls made
-  markdownFiles: Array<{ filename: string; content: string }>; // Generated markdown documents
-  usage: UsageData | null; // Token usage data
+export declare class Chat extends BaseGemini {
+  constructor(options?: ChatOptions);
+
+  send(message: string, opts?: { labels?: Record<string, string> }): Promise<ChatResponse>;
 }
 
-export interface AgentStreamEvent {
-  type: 'text' | 'tool_call' | 'tool_result' | 'markdown' | 'done';
-  text?: string; // For 'text' events: the text chunk
-  toolName?: string; // For 'tool_call' and 'tool_result' events
-  args?: Record<string, any>; // For 'tool_call' events: the tool arguments
-  result?: any; // For 'tool_result' events: the tool result
-  filename?: string; // For 'markdown' events: the suggested filename
-  content?: string; // For 'markdown' events: the markdown content
-  fullText?: string; // For 'done' events: the complete accumulated text
-  usage?: UsageData | null; // For 'done' events: token usage
-  markdownFiles?: Array<{ filename: string; content: string }>; // For 'done' events
-  warning?: string; // For 'done' events: e.g. "Max tool rounds reached"
+export declare class Message extends BaseGemini {
+  constructor(options?: MessageOptions);
+
+  init(force?: boolean): Promise<void>;
+  send(payload: Record<string, unknown> | string, opts?: { labels?: Record<string, string> }): Promise<MessageResponse>;
 }
 
-export declare class AIAgent {
-  constructor(options?: AIAgentOptions);
+export declare class ToolAgent extends BaseGemini {
+  constructor(options?: ToolAgentOptions);
 
-  modelName: string;
-  systemPrompt: string;
-  lastResponseMetadata: ResponseMetadata | null;
+  tools: ToolDeclaration[];
+  toolExecutor: ((toolName: string, args: Record<string, any>) => Promise<any>) | null;
+  maxToolRounds: number;
+  onToolCall: ((toolName: string, args: Record<string, any>) => void) | null;
+  onBeforeExecution: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null;
 
-  init(): Promise<void>;
-  chat(message: string): Promise<AgentResponse>;
-  stream(message: string): AsyncGenerator<AgentStreamEvent, void, unknown>;
-  clearHistory(): Promise<void>;
-  getHistory(curated?: boolean): any[];
-  getLastUsage(): UsageData | null;
+  chat(message: string, opts?: { labels?: Record<string, string> }): Promise<AgentResponse>;
+  stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<AgentStreamEvent, void, unknown>;
+  /** Stop the agent before the next tool execution round */
+  stop(): void;
 }
 
-// Default export
-export default AITransformer;
+export declare class CodeAgent extends BaseGemini {
+  constructor(options?: CodeAgentOptions);
+
+  workingDirectory: string;
+  maxRounds: number;
+  timeout: number;
+  onBeforeExecution: ((code: string) => Promise<boolean>) | null;
+  onCodeExecution: ((code: string, output: { stdout: string; stderr: string; exitCode: number }) => void) | null;
+
+  init(force?: boolean): Promise<void>;
+  chat(message: string, opts?: { labels?: Record<string, string> }): Promise<CodeAgentResponse>;
+  stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<CodeAgentStreamEvent, void, unknown>;
+  /** Returns all code scripts written across all chat/stream calls. */
+  dump(): Array<{ fileName: string; script: string }>;
+  /** Stop the agent before the next code execution. Kills any running child process. */
+  stop(): void;
+}
+
+// ── Module Exports ───────────────────────────────────────────────────────────
+
+export declare function extractJSON(text: string): any;
+export declare function attemptJSONRecovery(text: string, maxAttempts?: number): any | null;
+
+declare const _default: {
+  Transformer: typeof Transformer;
+  Chat: typeof Chat;
+  Message: typeof Message;
+  ToolAgent: typeof ToolAgent;
+  CodeAgent: typeof CodeAgent;
+};
+
+export default _default;
