@@ -1638,6 +1638,7 @@ ${this._userSystemPrompt}`;
           result.stderr = result.stderr.slice(0, half) + "\n...[STDERR TRUNCATED]";
         }
       }
+      this._allExecutions.push({ code, output: result.stdout, stderr: result.stderr, exitCode: result.exitCode });
       if (this.onCodeExecution) {
         try {
           this.onCodeExecution(code, result);
@@ -1690,14 +1691,12 @@ ${this._userSystemPrompt}`;
         if (this._stopped) break;
         const code = call.args?.code || "";
         const result = await this._executeCode(code);
-        const execution = {
+        codeExecutions.push({
           code,
           output: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode
-        };
-        codeExecutions.push(execution);
-        this._allExecutions.push(execution);
+        });
         results.push({
           id: call.id,
           name: call.name,
@@ -1776,14 +1775,12 @@ ${this._userSystemPrompt}`;
         const code = call.args?.code || "";
         yield { type: "code", code };
         const result = await this._executeCode(code);
-        const execution = {
+        codeExecutions.push({
           code,
           output: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode
-        };
-        codeExecutions.push(execution);
-        this._allExecutions.push(execution);
+        });
         yield {
           type: "output",
           code,
