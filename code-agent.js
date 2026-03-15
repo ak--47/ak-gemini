@@ -27,7 +27,7 @@ const MAX_FILE_TREE_LINES = 500;
 const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.next', 'build', '__pycache__']);
 
 /**
- * AI agent that writes and executes JavaScript code autonomously.
+ * AI agent that writes and executes JavaScript code autonomously. ... what could possibly go wrong, right?
  *
  * During init, gathers codebase context (file tree + key files) and injects it
  * into the system prompt. The model uses the `execute_code` tool to run scripts

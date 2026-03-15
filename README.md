@@ -136,7 +136,7 @@ for await (const event of agent.stream('Fetch the data')) {
 
 ### CodeAgent — Agent That Writes and Executes Code
 
-Instead of calling tools one by one, the model writes JavaScript that can do everything — read files, write files, run commands — in a single script. Inspired by the [code mode](https://blog.cloudflare.com/how-we-built-mcp-code-mode/) philosophy.
+Instead of calling tools one by one, the model writes JavaScript that can do everything — read files, write files, run commands — in a single script. Inspired by the [code mode](https://blog.cloudflare.com/code-mode/) philosophy.
 
 ```javascript
 const agent = new CodeAgent({
