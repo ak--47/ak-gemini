@@ -85,7 +85,7 @@ export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' |
 export interface BaseGeminiOptions {
   /** Gemini model to use (default: 'gemini-2.5-flash') */
   modelName?: string;
-  /** System prompt for the model */
+  /** System prompt for the model (null or false to disable) */
   systemPrompt?: string | null | false;
   /** Chat session configuration overrides */
   chatConfig?: Partial<ChatConfig>;
@@ -316,7 +316,7 @@ export declare class BaseGemini {
   constructor(options?: BaseGeminiOptions);
 
   modelName: string;
-  systemPrompt: string | null;
+  systemPrompt: string | null | false;
   chatConfig: ChatConfig;
   genAIClient: any;
   chatSession: any;
