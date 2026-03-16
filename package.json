@@ -13,9 +13,11 @@
 		"message.js",
 		"tool-agent.js",
 		"code-agent.js",
+		"rag-agent.js",
 		"json-helpers.js",
 		"types.d.ts",
-		"logger.js"
+		"logger.js",
+		"GUIDE.md"
 	],
 	"types": "types.d.ts",
 	"exports": {

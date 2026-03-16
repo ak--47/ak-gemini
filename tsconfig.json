@@ -42,6 +42,7 @@
 		"code-agent.js",
 		"json-helpers.js",
 		"logger.js",
-		"types.d.ts"
+		"types.d.ts",
+		"rag-agent.js"
 	]
 }
