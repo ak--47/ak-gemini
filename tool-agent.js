@@ -79,6 +79,7 @@ class ToolAgent extends BaseGemini {
 		this.maxToolRounds = options.maxToolRounds || 10;
 		this.onToolCall = options.onToolCall || null;
 		this.onBeforeExecution = options.onBeforeExecution || null;
+		this.writeDir = options.writeDir || null;
 		this._stopped = false;
 
 		// ── Apply tools to chat config ──

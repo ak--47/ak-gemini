@@ -35,6 +35,7 @@ __export(index_exports, {
   HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
   HarmCategory: () => import_genai2.HarmCategory,
   Message: () => message_default,
+  RagAgent: () => rag_agent_default,
   ThinkingLevel: () => import_genai2.ThinkingLevel,
   ToolAgent: () => tool_agent_default,
   Transformer: () => transformer_default,
@@ -1209,6 +1210,7 @@ var ToolAgent = class extends base_default {
     this.maxToolRounds = options.maxToolRounds || 10;
     this.onToolCall = options.onToolCall || null;
     this.onBeforeExecution = options.onBeforeExecution || null;
+    this.writeDir = options.writeDir || null;
     this._stopped = false;
     if (this.tools.length > 0) {
       this.chatConfig.tools = [{ functionDeclarations: this.tools }];
@@ -1420,6 +1422,11 @@ var CodeAgent = class extends base_default {
     this.timeout = options.timeout || 3e4;
     this.onBeforeExecution = options.onBeforeExecution || null;
     this.onCodeExecution = options.onCodeExecution || null;
+    this.importantFiles = options.importantFiles || [];
+    this.writeDir = options.writeDir || (0, import_node_path.join)(this.workingDirectory, "tmp");
+    this.keepArtifacts = options.keepArtifacts ?? false;
+    this.comments = options.comments ?? false;
+    this.maxRetries = options.maxRetries ?? 3;
     this._codebaseContext = null;
     this._contextGathered = false;
     this._stopped = false;
@@ -1436,6 +1443,10 @@ var CodeAgent = class extends base_default {
             code: {
               type: "string",
               description: "JavaScript code to execute. Use console.log() for output. You can import any built-in Node.js module."
+            },
+            purpose: {
+              type: "string",
+              description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs", "fetch-api-data"). Used for naming the script file.'
             }
           },
           required: ["code"]
@@ -1489,8 +1500,42 @@ var CodeAgent = class extends base_default {
       ];
     } catch {
     }
-    this._codebaseContext = { fileTree, npmPackages };
+    const importantFileContents = [];
+    if (this.importantFiles.length > 0) {
+      const fileTreeLines = fileTree.split("\n").map((l) => l.trim()).filter(Boolean);
+      for (const requested of this.importantFiles) {
+        const resolved = this._resolveImportantFile(requested, fileTreeLines);
+        if (!resolved) {
+          logger_default.warn(`importantFiles: could not locate "${requested}"`);
+          continue;
+        }
+        try {
+          const fullPath = (0, import_node_path.join)(this.workingDirectory, resolved);
+          const content = await (0, import_promises2.readFile)(fullPath, "utf-8");
+          importantFileContents.push({ path: resolved, content });
+        } catch (e) {
+          logger_default.warn(`importantFiles: could not read "${resolved}": ${e.message}`);
+        }
+      }
+    }
+    this._codebaseContext = { fileTree, npmPackages, importantFileContents };
     this._contextGathered = true;
+  }
+  /**
+   * Resolve an importantFiles entry against the file tree.
+   * Supports exact matches and partial (basename/suffix) matches.
+   * @private
+   * @param {string} filename
+   * @param {string[]} fileTreeLines
+   * @returns {string|null}
+   */
+  _resolveImportantFile(filename, fileTreeLines) {
+    const exact = fileTreeLines.find((line) => line === filename);
+    if (exact) return exact;
+    const partial = fileTreeLines.find(
+      (line) => line.endsWith("/" + filename) || line.endsWith(import_node_path.sep + filename)
+    );
+    return partial || null;
   }
   /**
    * Get file tree using git ls-files.
@@ -1498,14 +1543,14 @@ var CodeAgent = class extends base_default {
    * @returns {Promise<string>}
    */
   async _getFileTreeGit() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       (0, import_node_child_process.execFile)("git", ["ls-files"], {
         cwd: this.workingDirectory,
         timeout: 5e3,
         maxBuffer: 5 * 1024 * 1024
       }, (err, stdout) => {
         if (err) return reject(err);
-        resolve(stdout.trim());
+        resolve2(stdout.trim());
       });
     });
   }
@@ -1544,11 +1589,12 @@ var CodeAgent = class extends base_default {
    * @returns {string}
    */
   _buildSystemPrompt() {
-    const { fileTree, npmPackages } = this._codebaseContext || { fileTree: "", npmPackages: [] };
+    const { fileTree, npmPackages, importantFileContents } = this._codebaseContext || { fileTree: "", npmPackages: [], importantFileContents: [] };
     let prompt = `You are a coding agent working in ${this.workingDirectory}.
 
 ## Instructions
 - Use the execute_code tool to accomplish tasks by writing JavaScript code
+- Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config") when calling execute_code
 - Your code runs in a Node.js child process with access to all built-in modules
 - IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
   - import fs from 'fs';
@@ -1562,6 +1608,14 @@ var CodeAgent = class extends base_default {
 - Handle errors in your scripts with try/catch so you get useful error messages
 - Top-level await is supported
 - The working directory is: ${this.workingDirectory}`;
+    if (this.comments) {
+      prompt += `
+- Add a JSDoc @fileoverview comment at the top of each script explaining what it does
+- Add brief JSDoc @param comments for any functions you define`;
+    } else {
+      prompt += `
+- Do NOT write any comments in your code \u2014 save tokens. The code should be self-explanatory.`;
+    }
     if (fileTree) {
       prompt += `
 
@@ -1576,6 +1630,19 @@ ${fileTree}
 ## Available Packages
 These npm packages are installed and can be imported: ${npmPackages.join(", ")}`;
     }
+    if (importantFileContents && importantFileContents.length > 0) {
+      prompt += `
+
+## Key Files`;
+      for (const { path: filePath, content } of importantFileContents) {
+        prompt += `
+
+### ${filePath}
+\`\`\`javascript
+${content}
+\`\`\``;
+      }
+    }
     if (this._userSystemPrompt) {
       prompt += `
 
@@ -1586,12 +1653,23 @@ ${this._userSystemPrompt}`;
   }
   // ── Code Execution ───────────────────────────────────────────────────────
   /**
+   * Generate a sanitized slug from a purpose string.
+   * @private
+   * @param {string} [purpose]
+   * @returns {string}
+   */
+  _slugify(purpose) {
+    if (!purpose) return (0, import_node_crypto.randomUUID)().slice(0, 8);
+    return purpose.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  }
+  /**
    * Execute a JavaScript code string in a child process.
    * @private
    * @param {string} code - JavaScript code to execute
+   * @param {string} [purpose] - Short description for file naming
    * @returns {Promise<{stdout: string, stderr: string, exitCode: number, denied?: boolean}>}
    */
-  async _executeCode(code) {
+  async _executeCode(code, purpose) {
     if (this._stopped) {
       return { stdout: "", stderr: "Agent was stopped", exitCode: -1 };
     }
@@ -1605,10 +1683,12 @@ ${this._userSystemPrompt}`;
         logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
       }
     }
-    const tempFile = (0, import_node_path.join)(this.workingDirectory, `.code-agent-tmp-${(0, import_node_crypto.randomUUID)()}.mjs`);
+    await (0, import_promises2.mkdir)(this.writeDir, { recursive: true });
+    const slug = this._slugify(purpose);
+    const tempFile = (0, import_node_path.join)(this.writeDir, `agent-${slug}-${Date.now()}.mjs`);
     try {
       await (0, import_promises2.writeFile)(tempFile, code, "utf-8");
-      const result = await new Promise((resolve) => {
+      const result = await new Promise((resolve2) => {
         const child = (0, import_node_child_process.execFile)("node", [tempFile], {
           cwd: this.workingDirectory,
           timeout: this.timeout,
@@ -1617,13 +1697,13 @@ ${this._userSystemPrompt}`;
         }, (err, stdout, stderr) => {
           this._activeProcess = null;
           if (err) {
-            resolve({
+            resolve2({
               stdout: err.stdout || stdout || "",
               stderr: (err.stderr || stderr || "") + (err.killed ? "\n[EXECUTION TIMED OUT]" : ""),
               exitCode: err.code || 1
             });
           } else {
-            resolve({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
+            resolve2({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
           }
         });
         this._activeProcess = child;
@@ -1638,7 +1718,14 @@ ${this._userSystemPrompt}`;
           result.stderr = result.stderr.slice(0, half) + "\n...[STDERR TRUNCATED]";
         }
       }
-      this._allExecutions.push({ code, output: result.stdout, stderr: result.stderr, exitCode: result.exitCode });
+      this._allExecutions.push({
+        code,
+        purpose: purpose || null,
+        output: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        filePath: this.keepArtifacts ? tempFile : null
+      });
       if (this.onCodeExecution) {
         try {
           this.onCodeExecution(code, result);
@@ -1648,9 +1735,11 @@ ${this._userSystemPrompt}`;
       }
       return result;
     } finally {
-      try {
-        await (0, import_promises2.unlink)(tempFile);
-      } catch {
+      if (!this.keepArtifacts) {
+        try {
+          await (0, import_promises2.unlink)(tempFile);
+        } catch {
+        }
       }
     }
   }
@@ -1681,6 +1770,7 @@ ${this._userSystemPrompt}`;
     if (!this.chatSession) await this.init();
     this._stopped = false;
     const codeExecutions = [];
+    let consecutiveFailures = 0;
     let response = await this.chatSession.sendMessage({ message });
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
@@ -1690,17 +1780,30 @@ ${this._userSystemPrompt}`;
       for (const call of functionCalls) {
         if (this._stopped) break;
         const code = call.args?.code || "";
-        const result = await this._executeCode(code);
+        const purpose = call.args?.purpose;
+        const result = await this._executeCode(code, purpose);
         codeExecutions.push({
           code,
+          purpose: this._slugify(purpose),
           output: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode
         });
+        if (result.exitCode !== 0 && !result.denied) {
+          consecutiveFailures++;
+        } else {
+          consecutiveFailures = 0;
+        }
+        let output = this._formatOutput(result);
+        if (consecutiveFailures >= this.maxRetries) {
+          output += `
+
+[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
+        }
         results.push({
           id: call.id,
           name: call.name,
-          result: this._formatOutput(result)
+          result: output
         });
       }
       if (this._stopped) break;
@@ -1713,6 +1816,7 @@ ${this._userSystemPrompt}`;
           }
         }))
       });
+      if (consecutiveFailures >= this.maxRetries) break;
     }
     this._captureMetadata(response);
     this._cumulativeUsage = {
@@ -1747,6 +1851,7 @@ ${this._userSystemPrompt}`;
     this._stopped = false;
     const codeExecutions = [];
     let fullText = "";
+    let consecutiveFailures = 0;
     let streamResponse = await this.chatSession.sendMessageStream({ message });
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
@@ -1773,10 +1878,12 @@ ${this._userSystemPrompt}`;
       for (const call of functionCalls) {
         if (this._stopped) break;
         const code = call.args?.code || "";
+        const purpose = call.args?.purpose;
         yield { type: "code", code };
-        const result = await this._executeCode(code);
+        const result = await this._executeCode(code, purpose);
         codeExecutions.push({
           code,
+          purpose: this._slugify(purpose),
           output: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode
@@ -1788,10 +1895,21 @@ ${this._userSystemPrompt}`;
           stderr: result.stderr,
           exitCode: result.exitCode
         };
+        if (result.exitCode !== 0 && !result.denied) {
+          consecutiveFailures++;
+        } else {
+          consecutiveFailures = 0;
+        }
+        let output = this._formatOutput(result);
+        if (consecutiveFailures >= this.maxRetries) {
+          output += `
+
+[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
+        }
         results.push({
           id: call.id,
           name: call.name,
-          result: this._formatOutput(result)
+          result: output
         });
       }
       if (this._stopped) break;
@@ -1804,13 +1922,17 @@ ${this._userSystemPrompt}`;
           }
         }))
       });
+      if (consecutiveFailures >= this.maxRetries) break;
     }
+    let warning = "Max tool rounds reached";
+    if (this._stopped) warning = "Agent was stopped";
+    else if (consecutiveFailures >= this.maxRetries) warning = "Retry limit reached";
     yield {
       type: "done",
       fullText,
       codeExecutions,
       usage: this.getLastUsage(),
-      warning: this._stopped ? "Agent was stopped" : "Max tool rounds reached"
+      warning
     };
   }
   // ── Dump ─────────────────────────────────────────────────────────────────
@@ -1820,8 +1942,10 @@ ${this._userSystemPrompt}`;
    */
   dump() {
     return this._allExecutions.map((exec, i) => ({
-      fileName: `script-${i + 1}.mjs`,
-      script: exec.code
+      fileName: exec.purpose ? `agent-${exec.purpose}.mjs` : `script-${i + 1}.mjs`,
+      purpose: exec.purpose || null,
+      script: exec.code,
+      filePath: exec.filePath || null
     }));
   }
   // ── Stop ─────────────────────────────────────────────────────────────────
@@ -1842,9 +1966,264 @@ ${this._userSystemPrompt}`;
 };
 var code_agent_default = CodeAgent;
 
+// rag-agent.js
+var import_node_path2 = require("node:path");
+var import_promises3 = require("node:fs/promises");
+var MIME_TYPES = {
+  // Text
+  ".txt": "text/plain",
+  ".md": "text/plain",
+  ".csv": "text/csv",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".xml": "text/xml",
+  ".json": "application/json",
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".ts": "text/plain",
+  ".css": "text/css",
+  ".yaml": "text/plain",
+  ".yml": "text/plain",
+  ".py": "text/x-python",
+  ".rb": "text/plain",
+  ".sh": "text/plain",
+  // Documents
+  ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  // Images
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  // Audio
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".flac": "audio/flac",
+  ".aac": "audio/aac",
+  // Video
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".avi": "video/x-msvideo",
+  ".mov": "video/quicktime",
+  ".mkv": "video/x-matroska"
+};
+var DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Answer questions based on the provided documents and data. When referencing information, mention which document or data source it comes from.";
+var FILE_POLL_INTERVAL_MS = 2e3;
+var FILE_POLL_TIMEOUT_MS = 6e4;
+var RagAgent = class extends base_default {
+  /**
+   * @param {RagAgentOptions} [options={}]
+   */
+  constructor(options = {}) {
+    if (options.systemPrompt === void 0) {
+      options = { ...options, systemPrompt: DEFAULT_SYSTEM_PROMPT };
+    }
+    super(options);
+    this.remoteFiles = options.remoteFiles || [];
+    this.localFiles = options.localFiles || [];
+    this.localData = options.localData || [];
+    this._uploadedRemoteFiles = [];
+    this._localFileContents = [];
+    this._initialized = false;
+    const total = this.remoteFiles.length + this.localFiles.length + this.localData.length;
+    logger_default.debug(`RagAgent created with ${total} context sources`);
+  }
+  // ── Initialization ───────────────────────────────────────────────────────
+  /**
+   * Uploads remote files, reads local files, and seeds all context into the chat.
+   * @param {boolean} [force=false]
+   * @returns {Promise<void>}
+   */
+  async init(force = false) {
+    if (this._initialized && !force) return;
+    this._uploadedRemoteFiles = [];
+    for (const filePath of this.remoteFiles) {
+      const resolvedPath = (0, import_node_path2.resolve)(filePath);
+      logger_default.debug(`Uploading remote file: ${resolvedPath}`);
+      const ext = (0, import_node_path2.extname)(resolvedPath).toLowerCase();
+      const mimeType = MIME_TYPES[ext] || "application/octet-stream";
+      const uploaded = await this.genAIClient.files.upload({
+        file: resolvedPath,
+        config: { displayName: (0, import_node_path2.basename)(resolvedPath), mimeType }
+      });
+      await this._waitForFileActive(uploaded);
+      this._uploadedRemoteFiles.push({
+        ...uploaded,
+        originalPath: resolvedPath
+      });
+      logger_default.debug(`File uploaded: ${uploaded.displayName} (${uploaded.mimeType})`);
+    }
+    this._localFileContents = [];
+    for (const filePath of this.localFiles) {
+      const resolvedPath = (0, import_node_path2.resolve)(filePath);
+      logger_default.debug(`Reading local file: ${resolvedPath}`);
+      const content = await (0, import_promises3.readFile)(resolvedPath, "utf-8");
+      this._localFileContents.push({
+        name: (0, import_node_path2.basename)(resolvedPath),
+        content,
+        path: resolvedPath
+      });
+      logger_default.debug(`Local file read: ${(0, import_node_path2.basename)(resolvedPath)} (${content.length} chars)`);
+    }
+    this.chatConfig.systemInstruction = /** @type {string} */
+    this.systemPrompt;
+    await super.init(force);
+    const parts = [];
+    for (const f of this._uploadedRemoteFiles) {
+      parts.push({ fileData: { fileUri: f.uri, mimeType: f.mimeType } });
+    }
+    for (const lf of this._localFileContents) {
+      parts.push({ text: `--- File: ${lf.name} ---
+${lf.content}` });
+    }
+    for (const ld of this.localData) {
+      const serialized = typeof ld.data === "string" ? ld.data : JSON.stringify(ld.data, null, 2);
+      parts.push({ text: `--- Data: ${ld.name} ---
+${serialized}` });
+    }
+    if (parts.length > 0) {
+      parts.push({ text: "Here are the documents and data to analyze." });
+      const history = [
+        { role: "user", parts },
+        { role: "model", parts: [{ text: "I have reviewed all the provided documents and data. I am ready to answer your questions about them." }] }
+      ];
+      this.chatSession = this._createChatSession(history);
+    }
+    this._initialized = true;
+    logger_default.debug(`RagAgent initialized with ${this._uploadedRemoteFiles.length} remote files, ${this._localFileContents.length} local files, ${this.localData.length} data entries`);
+  }
+  // ── Non-Streaming Chat ───────────────────────────────────────────────────
+  /**
+   * Send a message and get a complete response grounded in the loaded context.
+   *
+   * @param {string} message - The user's question
+   * @param {Object} [opts={}] - Per-message options
+   * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @returns {Promise<RagResponse>}
+   */
+  async chat(message, opts = {}) {
+    if (!this._initialized) await this.init();
+    const response = await this.chatSession.sendMessage({ message });
+    this._captureMetadata(response);
+    this._cumulativeUsage = {
+      promptTokens: this.lastResponseMetadata.promptTokens,
+      responseTokens: this.lastResponseMetadata.responseTokens,
+      totalTokens: this.lastResponseMetadata.totalTokens,
+      attempts: 1
+    };
+    return {
+      text: response.text || "",
+      usage: this.getLastUsage()
+    };
+  }
+  // ── Streaming ────────────────────────────────────────────────────────────
+  /**
+   * Send a message and stream the response as events.
+   *
+   * @param {string} message - The user's question
+   * @param {Object} [opts={}] - Per-message options
+   * @yields {RagStreamEvent}
+   */
+  async *stream(message, opts = {}) {
+    if (!this._initialized) await this.init();
+    let fullText = "";
+    const streamResponse = await this.chatSession.sendMessageStream({ message });
+    for await (const chunk of streamResponse) {
+      if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+        const text = chunk.candidates[0].content.parts[0].text;
+        fullText += text;
+        yield { type: "text", text };
+      }
+    }
+    yield {
+      type: "done",
+      fullText,
+      usage: this.getLastUsage()
+    };
+  }
+  // ── Context Management ──────────────────────────────────────────────────
+  /**
+   * Add remote files (uploaded via Files API). Triggers reinitialize.
+   * @param {string[]} paths
+   * @returns {Promise<void>}
+   */
+  async addRemoteFiles(paths) {
+    this.remoteFiles.push(...paths);
+    await this.init(true);
+  }
+  /**
+   * Add local text files (read from disk). Triggers reinitialize.
+   * @param {string[]} paths
+   * @returns {Promise<void>}
+   */
+  async addLocalFiles(paths) {
+    this.localFiles.push(...paths);
+    await this.init(true);
+  }
+  /**
+   * Add in-memory data entries. Triggers reinitialize.
+   * @param {LocalDataEntry[]} entries
+   * @returns {Promise<void>}
+   */
+  async addLocalData(entries) {
+    this.localData.push(...entries);
+    await this.init(true);
+  }
+  /**
+   * Returns metadata about all context sources.
+   * @returns {{ remoteFiles: Array<Object>, localFiles: Array<Object>, localData: Array<Object> }}
+   */
+  getContext() {
+    return {
+      remoteFiles: this._uploadedRemoteFiles.map((f) => ({
+        name: f.name,
+        displayName: f.displayName,
+        mimeType: f.mimeType,
+        sizeBytes: f.sizeBytes,
+        uri: f.uri,
+        originalPath: f.originalPath
+      })),
+      localFiles: this._localFileContents.map((lf) => ({
+        name: lf.name,
+        path: lf.path,
+        size: lf.content.length
+      })),
+      localData: this.localData.map((ld) => ({
+        name: ld.name,
+        type: typeof ld.data === "object" && ld.data !== null ? Array.isArray(ld.data) ? "array" : "object" : typeof ld.data
+      }))
+    };
+  }
+  // ── Private Helpers ──────────────────────────────────────────────────────
+  /**
+   * Polls until an uploaded file reaches ACTIVE state.
+   * @param {Object} file - The uploaded file object
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _waitForFileActive(file) {
+    if (file.state === "ACTIVE") return;
+    const start = Date.now();
+    while (Date.now() - start < FILE_POLL_TIMEOUT_MS) {
+      const updated = await this.genAIClient.files.get({ name: file.name });
+      if (updated.state === "ACTIVE") return;
+      if (updated.state === "FAILED") {
+        throw new Error(`File processing failed: ${file.displayName || file.name}`);
+      }
+      await new Promise((r) => setTimeout(r, FILE_POLL_INTERVAL_MS));
+    }
+    throw new Error(`File processing timed out after ${FILE_POLL_TIMEOUT_MS / 1e3}s: ${file.displayName || file.name}`);
+  }
+};
+var rag_agent_default = RagAgent;
+
 // index.js
 var import_genai2 = require("@google/genai");
-var index_default = { Transformer: transformer_default, Chat: chat_default, Message: message_default, ToolAgent: tool_agent_default, CodeAgent: code_agent_default };
+var index_default = { Transformer: transformer_default, Chat: chat_default, Message: message_default, ToolAgent: tool_agent_default, CodeAgent: code_agent_default, RagAgent: rag_agent_default };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   BaseGemini,
@@ -1853,6 +2232,7 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   HarmBlockThreshold,
   HarmCategory,
   Message,
+  RagAgent,
   ThinkingLevel,
   ToolAgent,
   Transformer,

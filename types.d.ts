@@ -181,6 +181,24 @@ export interface ToolAgentOptions extends BaseGeminiOptions {
   onToolCall?: (toolName: string, args: Record<string, any>) => void;
   /** Async callback before tool execution; return false to deny */
   onBeforeExecution?: (toolName: string, args: Record<string, any>) => Promise<boolean>;
+  /** Directory for tool-written files (pass-through for toolExecutor use) */
+  writeDir?: string;
+}
+
+export interface LocalDataEntry {
+  /** Label shown to the model (e.g. "users", "config") */
+  name: string;
+  /** Any JSON-serializable value */
+  data: any;
+}
+
+export interface RagAgentOptions extends BaseGeminiOptions {
+  /** Paths to files uploaded via Google Files API (PDFs, images, audio, video) */
+  remoteFiles?: string[];
+  /** Paths to local text files read from disk (md, json, csv, yaml, txt) */
+  localFiles?: string[];
+  /** In-memory data objects to include as context */
+  localData?: LocalDataEntry[];
 }
 
 export interface CodeAgentOptions extends BaseGeminiOptions {
@@ -194,11 +212,23 @@ export interface CodeAgentOptions extends BaseGeminiOptions {
   onBeforeExecution?: (code: string) => Promise<boolean>;
   /** Notification callback after code execution */
   onCodeExecution?: (code: string, output: { stdout: string; stderr: string; exitCode: number }) => void;
+  /** Files whose contents are included in the system prompt for project context */
+  importantFiles?: string[];
+  /** Directory for writing script files (default: '{workingDirectory}/tmp') */
+  writeDir?: string;
+  /** Keep script files on disk after execution (default: false) */
+  keepArtifacts?: boolean;
+  /** Instruct model to write JSDoc comments in generated code (default: false) */
+  comments?: boolean;
+  /** Max consecutive failed executions before stopping (default: 3) */
+  maxRetries?: number;
 }
 
 export interface CodeExecution {
   /** The JavaScript code that was executed */
   code: string;
+  /** Short slug describing the script's purpose */
+  purpose?: string;
   /** stdout from the execution */
   output: string;
   /** stderr from the execution */
@@ -274,6 +304,23 @@ export interface MessageResponse {
   data?: any;
   /** Token usage data */
   usage: UsageData | null;
+}
+
+export interface RagResponse {
+  /** The model's text response */
+  text: string;
+  /** Token usage data */
+  usage: UsageData | null;
+}
+
+export interface RagStreamEvent {
+  type: 'text' | 'done';
+  /** For 'text' events: the text chunk */
+  text?: string;
+  /** For 'done' events: complete accumulated text */
+  fullText?: string;
+  /** For 'done' events: token usage */
+  usage?: UsageData | null;
 }
 
 export interface AgentResponse {
@@ -385,11 +432,40 @@ export declare class ToolAgent extends BaseGemini {
   maxToolRounds: number;
   onToolCall: ((toolName: string, args: Record<string, any>) => void) | null;
   onBeforeExecution: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null;
+  /** Directory for tool-written files (pass-through for toolExecutor use) */
+  writeDir: string | null;
 
   chat(message: string, opts?: { labels?: Record<string, string> }): Promise<AgentResponse>;
   stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<AgentStreamEvent, void, unknown>;
   /** Stop the agent before the next tool execution round */
   stop(): void;
+}
+
+export declare class RagAgent extends BaseGemini {
+  constructor(options?: RagAgentOptions);
+
+  /** Paths to files uploaded via Google Files API */
+  remoteFiles: string[];
+  /** Paths to local text files read from disk */
+  localFiles: string[];
+  /** In-memory data objects */
+  localData: LocalDataEntry[];
+
+  init(force?: boolean): Promise<void>;
+  chat(message: string, opts?: { labels?: Record<string, string> }): Promise<RagResponse>;
+  stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<RagStreamEvent, void, unknown>;
+  /** Add remote files uploaded via Files API (triggers reinitialize) */
+  addRemoteFiles(paths: string[]): Promise<void>;
+  /** Add local text files read from disk (triggers reinitialize) */
+  addLocalFiles(paths: string[]): Promise<void>;
+  /** Add in-memory data entries (triggers reinitialize) */
+  addLocalData(entries: LocalDataEntry[]): Promise<void>;
+  /** Returns metadata about all context sources */
+  getContext(): {
+    remoteFiles: Array<{ name: string; displayName: string; mimeType: string; sizeBytes: string; uri: string; originalPath: string }>;
+    localFiles: Array<{ name: string; path: string; size: number }>;
+    localData: Array<{ name: string; type: string }>;
+  };
 }
 
 export declare class CodeAgent extends BaseGemini {
@@ -400,12 +476,22 @@ export declare class CodeAgent extends BaseGemini {
   timeout: number;
   onBeforeExecution: ((code: string) => Promise<boolean>) | null;
   onCodeExecution: ((code: string, output: { stdout: string; stderr: string; exitCode: number }) => void) | null;
+  /** Files whose contents are included in the system prompt */
+  importantFiles: string[];
+  /** Directory for writing script files */
+  writeDir: string;
+  /** Keep script files on disk after execution */
+  keepArtifacts: boolean;
+  /** Whether the model writes comments in generated code */
+  comments: boolean;
+  /** Max consecutive failed executions before stopping */
+  maxRetries: number;
 
   init(force?: boolean): Promise<void>;
   chat(message: string, opts?: { labels?: Record<string, string> }): Promise<CodeAgentResponse>;
   stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<CodeAgentStreamEvent, void, unknown>;
   /** Returns all code scripts written across all chat/stream calls. */
-  dump(): Array<{ fileName: string; script: string }>;
+  dump(): Array<{ fileName: string; purpose: string | null; script: string; filePath: string | null }>;
   /** Stop the agent before the next code execution. Kills any running child process. */
   stop(): void;
 }
@@ -421,6 +507,7 @@ declare const _default: {
   Message: typeof Message;
   ToolAgent: typeof ToolAgent;
   CodeAgent: typeof CodeAgent;
+  RagAgent: typeof RagAgent;
 };
 
 export default _default;

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v2.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 5 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v2.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 6 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -19,6 +19,7 @@ ak-gemini/
   message.js            ← Message class (stateless one-off messages)
   tool-agent.js         ← ToolAgent class (agent with user-provided tools)
   code-agent.js         ← CodeAgent class (agent that writes and executes code)
+  rag-agent.js          ← RagAgent class (document Q&A via remote files, local files, and in-memory data)
   json-helpers.js       ← Pure functions: extractJSON, attemptJSONRecovery, etc.
   logger.js             ← Pino-based logging with configurable levels
   types.d.ts            ← TypeScript definitions for all classes and interfaces
@@ -30,6 +31,7 @@ ak-gemini/
     message.test.js     ← Stateless message tests
     tool-agent.test.js  ← Agent with user-provided tools tests
     code-agent.test.js  ← CodeAgent tests
+    rag-agent.test.js   ← RagAgent tests
     json-helpers.test.js ← Pure function unit tests
 ```
 
@@ -44,6 +46,7 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 | `Message` | `send(payload)` | Stateless one-off messages via `generateContent()` |
 | `ToolAgent` | `chat(message)` / `stream(message)` | Agent with user-provided tools |
 | `CodeAgent` | `chat(message)` / `stream(message)` | Agent that writes and executes JavaScript |
+| `RagAgent` | `chat(message)` / `stream(message)` | Document Q&A via remote files, local files, and in-memory data |
 
 ### Key Design Decisions
 
@@ -54,7 +57,8 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **`seed()`** is available on BaseGemini (all classes get few-shot capability)
 - **`stop()`** is available on both ToolAgent and CodeAgent to cancel mid-execution
 - **`onBeforeExecution`** callback on both agents for gating/approval before execution
-- Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent }`
+- **RagAgent** supports three context input types: `remoteFiles` (Files API upload), `localFiles` (read from disk), `localData` (in-memory objects)
+- Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent }`
 
 ## Key Classes & APIs
 
@@ -92,16 +96,31 @@ Agent with user-provided tools. Extends BaseGemini.
 - `stream(message)` → AsyncGenerator yielding `{ type, text?, toolName?, args?, result? }`
 - `stop()` — Cancel the agent before the next tool execution round
 - Constructor requires: `tools` (FunctionDeclaration[]) + `toolExecutor` (async fn)
-- Optional: `maxToolRounds`, `onToolCall`, `onBeforeExecution`
+- Optional: `maxToolRounds`, `onToolCall`, `onBeforeExecution`, `writeDir`
 
 ### CodeAgent (`code-agent.js`)
 Agent that writes and executes JavaScript autonomously. Extends BaseGemini.
 - `chat(message)` → `{ text, codeExecutions, usage }`
 - `stream(message)` → AsyncGenerator yielding `{ type: 'text'|'code'|'output'|'done', ... }`
 - `stop()` — Cancel the agent and kill any running child process
-- `init()` gathers codebase context (file tree + key files) and injects it into system prompt
+- `dump()` — Returns all scripts with descriptive filenames and purposes
+- `init()` gathers codebase context (file tree + key files + importantFiles) and injects it into system prompt
 - Code executes in Node.js child processes that inherit `process.env`
-- Optional: `workingDirectory`, `maxRounds`, `timeout`, `onBeforeExecution`, `onCodeExecution`
+- Scripts written to `writeDir` (default: `{workingDirectory}/tmp`) with descriptive names (`agent-{purpose}-{timestamp}.mjs`)
+- Optional: `workingDirectory`, `maxRounds`, `timeout`, `onBeforeExecution`, `onCodeExecution`, `importantFiles`, `writeDir`, `keepArtifacts`, `comments`, `maxRetries`
+
+### RagAgent (`rag-agent.js`)
+Document Q&A agent with three context input types. Extends BaseGemini.
+- `chat(message)` → `{ text, usage }`
+- `stream(message)` → AsyncGenerator yielding `{ type: 'text'|'done', text?, fullText?, usage? }`
+- `init()` uploads remote files via Files API, reads local files from disk, serializes local data, seeds all into chat history
+- `addRemoteFiles(paths)` — Add files uploaded via Files API (triggers reinit)
+- `addLocalFiles(paths)` — Add local text files read from disk (triggers reinit)
+- `addLocalData(entries)` — Add in-memory data entries (triggers reinit)
+- `getContext()` — Returns metadata about all context sources: `{ remoteFiles, localFiles, localData }`
+- **`remoteFiles`**: uploaded via Google Files API — supports PDF, images, audio, video
+- **`localFiles`**: read from disk as UTF-8 text — md, json, csv, yaml, txt, etc.
+- **`localData`**: in-memory objects/arrays serialized as JSON — shape: `{ name: string, data: any }[]`
 
 ## Development Commands
 
@@ -135,7 +154,7 @@ new Transformer({ vertexai: true, project: 'my-gcp-project' });
 
 ```javascript
 // Named exports
-import { Transformer, Chat, Message, ToolAgent, CodeAgent, BaseGemini, log } from 'ak-gemini';
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
 
 // Default export (namespace object)
@@ -149,9 +168,10 @@ const { Transformer, Chat } = require('ak-gemini');
 ## Testing Strategy
 
 - "No mocks" approach — all tests use real Gemini API calls
+- **Do NOT run tests during development** — they are slow (real API calls) and expensive. Use `npm run typecheck` and `npm run build:cjs` to verify changes.
 - Test timeout: 30 seconds (AI calls take 5-15 seconds)
 - Rate limiting (429 errors) can cause flaky failures — retry after waiting
-- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `json-helpers.test.js`
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `json-helpers.test.js`
 
 ## Key Design Patterns
 
@@ -164,12 +184,27 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - AI-powered payload reconstruction via `rebuild()`
 
 ### Code Execution (CodeAgent)
-- Single `execute_code` tool — model writes JavaScript, we execute it
+- Single `execute_code` tool with `code` + optional `purpose` params — model writes JavaScript, we execute it
+- Scripts written to `writeDir` (default: `{workingDirectory}/tmp`) with names like `agent-read-config-1710000000.mjs`
+- `keepArtifacts: true` preserves scripts on disk; `false` (default) deletes after execution
+- `importantFiles: ['path/to/file.js']` — reads file contents into system prompt for deep project context; supports partial path matching
+- `comments: true` instructs the model to write JSDoc comments; `false` (default) saves tokens
+- `maxRetries: 3` (default) — tracks consecutive failed executions; on limit, model summarizes failures and asks for user guidance
 - Child processes inherit `process.env` for full environment access
 - `onBeforeExecution` async callback gates execution (return false to deny)
 - `onCodeExecution` notification callback after execution
-- File tree + key files gathered during `init()` for codebase awareness
+- File tree + key files + importantFiles gathered during `init()` for codebase awareness
 - `stop()` kills running child processes via SIGTERM
+- `dump()` returns `[{ fileName, purpose, script, filePath }]` across all executions
+
+### Document Q&A (RagAgent)
+- Three context input types combined into a single seeded chat history during `init()`:
+  - `remoteFiles` — uploaded via Google Files API, seeded as `fileData` parts (PDFs, images, audio, video)
+  - `localFiles` — read from disk as UTF-8 text, seeded as labeled text parts (`--- File: name ---`)
+  - `localData` — in-memory objects serialized as JSON, seeded as labeled text parts (`--- Data: name ---`)
+- `_waitForFileActive()` polls until uploaded remote files finish processing (2s intervals, 60s timeout)
+- `addRemoteFiles()`, `addLocalFiles()`, `addLocalData()` each append and call `init(true)` to reinitialize
+- No tool loops — simple send/stream pattern like Chat, but with document/data context
 
 ### Agent Stop API (ToolAgent + CodeAgent)
 - `agent.stop()` — sets `_stopped` flag, breaks loop before next execution

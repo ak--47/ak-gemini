@@ -154,6 +154,16 @@ describe('ToolAgent', () => {
 		it('should throw on missing auth', () => {
 			expect(() => new ToolAgent({})).toThrow(/api key/i);
 		});
+
+		it('should accept writeDir option', () => {
+			const agent = makeAgentWithTools({ writeDir: '/tmp/tool-output' });
+			expect(agent.writeDir).toBe('/tmp/tool-output');
+		});
+
+		it('should default writeDir to null', () => {
+			const agent = makeAgentWithTools();
+			expect(agent.writeDir).toBeNull();
+		});
 	});
 
 	// ── Initialization ───────────────────────────────────────────────────────

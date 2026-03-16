@@ -24,17 +24,6 @@
 		{
 			"type": "node",
 			"request": "launch",
-			"name": "scratch-agent",
-			"program": "${workspaceFolder}/scratch-agent.mjs",
-			"console": "integratedTerminal",
-			"internalConsoleOptions": "neverOpen",
-			"env": {
-				"NODE_ENV": "dev"
-			}
-		},
-		{
-			"type": "node",
-			"request": "launch",
 			"name": "typecheck",
 			"runtimeExecutable": "npx",
 			"runtimeArgs": ["tsc", "--noEmit"],

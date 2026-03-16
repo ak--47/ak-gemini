@@ -12,8 +12,8 @@
 import BaseGemini from './base.js';
 import log from './logger.js';
 import { execFile } from 'node:child_process';
-import { writeFile, unlink, readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { writeFile, unlink, readdir, readFile, mkdir } from 'node:fs/promises';
+import { join, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -67,6 +67,11 @@ class CodeAgent extends BaseGemini {
 		this.timeout = options.timeout || 30_000;
 		this.onBeforeExecution = options.onBeforeExecution || null;
 		this.onCodeExecution = options.onCodeExecution || null;
+		this.importantFiles = options.importantFiles || [];
+		this.writeDir = options.writeDir || join(this.workingDirectory, 'tmp');
+		this.keepArtifacts = options.keepArtifacts ?? false;
+		this.comments = options.comments ?? false;
+		this.maxRetries = options.maxRetries ?? 3;
 
 		// ── Internal state ──
 		this._codebaseContext = null;
@@ -87,6 +92,10 @@ class CodeAgent extends BaseGemini {
 						code: {
 							type: 'string',
 							description: 'JavaScript code to execute. Use console.log() for output. You can import any built-in Node.js module.'
+						},
+						purpose: {
+							type: 'string',
+							description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs", "fetch-api-data"). Used for naming the script file.'
 						}
 					},
 					required: ['code']
@@ -155,8 +164,48 @@ class CodeAgent extends BaseGemini {
 			];
 		} catch { /* no package.json */ }
 
-		this._codebaseContext = { fileTree, npmPackages };
+		// Resolve and read important files
+		const importantFileContents = [];
+		if (this.importantFiles.length > 0) {
+			const fileTreeLines = fileTree.split('\n').map(l => l.trim()).filter(Boolean);
+			for (const requested of this.importantFiles) {
+				const resolved = this._resolveImportantFile(requested, fileTreeLines);
+				if (!resolved) {
+					log.warn(`importantFiles: could not locate "${requested}"`);
+					continue;
+				}
+				try {
+					const fullPath = join(this.workingDirectory, resolved);
+					const content = await readFile(fullPath, 'utf-8');
+					importantFileContents.push({ path: resolved, content });
+				} catch (e) {
+					log.warn(`importantFiles: could not read "${resolved}": ${e.message}`);
+				}
+			}
+		}
+
+		this._codebaseContext = { fileTree, npmPackages, importantFileContents };
 		this._contextGathered = true;
+	}
+
+	/**
+	 * Resolve an importantFiles entry against the file tree.
+	 * Supports exact matches and partial (basename/suffix) matches.
+	 * @private
+	 * @param {string} filename
+	 * @param {string[]} fileTreeLines
+	 * @returns {string|null}
+	 */
+	_resolveImportantFile(filename, fileTreeLines) {
+		// Exact match
+		const exact = fileTreeLines.find(line => line === filename);
+		if (exact) return exact;
+
+		// Partial match — filename matches end of path
+		const partial = fileTreeLines.find(line =>
+			line.endsWith('/' + filename) || line.endsWith(sep + filename)
+		);
+		return partial || null;
 	}
 
 	/**
@@ -215,12 +264,13 @@ class CodeAgent extends BaseGemini {
 	 * @returns {string}
 	 */
 	_buildSystemPrompt() {
-		const { fileTree, npmPackages } = this._codebaseContext || { fileTree: '', npmPackages: [] };
+		const { fileTree, npmPackages, importantFileContents } = this._codebaseContext || { fileTree: '', npmPackages: [], importantFileContents: [] };
 
 		let prompt = `You are a coding agent working in ${this.workingDirectory}.
 
 ## Instructions
 - Use the execute_code tool to accomplish tasks by writing JavaScript code
+- Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config") when calling execute_code
 - Your code runs in a Node.js child process with access to all built-in modules
 - IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
   - import fs from 'fs';
@@ -235,12 +285,25 @@ class CodeAgent extends BaseGemini {
 - Top-level await is supported
 - The working directory is: ${this.workingDirectory}`;
 
+		if (this.comments) {
+			prompt += `\n- Add a JSDoc @fileoverview comment at the top of each script explaining what it does\n- Add brief JSDoc @param comments for any functions you define`;
+		} else {
+			prompt += `\n- Do NOT write any comments in your code — save tokens. The code should be self-explanatory.`;
+		}
+
 		if (fileTree) {
 			prompt += `\n\n## File Tree\n\`\`\`\n${fileTree}\n\`\`\``;
 		}
 
 		if (npmPackages.length > 0) {
 			prompt += `\n\n## Available Packages\nThese npm packages are installed and can be imported: ${npmPackages.join(', ')}`;
+		}
+
+		if (importantFileContents && importantFileContents.length > 0) {
+			prompt += `\n\n## Key Files`;
+			for (const { path: filePath, content } of importantFileContents) {
+				prompt += `\n\n### ${filePath}\n\`\`\`javascript\n${content}\n\`\`\``;
+			}
 		}
 
 		if (this._userSystemPrompt) {
@@ -253,12 +316,24 @@ class CodeAgent extends BaseGemini {
 	// ── Code Execution ───────────────────────────────────────────────────────
 
 	/**
+	 * Generate a sanitized slug from a purpose string.
+	 * @private
+	 * @param {string} [purpose]
+	 * @returns {string}
+	 */
+	_slugify(purpose) {
+		if (!purpose) return randomUUID().slice(0, 8);
+		return purpose.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+	}
+
+	/**
 	 * Execute a JavaScript code string in a child process.
 	 * @private
 	 * @param {string} code - JavaScript code to execute
+	 * @param {string} [purpose] - Short description for file naming
 	 * @returns {Promise<{stdout: string, stderr: string, exitCode: number, denied?: boolean}>}
 	 */
-	async _executeCode(code) {
+	async _executeCode(code, purpose) {
 		// Check if stopped
 		if (this._stopped) {
 			return { stdout: '', stderr: 'Agent was stopped', exitCode: -1 };
@@ -276,7 +351,11 @@ class CodeAgent extends BaseGemini {
 			}
 		}
 
-		const tempFile = join(this.workingDirectory, `.code-agent-tmp-${randomUUID()}.mjs`);
+		// Ensure writeDir exists
+		await mkdir(this.writeDir, { recursive: true });
+
+		const slug = this._slugify(purpose);
+		const tempFile = join(this.writeDir, `agent-${slug}-${Date.now()}.mjs`);
 
 		try {
 			// Write code to temp file
@@ -317,7 +396,10 @@ class CodeAgent extends BaseGemini {
 			}
 
 			// Track execution
-			this._allExecutions.push({ code, output: result.stdout, stderr: result.stderr, exitCode: result.exitCode });
+			this._allExecutions.push({
+				code, purpose: purpose || null, output: result.stdout, stderr: result.stderr,
+				exitCode: result.exitCode, filePath: this.keepArtifacts ? tempFile : null
+			});
 
 			// Fire notification callback
 			if (this.onCodeExecution) {
@@ -327,9 +409,11 @@ class CodeAgent extends BaseGemini {
 
 			return result;
 		} finally {
-			// Cleanup temp file
-			try { await unlink(tempFile); }
-			catch { /* file may already be gone */ }
+			// Cleanup temp file (unless keeping artifacts)
+			if (!this.keepArtifacts) {
+				try { await unlink(tempFile); }
+				catch { /* file may already be gone */ }
+			}
 		}
 	}
 
@@ -363,6 +447,7 @@ class CodeAgent extends BaseGemini {
 		this._stopped = false;
 
 		const codeExecutions = [];
+		let consecutiveFailures = 0;
 
 		let response = await this.chatSession.sendMessage({ message });
 
@@ -377,19 +462,33 @@ class CodeAgent extends BaseGemini {
 				if (this._stopped) break;
 
 				const code = call.args?.code || '';
-				const result = await this._executeCode(code);
+				const purpose = call.args?.purpose;
+				const result = await this._executeCode(code, purpose);
 
 				codeExecutions.push({
 					code,
+					purpose: this._slugify(purpose),
 					output: result.stdout,
 					stderr: result.stderr,
 					exitCode: result.exitCode
 				});
 
+				if (result.exitCode !== 0 && !result.denied) {
+					consecutiveFailures++;
+				} else {
+					consecutiveFailures = 0;
+				}
+
+				let output = this._formatOutput(result);
+
+				if (consecutiveFailures >= this.maxRetries) {
+					output += `\n\n[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
+				}
+
 				results.push({
 					id: call.id,
 					name: call.name,
-					result: this._formatOutput(result)
+					result: output
 				});
 			}
 
@@ -405,6 +504,8 @@ class CodeAgent extends BaseGemini {
 					}
 				}))
 			});
+
+			if (consecutiveFailures >= this.maxRetries) break;
 		}
 
 		this._captureMetadata(response);
@@ -445,6 +546,7 @@ class CodeAgent extends BaseGemini {
 
 		const codeExecutions = [];
 		let fullText = '';
+		let consecutiveFailures = 0;
 
 		let streamResponse = await this.chatSession.sendMessageStream({ message });
 
@@ -481,12 +583,14 @@ class CodeAgent extends BaseGemini {
 				if (this._stopped) break;
 
 				const code = call.args?.code || '';
+				const purpose = call.args?.purpose;
 				yield { type: 'code', code };
 
-				const result = await this._executeCode(code);
+				const result = await this._executeCode(code, purpose);
 
 				codeExecutions.push({
 					code,
+					purpose: this._slugify(purpose),
 					output: result.stdout,
 					stderr: result.stderr,
 					exitCode: result.exitCode
@@ -500,10 +604,22 @@ class CodeAgent extends BaseGemini {
 					exitCode: result.exitCode
 				};
 
+				if (result.exitCode !== 0 && !result.denied) {
+					consecutiveFailures++;
+				} else {
+					consecutiveFailures = 0;
+				}
+
+				let output = this._formatOutput(result);
+
+				if (consecutiveFailures >= this.maxRetries) {
+					output += `\n\n[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
+				}
+
 				results.push({
 					id: call.id,
 					name: call.name,
-					result: this._formatOutput(result)
+					result: output
 				});
 			}
 
@@ -519,15 +635,21 @@ class CodeAgent extends BaseGemini {
 					}
 				}))
 			});
+
+			if (consecutiveFailures >= this.maxRetries) break;
 		}
 
-		// Max rounds reached or stopped
+		// Max rounds reached, stopped, or retry limit hit
+		let warning = 'Max tool rounds reached';
+		if (this._stopped) warning = 'Agent was stopped';
+		else if (consecutiveFailures >= this.maxRetries) warning = 'Retry limit reached';
+
 		yield {
 			type: 'done',
 			fullText,
 			codeExecutions,
 			usage: this.getLastUsage(),
-			warning: this._stopped ? 'Agent was stopped' : 'Max tool rounds reached'
+			warning
 		};
 	}
 
@@ -539,8 +661,10 @@ class CodeAgent extends BaseGemini {
 	 */
 	dump() {
 		return this._allExecutions.map((exec, i) => ({
-			fileName: `script-${i + 1}.mjs`,
-			script: exec.code
+			fileName: exec.purpose ? `agent-${exec.purpose}.mjs` : `script-${i + 1}.mjs`,
+			purpose: exec.purpose || null,
+			script: exec.code,
+			filePath: exec.filePath || null
 		}));
 	}
 

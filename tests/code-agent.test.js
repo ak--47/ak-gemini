@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 import { CodeAgent } from '../index.js';
 import { join } from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 const { GEMINI_API_KEY } = process.env;
@@ -34,6 +34,11 @@ describe('CodeAgent', () => {
 			expect(agent.workingDirectory).toBe(process.cwd());
 			expect(agent.maxRounds).toBe(10);
 			expect(agent.timeout).toBe(30_000);
+			expect(agent.importantFiles).toEqual([]);
+			expect(agent.writeDir).toBe(join(process.cwd(), 'tmp'));
+			expect(agent.keepArtifacts).toBe(false);
+			expect(agent.comments).toBe(false);
+			expect(agent.maxRetries).toBe(3);
 		});
 
 		it('should accept workingDirectory', () => {
@@ -74,6 +79,38 @@ describe('CodeAgent', () => {
 		it('should accept custom systemPrompt', () => {
 			const agent = makeAgent({ systemPrompt: 'Be concise.' });
 			expect(agent._userSystemPrompt).toBe('Be concise.');
+		});
+
+		it('should accept importantFiles', () => {
+			const agent = makeAgent({ importantFiles: ['foo.js', 'bar.js'] });
+			expect(agent.importantFiles).toEqual(['foo.js', 'bar.js']);
+		});
+
+		it('should accept writeDir', () => {
+			const agent = makeAgent({ writeDir: '/tmp/my-scripts' });
+			expect(agent.writeDir).toBe('/tmp/my-scripts');
+		});
+
+		it('should accept keepArtifacts', () => {
+			const agent = makeAgent({ keepArtifacts: true });
+			expect(agent.keepArtifacts).toBe(true);
+		});
+
+		it('should accept comments', () => {
+			const agent = makeAgent({ comments: true });
+			expect(agent.comments).toBe(true);
+		});
+
+		it('should accept maxRetries', () => {
+			const agent = makeAgent({ maxRetries: 5 });
+			expect(agent.maxRetries).toBe(5);
+		});
+
+		it('should include purpose parameter in execute_code tool schema', () => {
+			const agent = makeAgent();
+			const toolSchema = agent.chatConfig.tools[0].functionDeclarations[0].parametersJsonSchema;
+			expect(toolSchema.properties.purpose).toBeTruthy();
+			expect(toolSchema.properties.purpose.type).toBe('string');
 		});
 	});
 
@@ -202,15 +239,16 @@ describe('CodeAgent', () => {
 			expect(result.exitCode).toBe(0);
 		});
 
-		it('should clean up temp files', async () => {
-			const agent = makeAgent();
-			const { readdir } = await import('node:fs/promises');
-
-			const before = (await readdir(agent.workingDirectory)).filter(f => f.startsWith('.code-agent-tmp-'));
-			await agent._executeCode('console.log("cleanup test");');
-			const after = (await readdir(agent.workingDirectory)).filter(f => f.startsWith('.code-agent-tmp-'));
-
-			expect(after.length).toBe(before.length);
+		it('should clean up temp files by default', async () => {
+			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-cleanup-'));
+			try {
+				const agent = makeAgent({ writeDir: tmpDir });
+				await agent._executeCode('console.log("cleanup test");');
+				const files = (await readdir(tmpDir)).filter(f => f.startsWith('agent-'));
+				expect(files.length).toBe(0);
+			} finally {
+				await rm(tmpDir, { recursive: true, force: true });
+			}
 		});
 
 		it('should use workingDirectory as cwd for child process', async () => {
@@ -641,8 +679,34 @@ console.log(pkg.name);
 			await agent._executeCode('console.log("second");');
 			const scripts = agent.dump();
 			expect(scripts.length).toBe(2);
-			expect(scripts[0]).toEqual({ fileName: 'script-1.mjs', script: 'console.log("first");' });
-			expect(scripts[1]).toEqual({ fileName: 'script-2.mjs', script: 'console.log("second");' });
+			expect(scripts[0].script).toBe('console.log("first");');
+			expect(scripts[1].script).toBe('console.log("second");');
+			// Without purpose, falls back to script-N naming
+			expect(scripts[0].fileName).toBe('script-1.mjs');
+			expect(scripts[1].fileName).toBe('script-2.mjs');
+		});
+
+		it('should use purpose in filenames when provided', async () => {
+			const agent = makeAgent();
+			await agent._executeCode('console.log("a");', 'read-config');
+			await agent._executeCode('console.log("b");', 'parse-logs');
+			const scripts = agent.dump();
+			expect(scripts[0].fileName).toBe('agent-read-config.mjs');
+			expect(scripts[0].purpose).toBe('read-config');
+			expect(scripts[1].fileName).toBe('agent-parse-logs.mjs');
+		});
+
+		it('should include filePath when keepArtifacts is true', async () => {
+			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-dump-'));
+			try {
+				const agent = makeAgent({ writeDir: tmpDir, keepArtifacts: true });
+				await agent._executeCode('console.log("kept");', 'test-keep');
+				const scripts = agent.dump();
+				expect(scripts[0].filePath).toBeTruthy();
+				expect(scripts[0].filePath).toContain('agent-test-keep');
+			} finally {
+				await rm(tmpDir, { recursive: true, force: true });
+			}
 		});
 
 		it('should accumulate across multiple chat calls', async () => {
@@ -654,11 +718,150 @@ console.log(pkg.name);
 			await agent.chat('Use execute_code to run: console.log("world")');
 			const scripts = agent.dump();
 			expect(scripts.length).toBeGreaterThanOrEqual(2);
-			scripts.forEach((s, i) => {
-				expect(s.fileName).toBe(`script-${i + 1}.mjs`);
+			scripts.forEach(s => {
 				expect(typeof s.script).toBe('string');
 				expect(s.script.length).toBeGreaterThan(0);
 			});
+		});
+	});
+
+	// ── _slugify() ─────────────────────────────────────────────────────────
+
+	describe('_slugify()', () => {
+		it('should generate UUID slug when no purpose provided', () => {
+			const agent = makeAgent();
+			const slug = agent._slugify();
+			expect(slug.length).toBe(8);
+		});
+
+		it('should sanitize purpose to a slug', () => {
+			const agent = makeAgent();
+			expect(agent._slugify('Read Config')).toBe('read-config');
+			expect(agent._slugify('Parse --- Logs!!!')).toBe('parse-logs');
+			expect(agent._slugify('fetch_API_data')).toBe('fetch-api-data');
+		});
+
+		it('should truncate long purposes to 40 chars', () => {
+			const agent = makeAgent();
+			const long = 'a'.repeat(60);
+			expect(agent._slugify(long).length).toBeLessThanOrEqual(40);
+		});
+	});
+
+	// ── importantFiles ─────────────────────────────────────────────────────
+
+	describe('importantFiles', () => {
+		it('should resolve exact file paths', async () => {
+			const agent = makeAgent({ importantFiles: ['package.json'] });
+			await agent._gatherCodebaseContext();
+			expect(agent._codebaseContext.importantFileContents.length).toBe(1);
+			expect(agent._codebaseContext.importantFileContents[0].path).toBe('package.json');
+			expect(agent._codebaseContext.importantFileContents[0].content).toContain('ak-gemini');
+		});
+
+		it('should resolve partial file paths', async () => {
+			const agent = makeAgent({ importantFiles: ['code-agent.test.js'] });
+			await agent._gatherCodebaseContext();
+			expect(agent._codebaseContext.importantFileContents.length).toBe(1);
+			expect(agent._codebaseContext.importantFileContents[0].path).toContain('code-agent.test.js');
+		});
+
+		it('should warn on missing files without throwing', async () => {
+			const agent = makeAgent({ importantFiles: ['nonexistent-file-xyz.js'] });
+			await agent._gatherCodebaseContext();
+			expect(agent._codebaseContext.importantFileContents.length).toBe(0);
+		});
+
+		it('should include file contents in system prompt', async () => {
+			const agent = makeAgent({ importantFiles: ['package.json'] });
+			await agent.init();
+			expect(agent.chatConfig.systemInstruction).toContain('Key Files');
+			expect(agent.chatConfig.systemInstruction).toContain('package.json');
+		});
+	});
+
+	// ── writeDir ────────────────────────────────────────────────────────────
+
+	describe('writeDir', () => {
+		it('should default to {workingDirectory}/tmp', () => {
+			const agent = makeAgent();
+			expect(agent.writeDir).toBe(join(process.cwd(), 'tmp'));
+		});
+
+		it('should accept custom writeDir', () => {
+			const agent = makeAgent({ writeDir: '/tmp/custom' });
+			expect(agent.writeDir).toBe('/tmp/custom');
+		});
+
+		it('should create writeDir if it does not exist', async () => {
+			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-wd-'));
+			const writeDir = join(tmpDir, 'nested', 'scripts');
+			try {
+				const agent = makeAgent({ writeDir });
+				await agent._executeCode('console.log("ok");');
+				const files = await readdir(writeDir);
+				// Files should have been cleaned up, but dir should exist
+				expect(Array.isArray(files)).toBe(true);
+			} finally {
+				await rm(tmpDir, { recursive: true, force: true });
+			}
+		});
+
+		it('should still use workingDirectory as cwd for child process', async () => {
+			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-cwd-'));
+			try {
+				const agent = makeAgent({ writeDir: tmpDir });
+				const result = await agent._executeCode('console.log(process.cwd());');
+				expect(result.stdout.trim()).toBe(agent.workingDirectory);
+			} finally {
+				await rm(tmpDir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	// ── keepArtifacts ───────────────────────────────────────────────────────
+
+	describe('keepArtifacts', () => {
+		it('should keep files when keepArtifacts is true', async () => {
+			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-keep-'));
+			try {
+				const agent = makeAgent({ writeDir: tmpDir, keepArtifacts: true });
+				await agent._executeCode('console.log("kept");', 'test-artifact');
+				const files = (await readdir(tmpDir)).filter(f => f.startsWith('agent-'));
+				expect(files.length).toBe(1);
+				expect(files[0]).toContain('test-artifact');
+			} finally {
+				await rm(tmpDir, { recursive: true, force: true });
+			}
+		});
+
+		it('should delete files when keepArtifacts is false', async () => {
+			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-del-'));
+			try {
+				const agent = makeAgent({ writeDir: tmpDir, keepArtifacts: false });
+				await agent._executeCode('console.log("deleted");', 'test-clean');
+				const files = (await readdir(tmpDir)).filter(f => f.startsWith('agent-'));
+				expect(files.length).toBe(0);
+			} finally {
+				await rm(tmpDir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	// ── comments ────────────────────────────────────────────────────────────
+
+	describe('comments option', () => {
+		it('should include no-comments instruction by default', async () => {
+			const agent = makeAgent();
+			await agent.init();
+			expect(agent.chatConfig.systemInstruction).toContain('Do NOT write any comments');
+		});
+
+		it('should include JSDoc instruction when comments=true', async () => {
+			const agent = makeAgent({ comments: true });
+			await agent.init();
+			expect(agent.chatConfig.systemInstruction).toContain('@fileoverview');
+			expect(agent.chatConfig.systemInstruction).toContain('@param');
 		});
 	});
 
