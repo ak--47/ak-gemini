@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 import { ToolAgent } from '../index.js';
 
 const { GEMINI_API_KEY } = process.env;

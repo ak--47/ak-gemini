@@ -32,6 +32,23 @@ export interface ChatConfig {
   [key: string]: any;
 }
 
+export interface GroundingChunk {
+  web?: { uri?: string; title?: string; domain?: string };
+}
+
+export interface GroundingSupport {
+  segment?: any;
+  groundingChunkIndices?: number[];
+  confidenceScores?: number[];
+}
+
+export interface GroundingMetadata {
+  groundingChunks?: GroundingChunk[];
+  groundingSupports?: GroundingSupport[];
+  webSearchQueries?: string[];
+  searchEntryPoint?: { renderedContent?: string };
+}
+
 export interface ResponseMetadata {
   modelVersion: string | null;
   requestedModel: string;
@@ -39,6 +56,7 @@ export interface ResponseMetadata {
   responseTokens: number;
   totalTokens: number;
   timestamp: number;
+  groundingMetadata?: GroundingMetadata | null;
 }
 
 export interface UsageData {
@@ -55,6 +73,7 @@ export interface UsageData {
   /** Model you requested (e.g., 'gemini-2.5-flash') */
   requestedModel: string;
   timestamp: number;
+  groundingMetadata?: GroundingMetadata | null;
 }
 
 export interface TransformationExample {
@@ -75,6 +94,38 @@ export interface GoogleAuthOptions {
   scopes?: string | string[];
   projectId?: string;
   universeDomain?: string;
+}
+
+export interface CacheConfig {
+  /** Model to cache for (defaults to instance modelName) */
+  model?: string;
+  /** Time-to-live duration (e.g., '3600s') */
+  ttl?: string;
+  /** Human-readable display name */
+  displayName?: string;
+  /** Content to cache */
+  contents?: any[];
+  /** System instruction to cache (defaults to instance systemPrompt) */
+  systemInstruction?: string;
+  /** Tools to cache */
+  tools?: any[];
+  /** Tool configuration to cache */
+  toolConfig?: any;
+}
+
+export interface CachedContentInfo {
+  /** Server-generated resource name */
+  name: string;
+  /** User-provided display name */
+  displayName?: string;
+  /** Model this cache is for */
+  model: string;
+  /** Creation timestamp */
+  createTime: string;
+  /** Expiration timestamp */
+  expireTime: string;
+  /** Cache usage metadata */
+  usageMetadata?: { totalTokenCount?: number };
 }
 
 export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<unknown>;
@@ -110,6 +161,14 @@ export interface BaseGeminiOptions {
 
   /** Billing labels for cost segmentation (Vertex AI only) */
   labels?: Record<string, string>;
+
+  /** Enable Google Search grounding (WARNING: costs $35/1k queries) */
+  enableGrounding?: boolean;
+  /** Google Search grounding configuration (searchTypes, excludeDomains, timeRangeFilter) */
+  groundingConfig?: Record<string, any>;
+
+  /** Cached content resource name to use for this session */
+  cachedContent?: string;
 }
 
 export interface TransformerOptions extends BaseGeminiOptions {
@@ -156,6 +215,35 @@ export interface MessageOptions extends BaseGeminiOptions {
   responseSchema?: Object;
   /** MIME type for responses (e.g., 'application/json' for structured output) */
   responseMimeType?: string;
+}
+
+export type EmbeddingTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY' | 'SEMANTIC_SIMILARITY' | 'CLUSTERING' | 'CLASSIFICATION' | 'QUESTION_ANSWERING' | 'FACT_VERIFICATION';
+
+export interface EmbeddingOptions extends BaseGeminiOptions {
+  /** Embedding task type (affects how embeddings are optimized) */
+  taskType?: EmbeddingTaskType;
+  /** Title for the document being embedded (only with RETRIEVAL_DOCUMENT) */
+  title?: string;
+  /** Output dimensionality for the embedding vector */
+  outputDimensionality?: number;
+  /** Whether to auto-truncate long inputs (default: true) */
+  autoTruncate?: boolean;
+}
+
+export interface EmbedConfig {
+  /** Override task type for this call */
+  taskType?: EmbeddingTaskType;
+  /** Override title for this call */
+  title?: string;
+  /** Override output dimensionality for this call */
+  outputDimensionality?: number;
+}
+
+export interface EmbeddingResult {
+  /** The embedding vector */
+  values?: number[];
+  /** Embedding statistics (Vertex AI) */
+  statistics?: { tokenCount?: number; truncated?: boolean };
 }
 
 /** Tool declaration in @google/genai FunctionDeclaration format */
@@ -374,6 +462,9 @@ export declare class BaseGemini {
   exampleCount: number;
   labels: Record<string, string>;
   vertexai: boolean;
+  enableGrounding: boolean;
+  groundingConfig: Record<string, any>;
+  cachedContent: string | null;
 
   init(force?: boolean): Promise<void>;
   seed(examples?: TransformationExample[], opts?: SeedOptions): Promise<any[]>;
@@ -388,6 +479,14 @@ export declare class BaseGemini {
     estimatedInputCost: number;
     note: string;
   }>;
+
+  // Context Caching
+  createCache(config?: CacheConfig): Promise<CachedContentInfo>;
+  getCache(cacheName: string): Promise<CachedContentInfo>;
+  listCaches(): Promise<CachedContentInfo[]>;
+  updateCache(cacheName: string, config?: { ttl?: string; expireTime?: string }): Promise<CachedContentInfo>;
+  deleteCache(cacheName: string): Promise<void>;
+  useCache(cacheName: string): Promise<void>;
 }
 
 export declare class Transformer extends BaseGemini {
@@ -401,8 +500,6 @@ export declare class Transformer extends BaseGemini {
   asyncValidator: AsyncValidatorFunction | null;
   maxRetries: number;
   retryDelay: number;
-  enableGrounding: boolean;
-
   seed(examples?: TransformationExample[]): Promise<any[]>;
   send(payload: Record<string, unknown> | string, opts?: SendOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
   rawSend(payload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }): Promise<Record<string, unknown>>;
@@ -496,6 +593,23 @@ export declare class CodeAgent extends BaseGemini {
   stop(): void;
 }
 
+export declare class Embedding extends BaseGemini {
+  constructor(options?: EmbeddingOptions);
+
+  taskType: EmbeddingTaskType | null;
+  title: string | null;
+  outputDimensionality: number | null;
+  autoTruncate: boolean;
+
+  init(force?: boolean): Promise<void>;
+  /** Embed a single text string */
+  embed(text: string, config?: EmbedConfig): Promise<EmbeddingResult>;
+  /** Embed multiple text strings in a single API call */
+  embedBatch(texts: string[], config?: EmbedConfig): Promise<EmbeddingResult[]>;
+  /** Compute cosine similarity between two embedding vectors (-1 to 1) */
+  similarity(a: number[], b: number[]): number;
+}
+
 // ── Module Exports ───────────────────────────────────────────────────────────
 
 export declare function extractJSON(text: string): any;
@@ -508,6 +622,7 @@ declare const _default: {
   ToolAgent: typeof ToolAgent;
   CodeAgent: typeof CodeAgent;
   RagAgent: typeof RagAgent;
+  Embedding: typeof Embedding;
 };
 
 export default _default;

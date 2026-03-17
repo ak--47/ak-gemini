@@ -26,6 +26,7 @@ export { default as Message } from './message.js';
 export { default as ToolAgent } from './tool-agent.js';
 export { default as CodeAgent } from './code-agent.js';
 export { default as RagAgent } from './rag-agent.js';
+export { default as Embedding } from './embedding.js';
 export { default as BaseGemini } from './base.js';
 export { default as log } from './logger.js';
 export { ThinkingLevel, HarmCategory, HarmBlockThreshold } from '@google/genai';
@@ -39,5 +40,6 @@ import Message from './message.js';
 import ToolAgent from './tool-agent.js';
 import CodeAgent from './code-agent.js';
 import RagAgent from './rag-agent.js';
+import Embedding from './embedding.js';
 
-export default { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent };
+export default { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding };

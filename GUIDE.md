@@ -22,12 +22,15 @@ npm install ak-gemini
 7. [ToolAgent — Agent with Custom Tools](#toolagent--agent-with-custom-tools)
 8. [CodeAgent — Agent That Writes and Runs Code](#codeagent--agent-that-writes-and-runs-code)
 9. [RagAgent — Document & Data Q&A](#ragagent--document--data-qa)
-10. [Observability & Usage Tracking](#observability--usage-tracking)
-11. [Thinking Configuration](#thinking-configuration)
-12. [Error Handling & Retries](#error-handling--retries)
-13. [Performance Tips](#performance-tips)
-14. [Common Integration Patterns](#common-integration-patterns)
-15. [Quick Reference](#quick-reference)
+10. [Embedding — Vector Embeddings](#embedding--vector-embeddings)
+11. [Google Search Grounding](#google-search-grounding)
+12. [Context Caching](#context-caching)
+13. [Observability & Usage Tracking](#observability--usage-tracking)
+14. [Thinking Configuration](#thinking-configuration)
+15. [Error Handling & Retries](#error-handling--retries)
+16. [Performance Tips](#performance-tips)
+17. [Common Integration Patterns](#common-integration-patterns)
+18. [Quick Reference](#quick-reference)
 
 ---
 
@@ -96,6 +99,7 @@ Vertex AI uses Application Default Credentials. Run `gcloud auth application-def
 | Give the AI tools to call (APIs, DB, etc.) | `ToolAgent` | `chat()` / `stream()` |
 | Let the AI write and run JavaScript | `CodeAgent` | `chat()` / `stream()` |
 | Q&A over documents, files, or data | `RagAgent` | `chat()` / `stream()` |
+| Generate vector embeddings | `Embedding` | `embed()` / `embedBatch()` |
 
 **Rule of thumb**: Start with `Message` for the simplest integration. Move to `Chat` if you need history. Use `Transformer` when you need structured JSON output with validation. Use agents when the AI needs to take action.
 
@@ -570,6 +574,313 @@ Prefer `localFiles` and `localData` when possible — they skip the upload step 
 
 ---
 
+## Embedding — Vector Embeddings
+
+Generate vector embeddings for similarity search, clustering, classification, and deduplication. The `Embedding` class uses Google's text embedding models and provides a simple API for single and batch operations.
+
+```javascript
+import { Embedding } from 'ak-gemini';
+
+const embedder = new Embedding({
+  modelName: 'gemini-embedding-001', // default
+});
+```
+
+### Basic Embedding
+
+```javascript
+const result = await embedder.embed('The quick brown fox jumps over the lazy dog');
+console.log(result.values);      // [0.012, -0.034, 0.056, ...] — 768 dimensions by default
+console.log(result.values.length); // 768
+```
+
+### Batch Embedding
+
+Embed multiple texts in a single API call for efficiency:
+
+```javascript
+const texts = [
+  'Machine learning fundamentals',
+  'Deep neural networks',
+  'How to bake sourdough bread',
+];
+
+const results = await embedder.embedBatch(texts);
+// results[0].values, results[1].values, results[2].values
+```
+
+### Task Types
+
+Task types optimize embeddings for specific use cases:
+
+```javascript
+// For documents being indexed
+const docEmbedder = new Embedding({
+  taskType: 'RETRIEVAL_DOCUMENT',
+  title: 'API Reference'  // title only applies to RETRIEVAL_DOCUMENT
+});
+
+// For search queries against those documents
+const queryEmbedder = new Embedding({
+  taskType: 'RETRIEVAL_QUERY'
+});
+
+// Other task types
+new Embedding({ taskType: 'SEMANTIC_SIMILARITY' });
+new Embedding({ taskType: 'CLUSTERING' });
+new Embedding({ taskType: 'CLASSIFICATION' });
+```
+
+**Best practice**: Use `RETRIEVAL_DOCUMENT` when embedding content to store, and `RETRIEVAL_QUERY` when embedding the user's search query.
+
+### Output Dimensionality
+
+Reduce embedding dimensions to save storage space (trade-off with accuracy):
+
+```javascript
+// Constructor-level
+const embedder = new Embedding({ outputDimensionality: 256 });
+
+// Per-call override
+const result = await embedder.embed('Hello', { outputDimensionality: 128 });
+console.log(result.values.length); // 128
+```
+
+Supported by `gemini-embedding-001` (not `text-embedding-001`).
+
+### Cosine Similarity
+
+Compare two embeddings without an API call:
+
+```javascript
+const [a, b] = await Promise.all([
+  embedder.embed('cats are great pets'),
+  embedder.embed('dogs are wonderful companions'),
+]);
+
+const score = embedder.similarity(a.values, b.values);
+// score ≈ 0.85 (semantically similar)
+```
+
+Returns a value between -1 (opposite) and 1 (identical). Typical thresholds:
+- `> 0.8` — very similar
+- `0.5–0.8` — somewhat related
+- `< 0.5` — different topics
+
+### Integration Pattern: Semantic Search
+
+```javascript
+// Index phase
+const documents = ['doc1 text...', 'doc2 text...', 'doc3 text...'];
+const docEmbedder = new Embedding({ taskType: 'RETRIEVAL_DOCUMENT' });
+const docVectors = await docEmbedder.embedBatch(documents);
+
+// Search phase
+const queryEmbedder = new Embedding({ taskType: 'RETRIEVAL_QUERY' });
+const queryVector = await queryEmbedder.embed('how do I authenticate?');
+
+// Find best match
+const scores = docVectors.map((doc, i) => ({
+  index: i,
+  score: queryEmbedder.similarity(queryVector.values, doc.values)
+}));
+scores.sort((a, b) => b.score - a.score);
+console.log('Best match:', documents[scores[0].index]);
+```
+
+### When to Use Embedding
+
+- Semantic search — find documents similar to a query
+- Deduplication — detect near-duplicate content
+- Clustering — group similar items together
+- Classification — compare against known category embeddings
+- Recommendation — find items similar to user preferences
+
+---
+
+## Google Search Grounding
+
+Ground model responses in real-time Google Search results. Available on **all classes** via `enableGrounding` — not just Transformer.
+
+**Warning**: Google Search grounding costs approximately **$35 per 1,000 queries**. Use selectively.
+
+### Basic Usage
+
+```javascript
+import { Chat } from 'ak-gemini';
+
+const chat = new Chat({
+  enableGrounding: true
+});
+
+const result = await chat.send('What happened in tech news today?');
+console.log(result.text); // Response grounded in current search results
+```
+
+### Grounding Metadata
+
+When grounding is enabled, `getLastUsage()` includes source attribution:
+
+```javascript
+const usage = chat.getLastUsage();
+
+if (usage.groundingMetadata) {
+  // Search queries the model executed
+  console.log('Queries:', usage.groundingMetadata.webSearchQueries);
+
+  // Source citations
+  for (const chunk of usage.groundingMetadata.groundingChunks || []) {
+    if (chunk.web) {
+      console.log(`Source: ${chunk.web.title} — ${chunk.web.uri}`);
+    }
+  }
+}
+```
+
+### Grounding Configuration
+
+```javascript
+const chat = new Chat({
+  enableGrounding: true,
+  groundingConfig: {
+    // Exclude specific domains
+    excludeDomains: ['reddit.com', 'twitter.com'],
+
+    // Filter by time range (Gemini API only)
+    timeRangeFilter: {
+      startTime: '2025-01-01T00:00:00Z',
+      endTime: '2025-12-31T23:59:59Z'
+    }
+  }
+});
+```
+
+### Grounding with ToolAgent
+
+Grounding works alongside user-defined tools — both are merged into the tools array automatically:
+
+```javascript
+const agent = new ToolAgent({
+  enableGrounding: true,
+  tools: [
+    { name: 'save_result', description: 'Save a research result', parametersJsonSchema: { type: 'object', properties: { title: { type: 'string' }, summary: { type: 'string' } }, required: ['title', 'summary'] } }
+  ],
+  toolExecutor: async (name, args) => {
+    if (name === 'save_result') return await db.insert(args);
+  }
+});
+
+// The agent can search the web AND call your tools
+const result = await agent.chat('Research the latest AI safety developments and save the key findings');
+```
+
+### Per-Message Grounding Toggle (Transformer)
+
+Transformer supports toggling grounding per-message without rebuilding the instance:
+
+```javascript
+const t = new Transformer({ enableGrounding: false });
+
+// Enable grounding for just this call
+const result = await t.send(payload, { enableGrounding: true });
+
+// Back to no grounding for subsequent calls
+```
+
+### When to Use Grounding
+
+- Questions about current events, recent news, or real-time data
+- Fact-checking or verification tasks
+- Research assistants that need up-to-date information
+- Any scenario where the model's training data cutoff is a limitation
+
+---
+
+## Context Caching
+
+Cache system prompts, documents, or tool definitions to reduce costs when making many API calls with the same large context. Cached tokens are billed at a reduced rate.
+
+### When Context Caching Helps
+
+- **Large system prompts** reused across many calls
+- **RagAgent** with the same document set serving many queries
+- **ToolAgent** with many tool definitions
+- Any scenario with high token count in repeated context
+
+### Create and Use a Cache
+
+```javascript
+import { Chat } from 'ak-gemini';
+
+const chat = new Chat({
+  systemPrompt: veryLongSystemPrompt  // e.g., 10,000+ tokens
+});
+
+// Create a cache (auto-uses this instance's model and systemPrompt)
+const cache = await chat.createCache({
+  ttl: '3600s',           // 1 hour
+  displayName: 'my-app-system-prompt'
+});
+
+console.log(cache.name);       // Server-generated resource name
+console.log(cache.expireTime); // When it expires
+
+// Attach the cache to this instance
+await chat.useCache(cache.name);
+
+// All subsequent calls use cached tokens at reduced cost
+const r1 = await chat.send('Hello');
+const r2 = await chat.send('Tell me more');
+```
+
+### Cache Management
+
+```javascript
+// List all caches
+const caches = await chat.listCaches();
+
+// Get cache details
+const info = await chat.getCache(cache.name);
+console.log(info.usageMetadata?.totalTokenCount);
+
+// Extend TTL
+await chat.updateCache(cache.name, { ttl: '7200s' });
+
+// Delete when done
+await chat.deleteCache(cache.name);
+```
+
+### Cache with Constructor
+
+If you already have a cache name, pass it directly:
+
+```javascript
+const chat = new Chat({
+  cachedContent: 'projects/my-project/locations/us-central1/cachedContents/abc123'
+});
+```
+
+### What Can Be Cached
+
+The `createCache()` config accepts:
+
+| Field | Description |
+|---|---|
+| `systemInstruction` | System prompt (auto-populated from instance if not provided) |
+| `contents` | Content messages to cache |
+| `tools` | Tool declarations to cache |
+| `toolConfig` | Tool configuration to cache |
+| `ttl` | Time-to-live (e.g., `'3600s'`) |
+| `displayName` | Human-readable label |
+
+### Cost Savings
+
+Context caching reduces input token costs for cached content. The exact savings depend on the model — check [Google's pricing page](https://ai.google.dev/pricing) for current rates. The trade-off is the cache storage cost and the minimum cache size requirement.
+
+**Rule of thumb**: Caching pays off when you make many calls with the same large context (system prompt + documents) within the cache TTL.
+
+---
+
 ## Observability & Usage Tracking
 
 Every class provides consistent observability hooks.
@@ -954,7 +1265,7 @@ const result = await chat.send('Find users who signed up in the last 7 days');
 
 ```javascript
 // Named exports
-import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, BaseGemini, log } from 'ak-gemini';
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
 import { ThinkingLevel, HarmCategory, HarmBlockThreshold } from 'ak-gemini';
 
@@ -962,7 +1273,7 @@ import { ThinkingLevel, HarmCategory, HarmBlockThreshold } from 'ak-gemini';
 import AI from 'ak-gemini';
 
 // CommonJS
-const { Transformer, Chat } = require('ak-gemini');
+const { Transformer, Chat, Embedding } = require('ak-gemini');
 ```
 
 ### Constructor Options (All Classes)
@@ -980,6 +1291,9 @@ const { Transformer, Chat } = require('ak-gemini');
 | `maxOutputTokens` | number \| null | `50000` |
 | `logLevel` | string | based on `NODE_ENV` |
 | `labels` | object | `{}` (Vertex AI only) |
+| `enableGrounding` | boolean | `false` |
+| `groundingConfig` | object | `{}` |
+| `cachedContent` | string | `null` |
 
 ### Methods Available on All Classes
 
@@ -992,3 +1306,9 @@ const { Transformer, Chat } = require('ak-gemini');
 | `getLastUsage()` | `UsageData \| null` | Token usage from last call |
 | `estimate(payload)` | `Promise<{ inputTokens }>` | Estimate input tokens |
 | `estimateCost(payload)` | `Promise<object>` | Estimate cost in dollars |
+| `createCache(config?)` | `Promise<CachedContentInfo>` | Create a context cache |
+| `getCache(name)` | `Promise<CachedContentInfo>` | Get cache details |
+| `listCaches()` | `Promise<any>` | List all caches |
+| `updateCache(name, config?)` | `Promise<CachedContentInfo>` | Update cache TTL |
+| `deleteCache(name)` | `Promise<void>` | Delete a cache |
+| `useCache(name)` | `Promise<void>` | Attach a cache to this instance |

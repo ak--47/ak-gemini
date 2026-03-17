@@ -5,7 +5,7 @@
 import dotenv from 'dotenv';
 
 // Load environment variables
-dotenv.config();
+dotenv.config({ quiet: true });
 
 // Set test timeout globally (only if jest is available)
 if (typeof jest !== 'undefined') {

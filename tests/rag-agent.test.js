@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 import { RagAgent } from '../index.js';
 import { join } from 'node:path';
 import { writeFile, mkdtemp, rm } from 'node:fs/promises';

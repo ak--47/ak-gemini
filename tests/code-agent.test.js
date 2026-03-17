@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 import { CodeAgent } from '../index.js';
 import { join } from 'node:path';
 import { mkdtemp, rm, writeFile, readdir, readFile } from 'node:fs/promises';

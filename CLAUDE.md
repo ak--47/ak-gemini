@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v2.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 6 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v2.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -20,6 +20,7 @@ ak-gemini/
   tool-agent.js         ← ToolAgent class (agent with user-provided tools)
   code-agent.js         ← CodeAgent class (agent that writes and executes code)
   rag-agent.js          ← RagAgent class (document Q&A via remote files, local files, and in-memory data)
+  embedding.js          ← Embedding class (vector embeddings via gemini-embedding-001)
   json-helpers.js       ← Pure functions: extractJSON, attemptJSONRecovery, etc.
   logger.js             ← Pino-based logging with configurable levels
   types.d.ts            ← TypeScript definitions for all classes and interfaces
@@ -32,12 +33,13 @@ ak-gemini/
     tool-agent.test.js  ← Agent with user-provided tools tests
     code-agent.test.js  ← CodeAgent tests
     rag-agent.test.js   ← RagAgent tests
+    embedding.test.js   ← Embedding tests
     json-helpers.test.js ← Pure function unit tests
 ```
 
 ### Class Hierarchy
 
-All classes extend `BaseGemini` which provides: auth, client init, chat session management, thinking config, log levels, safety settings, token estimation, cost tracking, usage reporting, and `seed()`.
+All classes extend `BaseGemini` which provides: auth, client init, chat session management, thinking config, log levels, safety settings, token estimation, cost tracking, usage reporting, `seed()`, Google Search grounding, and context caching.
 
 | Class | Primary Method | Description |
 |-------|---------------|-------------|
@@ -47,6 +49,7 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 | `ToolAgent` | `chat(message)` / `stream(message)` | Agent with user-provided tools |
 | `CodeAgent` | `chat(message)` / `stream(message)` | Agent that writes and executes JavaScript |
 | `RagAgent` | `chat(message)` / `stream(message)` | Document Q&A via remote files, local files, and in-memory data |
+| `Embedding` | `embed(text)` / `embedBatch(texts)` | Vector embeddings via gemini-embedding-001 |
 
 ### Key Design Decisions
 
@@ -58,7 +61,10 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **`stop()`** is available on both ToolAgent and CodeAgent to cancel mid-execution
 - **`onBeforeExecution`** callback on both agents for gating/approval before execution
 - **RagAgent** supports three context input types: `remoteFiles` (Files API upload), `localFiles` (read from disk), `localData` (in-memory objects)
-- Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent }`
+- **Embedding** uses `gemini-embedding-001` by default, supports task types, dimensionality control, and cosine similarity
+- **Google Search grounding** (`enableGrounding`) is available on all classes via BaseGemini, merges with existing tools
+- **Context caching** (`cachedContent`, `createCache()`, `useCache()`) is available on all classes via BaseGemini
+- Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding }`
 
 ## Key Classes & APIs
 
@@ -67,8 +73,12 @@ Shared foundation. Not typically instantiated directly.
 - `init(force?)` — Creates chat session, validates API connection
 - `seed(examples, opts?)` — Add example pairs to chat history
 - `getHistory()` / `clearHistory()` — Manage chat history
-- `getLastUsage()` — Structured usage data after API calls
+- `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled)
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
+- `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)
+- `cachedContent` — Attach a context cache to reduce costs
+- `createCache(config?)` / `getCache(name)` / `listCaches()` / `updateCache(name, config)` / `deleteCache(name)` — Cache CRUD
+- `useCache(name)` — Attach cache and reinitialize session
 
 ### Transformer (`transformer.js`)
 JSON transformation via few-shot learning. Extends BaseGemini.
@@ -122,6 +132,15 @@ Document Q&A agent with three context input types. Extends BaseGemini.
 - **`localFiles`**: read from disk as UTF-8 text — md, json, csv, yaml, txt, etc.
 - **`localData`**: in-memory objects/arrays serialized as JSON — shape: `{ name: string, data: any }[]`
 
+### Embedding (`embedding.js`)
+Vector embeddings via Google's text embedding models. Extends BaseGemini (stateless, like Message).
+- `embed(text, config?)` → `{ values: number[] }` — Embed a single text
+- `embedBatch(texts, config?)` → `EmbeddingResult[]` — Embed multiple texts
+- `similarity(a, b)` → `number` — Cosine similarity (pure math, no API call)
+- Default model: `gemini-embedding-001`
+- Constructor options: `taskType`, `title`, `outputDimensionality`
+- `getHistory()`, `clearHistory()`, `seed()`, `estimate()` are no-ops/throw
+
 ## Development Commands
 
 ```bash
@@ -154,7 +173,7 @@ new Transformer({ vertexai: true, project: 'my-gcp-project' });
 
 ```javascript
 // Named exports
-import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, BaseGemini, log } from 'ak-gemini';
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
 
 // Default export (namespace object)
@@ -171,7 +190,7 @@ const { Transformer, Chat } = require('ak-gemini');
 - **Do NOT run tests during development** — they are slow (real API calls) and expensive. Use `npm run typecheck` and `npm run build:cjs` to verify changes.
 - Test timeout: 30 seconds (AI calls take 5-15 seconds)
 - Rate limiting (429 errors) can cause flaky failures — retry after waiting
-- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `json-helpers.test.js`
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `embedding.test.js`, `json-helpers.test.js`
 
 ## Key Design Patterns
 
@@ -215,6 +234,29 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - `estimate()` — INPUT token counts before sending
 - `getLastUsage()` — actual consumption AFTER the call
 - `estimateCost()` — cost estimate using MODEL_PRICING table
+
+### Google Search Grounding (BaseGemini)
+- `enableGrounding: true` + `groundingConfig: {}` on any class constructor
+- Grounding tool merges with existing tools (ToolAgent/CodeAgent function declarations coexist)
+- Response includes `groundingMetadata` in `getLastUsage()` — contains `groundingChunks`, `webSearchQueries`, etc.
+- Per-message toggle available in Transformer via `send(payload, { enableGrounding: true })`
+- WARNING: costs ~$35/1k queries
+
+### Context Caching (BaseGemini)
+- `cachedContent` constructor option or `useCache(name)` to attach a cache
+- `createCache(config)` auto-populates model + systemInstruction from instance
+- Cache CRUD: `getCache()`, `listCaches()` (returns array), `updateCache()`, `deleteCache()`
+- `useCache()` clears `systemInstruction` from chatConfig (API rejects duplicates since it's in the cache)
+- `deleteCache()` clears `cachedContent` if it matches the deleted cache
+- TTL format: duration string ending in 's' (e.g., `'3600s'`)
+
+### Embeddings (Embedding)
+- Extends BaseGemini for auth reuse; overrides `init()` to skip chat session (like Message)
+- Default model: `gemini-embedding-001` (not a generative model)
+- `embed(text)` → single embedding, `embedBatch(texts)` → array of embeddings
+- `similarity(a, b)` → cosine similarity (pure math, no API)
+- Task types: `RETRIEVAL_DOCUMENT`, `RETRIEVAL_QUERY`, `SEMANTIC_SIMILARITY`, `CLUSTERING`, `CLASSIFICATION`
+- `outputDimensionality` controls vector size (supported by gemini-embedding-001)
 
 ### Billing Labels (Vertex AI)
 - Constructor-level: `labels: { app: 'myapp', env: 'prod' }`

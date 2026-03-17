@@ -1,6 +1,6 @@
 # ak-gemini
 
-**Modular, type-safe wrapper for Google's Gemini AI.** Five class exports for different interaction patterns — JSON transformation, chat, stateless messages, tool-using agents, and code-writing agents — all sharing a common base.
+**Modular, type-safe wrapper for Google's Gemini AI.** Seven class exports for different interaction patterns — JSON transformation, chat, stateless messages, tool-using agents, code-writing agents, document Q&A, and embeddings — all sharing a common base.
 
 ```sh
 npm install ak-gemini
@@ -17,7 +17,7 @@ export GEMINI_API_KEY=your-key
 ```
 
 ```javascript
-import { Transformer, Chat, Message, ToolAgent, CodeAgent } from 'ak-gemini';
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding } from 'ak-gemini';
 ```
 
 ---
@@ -176,6 +176,27 @@ for await (const event of agent.stream('Refactor the auth module')) {
 }
 ```
 
+### Embedding — Vector Embeddings
+
+Generate vector embeddings for similarity search, clustering, and classification.
+
+```javascript
+const embedder = new Embedding({
+  modelName: 'gemini-embedding-001', // default
+  taskType: 'RETRIEVAL_DOCUMENT'
+});
+
+// Single text
+const result = await embedder.embed('Hello world');
+console.log(result.values); // [0.012, -0.034, ...]
+
+// Batch
+const results = await embedder.embedBatch(['Hello', 'World']);
+
+// Cosine similarity (pure math, no API call)
+const score = embedder.similarity(results[0].values, results[1].values);
+```
+
 ---
 
 ## Stopping Agents
@@ -252,6 +273,43 @@ new Chat({
 });
 ```
 
+### Google Search Grounding
+
+Ground responses in real-time web search results. Available on all classes.
+
+```javascript
+const chat = new Chat({
+  enableGrounding: true,
+  groundingConfig: { excludeDomains: ['example.com'] }
+});
+
+const result = await chat.send('Who won the 2026 Super Bowl?');
+const sources = result.usage?.groundingMetadata?.groundingChunks;
+```
+
+**Warning**: Google Search grounding costs ~$35/1k queries.
+
+### Context Caching
+
+Reduce costs by caching repeated system prompts, documents, or tool definitions.
+
+```javascript
+const chat = new Chat({ systemPrompt: longSystemPrompt });
+
+// Create a cache
+const cache = await chat.createCache({
+  ttl: '3600s',
+  displayName: 'my-system-prompt-cache'
+});
+
+// Use the cache (subsequent calls use cached tokens at reduced cost)
+await chat.useCache(cache.name);
+const result = await chat.send('Hello!');
+
+// Clean up
+await chat.deleteCache(cache.name);
+```
+
 ### Billing Labels (Vertex AI)
 
 ```javascript
@@ -281,6 +339,9 @@ All classes accept `BaseGeminiOptions`:
 | `maxOutputTokens` | number | `50000` | Max tokens in response (`null` removes limit) |
 | `logLevel` | string | based on NODE_ENV | `'trace'`\|`'debug'`\|`'info'`\|`'warn'`\|`'error'`\|`'none'` |
 | `labels` | object | — | Billing labels (Vertex AI) |
+| `enableGrounding` | boolean | `false` | Enable Google Search grounding |
+| `groundingConfig` | object | — | Grounding config (excludeDomains, timeRangeFilter) |
+| `cachedContent` | string | — | Cached content resource name |
 
 ### Transformer-Specific
 
@@ -293,8 +354,6 @@ All classes accept `BaseGeminiOptions`:
 | `retryDelay` | number | `1000` | Initial retry delay (ms) |
 | `responseSchema` | object | — | JSON schema for output validation |
 | `asyncValidator` | function | — | Global async validator |
-| `enableGrounding` | boolean | `false` | Enable Google Search grounding |
-
 ### ToolAgent-Specific
 
 | Option | Type | Default | Description |
@@ -322,21 +381,31 @@ All classes accept `BaseGeminiOptions`:
 | `responseSchema` | object | — | Schema for structured output |
 | `responseMimeType` | string | — | e.g. `'application/json'` |
 
+### Embedding-Specific
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `taskType` | string | — | `'RETRIEVAL_DOCUMENT'`, `'RETRIEVAL_QUERY'`, `'SEMANTIC_SIMILARITY'`, `'CLUSTERING'` |
+| `title` | string | — | Document title (only with `RETRIEVAL_DOCUMENT`) |
+| `outputDimensionality` | number | — | Output vector dimensions |
+| `autoTruncate` | boolean | `true` | Auto-truncate long inputs |
+
 ---
 
 ## Exports
 
 ```javascript
 // Named exports
-import { Transformer, Chat, Message, ToolAgent, CodeAgent, BaseGemini, log } from 'ak-gemini';
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
 
 // Default export (namespace)
 import AI from 'ak-gemini';
 new AI.Transformer({ ... });
+new AI.Embedding({ ... });
 
 // CommonJS
-const { Transformer, Chat } = require('ak-gemini');
+const { Transformer, Chat, Embedding } = require('ak-gemini');
 ```
 
 ---

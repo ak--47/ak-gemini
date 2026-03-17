@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 import { Transformer, attemptJSONRecovery, log } from '../index.js';
 import path from 'path';
 import fs from 'fs';

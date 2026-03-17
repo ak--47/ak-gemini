@@ -96,25 +96,7 @@ class Transformer extends BaseGemini {
 		this.maxRetries = options.maxRetries || 3;
 		this.retryDelay = options.retryDelay || 1000;
 
-		// ── Grounding ──
-		this.enableGrounding = options.enableGrounding || false;
-		this.groundingConfig = options.groundingConfig || {};
-
 		log.debug(`Transformer keys — Source: "${this.promptKey}", Target: "${this.answerKey}", Context: "${this.contextKey}"`);
-	}
-
-	// ── Chat Create Options Override ──────────────────────────────────────────
-
-	/** @protected */
-	_getChatCreateOptions() {
-		const opts = super._getChatCreateOptions();
-
-		if (this.enableGrounding) {
-			opts.config.tools = [{ googleSearch: this.groundingConfig }];
-			log.debug(`Search grounding ENABLED (WARNING: costs $35/1k queries)`);
-		}
-
-		return opts;
 	}
 
 	// ── Seeding ──────────────────────────────────────────────────────────────

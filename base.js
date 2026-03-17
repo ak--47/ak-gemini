@@ -5,7 +5,7 @@
  */
 
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 const { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
 
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
@@ -43,7 +43,8 @@ const MODEL_PRICING = {
 	'gemini-3-pro': { input: 2.00, output: 12.00 },
 	'gemini-3-pro-preview': { input: 2.00, output: 12.00 },
 	'gemini-2.0-flash': { input: 0.10, output: 0.40 },
-	'gemini-2.0-flash-lite': { input: 0.02, output: 0.10 }
+	'gemini-2.0-flash-lite': { input: 0.02, output: 0.10 },
+	'gemini-embedding-001': { input: 0.006, output: 0 }
 };
 
 export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, DEFAULT_MAX_OUTPUT_TOKENS };
@@ -98,6 +99,13 @@ class BaseGemini {
 
 		// ── Labels ──
 		this.labels = options.labels || {};
+
+		// ── Grounding ──
+		this.enableGrounding = options.enableGrounding || false;
+		this.groundingConfig = options.groundingConfig || {};
+
+		// ── Caching ──
+		this.cachedContent = options.cachedContent || null;
 
 		// ── Chat Config ──
 		this.chatConfig = {
@@ -197,14 +205,24 @@ class BaseGemini {
 	 * @protected
 	 */
 	_getChatCreateOptions() {
-		return {
+		const opts = {
 			model: this.modelName,
 			config: {
 				...this.chatConfig,
-				...(this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels })
+				...(this.vertexai && Object.keys(this.labels).length > 0 && { labels: this.labels }),
+				...(this.cachedContent && { cachedContent: this.cachedContent })
 			},
 			history: []
 		};
+
+		// Merge grounding into tools (preserving existing tools like functionDeclarations)
+		if (this.enableGrounding) {
+			const existingTools = opts.config.tools || [];
+			opts.config.tools = [...existingTools, { googleSearch: this.groundingConfig }];
+			log.debug('Search grounding ENABLED (WARNING: costs $35/1k queries)');
+		}
+
+		return opts;
 	}
 
 	// ── Chat Session Management ──────────────────────────────────────────────
@@ -344,7 +362,8 @@ class BaseGemini {
 			promptTokens: response.usageMetadata?.promptTokenCount || 0,
 			responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
 			totalTokens: response.usageMetadata?.totalTokenCount || 0,
-			timestamp: Date.now()
+			timestamp: Date.now(),
+			groundingMetadata: response.candidates?.[0]?.groundingMetadata || null
 		};
 	}
 
@@ -367,7 +386,8 @@ class BaseGemini {
 			attempts: useCumulative ? cumulative.attempts : 1,
 			modelVersion: meta.modelVersion,
 			requestedModel: meta.requestedModel,
-			timestamp: meta.timestamp
+			timestamp: meta.timestamp,
+			groundingMetadata: meta.groundingMetadata || null
 		};
 	}
 
@@ -423,6 +443,112 @@ class BaseGemini {
 			estimatedInputCost: (tokenInfo.inputTokens / 1_000_000) * pricing.input,
 			note: 'Cost is for input tokens only; output cost depends on response length'
 		};
+	}
+
+	// ── Context Caching ─────────────────────────────────────────────────────
+
+	/**
+	 * Creates a cached content resource for cost reduction on repeated prompts.
+	 * Auto-populates model and systemInstruction from this instance if not provided.
+	 * @param {Object} [config={}] - Cache configuration
+	 * @param {string} [config.model] - Model (defaults to this.modelName)
+	 * @param {string} [config.ttl] - Time-to-live (e.g., '3600s')
+	 * @param {string} [config.displayName] - Human-readable name
+	 * @param {Array} [config.contents] - Content to cache
+	 * @param {string} [config.systemInstruction] - System prompt to cache (defaults to this.systemPrompt)
+	 * @param {Array} [config.tools] - Tools to cache
+	 * @param {Object} [config.toolConfig] - Tool configuration to cache
+	 * @returns {Promise<Object>} The created cache resource
+	 */
+	async createCache(config = {}) {
+		const cacheConfig = {};
+		if (config.ttl) cacheConfig.ttl = config.ttl;
+		if (config.displayName) cacheConfig.displayName = config.displayName;
+		if (config.contents) cacheConfig.contents = config.contents;
+		if (config.tools) cacheConfig.tools = config.tools;
+		if (config.toolConfig) cacheConfig.toolConfig = config.toolConfig;
+
+		// Auto-populate systemInstruction from instance if not provided
+		const sysInstruction = config.systemInstruction !== undefined ? config.systemInstruction : this.systemPrompt;
+		if (sysInstruction) cacheConfig.systemInstruction = sysInstruction;
+
+		const cached = await this.genAIClient.caches.create({
+			model: config.model || this.modelName,
+			config: cacheConfig
+		});
+
+		log.debug(`Cache created: ${cached.name}`);
+		return cached;
+	}
+
+	/**
+	 * Retrieves a cached content resource by name.
+	 * @param {string} cacheName - Server-generated resource name
+	 * @returns {Promise<Object>} The cached content resource
+	 */
+	async getCache(cacheName) {
+		return await this.genAIClient.caches.get({ name: cacheName });
+	}
+
+	/**
+	 * Lists all cached content resources.
+	 * @returns {Promise<Object>} Pager of cached content resources
+	 */
+	async listCaches() {
+		const pager = await this.genAIClient.caches.list();
+		const results = [];
+		for await (const cache of pager) {
+			results.push(cache);
+		}
+		return results;
+	}
+
+	/**
+	 * Updates a cached content resource (TTL or expiration).
+	 * @param {string} cacheName - Server-generated resource name
+	 * @param {Object} [config={}] - Update config
+	 * @param {string} [config.ttl] - New TTL (e.g., '7200s')
+	 * @param {string} [config.expireTime] - New expiration (RFC 3339)
+	 * @returns {Promise<Object>} The updated cache resource
+	 */
+	async updateCache(cacheName, config = {}) {
+		return await this.genAIClient.caches.update({
+			name: cacheName,
+			config: {
+				...(config.ttl && { ttl: config.ttl }),
+				...(config.expireTime && { expireTime: config.expireTime })
+			}
+		});
+	}
+
+	/**
+	 * Deletes a cached content resource.
+	 * Clears this.cachedContent if it matches the deleted cache.
+	 * @param {string} cacheName - Server-generated resource name
+	 * @returns {Promise<void>}
+	 */
+	async deleteCache(cacheName) {
+		await this.genAIClient.caches.delete({ name: cacheName });
+		log.debug(`Cache deleted: ${cacheName}`);
+		if (this.cachedContent === cacheName) {
+			this.cachedContent = null;
+		}
+	}
+
+	/**
+	 * Sets the cached content for this instance and reinitializes the session.
+	 * @param {string} cacheName - Server-generated cache resource name
+	 * @returns {Promise<void>}
+	 */
+	async useCache(cacheName) {
+		this.cachedContent = cacheName;
+		// When using cached content, remove systemInstruction from chatConfig
+		// since it's already baked into the cache — the API rejects duplicates
+		delete this.chatConfig.systemInstruction;
+		if (this.chatSession) {
+			await this.init(true);
+		}
+		log.debug(`Using cache: ${cacheName}`);
 	}
 
 	// ── Private Helpers ──────────────────────────────────────────────────────
