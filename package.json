@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... everything",
-	"version": "2.0.3",
+	"version": "2.0.4",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -14,6 +14,7 @@
 		"tool-agent.js",
 		"code-agent.js",
 		"rag-agent.js",
+		"embedding.js",
 		"json-helpers.js",
 		"types.d.ts",
 		"logger.js",

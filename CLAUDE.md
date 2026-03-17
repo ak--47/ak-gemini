@@ -141,6 +141,10 @@ Vector embeddings via Google's text embedding models. Extends BaseGemini (statel
 - Constructor options: `taskType`, `title`, `outputDimensionality`
 - `getHistory()`, `clearHistory()`, `seed()`, `estimate()` are no-ops/throw
 
+## Publishing Checklist
+
+- **When adding new `.js` files**, always add them to the `files` array in `package.json`. This controls what gets published to npm — missing entries cause `ERR_MODULE_NOT_FOUND` for consumers.
+
 ## Development Commands
 
 ```bash
