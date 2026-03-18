@@ -361,6 +361,8 @@ var BaseGemini = class {
     if (this.vertexai && !this.project) {
       throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
     }
+    this.resourceExhaustedRetries = options.resourceExhaustedRetries ?? 5;
+    this.resourceExhaustedDelay = options.resourceExhaustedDelay ?? 1e3;
     this._configureLogLevel(options.logLevel);
     this.labels = options.labels || {};
     this.enableGrounding = options.enableGrounding || false;
@@ -619,10 +621,10 @@ ${contextText}
     }
     const nextMessage = typeof nextPayload === "string" ? nextPayload : JSON.stringify(nextPayload, null, 2);
     contents.push({ parts: [{ text: nextMessage }] });
-    const resp = await this.genAIClient.models.countTokens({
+    const resp = await this._withRetry(() => this.genAIClient.models.countTokens({
       model: this.modelName,
       contents
-    });
+    }));
     return { inputTokens: resp.totalTokens };
   }
   /**
@@ -664,10 +666,10 @@ ${contextText}
     if (config.toolConfig) cacheConfig.toolConfig = config.toolConfig;
     const sysInstruction = config.systemInstruction !== void 0 ? config.systemInstruction : this.systemPrompt;
     if (sysInstruction) cacheConfig.systemInstruction = sysInstruction;
-    const cached = await this.genAIClient.caches.create({
+    const cached = await this._withRetry(() => this.genAIClient.caches.create({
       model: config.model || this.modelName,
       config: cacheConfig
-    });
+    }));
     logger_default.debug(`Cache created: ${cached.name}`);
     return cached;
   }
@@ -677,14 +679,14 @@ ${contextText}
    * @returns {Promise<Object>} The cached content resource
    */
   async getCache(cacheName) {
-    return await this.genAIClient.caches.get({ name: cacheName });
+    return await this._withRetry(() => this.genAIClient.caches.get({ name: cacheName }));
   }
   /**
    * Lists all cached content resources.
    * @returns {Promise<Object>} Pager of cached content resources
    */
   async listCaches() {
-    const pager = await this.genAIClient.caches.list();
+    const pager = await this._withRetry(() => this.genAIClient.caches.list());
     const results = [];
     for await (const cache of pager) {
       results.push(cache);
@@ -700,13 +702,13 @@ ${contextText}
    * @returns {Promise<Object>} The updated cache resource
    */
   async updateCache(cacheName, config = {}) {
-    return await this.genAIClient.caches.update({
+    return await this._withRetry(() => this.genAIClient.caches.update({
       name: cacheName,
       config: {
         ...config.ttl && { ttl: config.ttl },
         ...config.expireTime && { expireTime: config.expireTime }
       }
-    });
+    }));
   }
   /**
    * Deletes a cached content resource.
@@ -715,7 +717,7 @@ ${contextText}
    * @returns {Promise<void>}
    */
   async deleteCache(cacheName) {
-    await this.genAIClient.caches.delete({ name: cacheName });
+    await this._withRetry(() => this.genAIClient.caches.delete({ name: cacheName }));
     logger_default.debug(`Cache deleted: ${cacheName}`);
     if (this.cachedContent === cacheName) {
       this.cachedContent = null;
@@ -733,6 +735,41 @@ ${contextText}
       await this.init(true);
     }
     logger_default.debug(`Using cache: ${cacheName}`);
+  }
+  // ── Rate Limit Retry ────────────────────────────────────────────────────
+  /**
+   * Detects whether an error is a 429 / RESOURCE_EXHAUSTED rate-limit error.
+   * @param {Error} error
+   * @returns {boolean}
+   * @private
+   */
+  _is429Error(error) {
+    const e = error;
+    if (e.status === 429 || e.code === 429 || e.httpStatusCode === 429) return true;
+    const msg = e.message || "";
+    return msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED");
+  }
+  /**
+   * Wraps an async function with automatic retry on 429 (RESOURCE_EXHAUSTED) errors.
+   * Uses exponential backoff with jitter. Non-429 errors are rethrown immediately.
+   * @param {() => Promise<T>} fn - The async function to execute
+   * @returns {Promise<T>}
+   * @template T
+   * @protected
+   */
+  async _withRetry(fn) {
+    const maxAttempts = this.resourceExhaustedRetries;
+    for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (!this._is429Error(error) || attempt >= maxAttempts) throw error;
+        const jitter = Math.random() * 500;
+        const delay = this.resourceExhaustedDelay * Math.pow(2, attempt) + jitter;
+        logger_default.warn(`Rate limited (429). Retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxAttempts})...`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
   }
   // ── Private Helpers ──────────────────────────────────────────────────────
   /**
@@ -965,7 +1002,7 @@ var Transformer = class extends base_default {
       if (hasLabels) {
         sendParams.config = { labels: mergedLabels };
       }
-      const result = await this.chatSession.sendMessage(sendParams);
+      const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
       this._captureMetadata(result);
       if (result.usageMetadata && logger_default.level !== "silent") {
         logger_default.debug(`API response: model=${result.modelVersion || "unknown"}, tokens=${result.usageMetadata.totalTokenCount}`);
@@ -1009,7 +1046,7 @@ Respond with JSON only \u2013 no comments or explanations.
 `;
     let result;
     try {
-      result = await this.chatSession.sendMessage({ message: prompt });
+      result = await this._withRetry(() => this.chatSession.sendMessage({ message: prompt }));
       this._captureMetadata(result);
     } catch (err) {
       throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
@@ -1044,14 +1081,14 @@ Respond with JSON only \u2013 no comments or explanations.
     }
     contents.push({ role: "user", parts: [{ text: payloadStr }] });
     const mergedLabels = { ...this.labels, ...opts.labels || {} };
-    const result = await this.genAIClient.models.generateContent({
+    const result = await this._withRetry(() => this.genAIClient.models.generateContent({
       model: this.modelName,
       contents,
       config: {
         ...this.chatConfig,
         ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
       }
-    });
+    }));
     this._captureMetadata(result);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -1163,7 +1200,7 @@ var Chat = class extends base_default {
     if (hasLabels) {
       sendParams.config = { labels: mergedLabels };
     }
-    const result = await this.chatSession.sendMessage(sendParams);
+    const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
     this._captureMetadata(result);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -1227,14 +1264,14 @@ var Message = class extends base_default {
     const payloadStr = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
     const contents = [{ role: "user", parts: [{ text: payloadStr }] }];
     const mergedLabels = { ...this.labels, ...opts.labels || {} };
-    const result = await this.genAIClient.models.generateContent({
+    const result = await this._withRetry(() => this.genAIClient.models.generateContent({
       model: this.modelName,
       contents,
       config: {
         ...this.chatConfig,
         ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
       }
-    });
+    }));
     this._captureMetadata(result);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -1327,7 +1364,7 @@ var ToolAgent = class extends base_default {
     if (!this.chatSession) await this.init();
     this._stopped = false;
     const allToolCalls = [];
-    let response = await this.chatSession.sendMessage({ message });
+    let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
     for (let round = 0; round < this.maxToolRounds; round++) {
       if (this._stopped) break;
       const functionCalls = response.functionCalls;
@@ -1364,7 +1401,7 @@ var ToolAgent = class extends base_default {
           return { id: call.id, name: call.name, result };
         })
       );
-      response = await this.chatSession.sendMessage({
+      response = await this._withRetry(() => this.chatSession.sendMessage({
         message: toolResults.map((r) => ({
           functionResponse: {
             id: r.id,
@@ -1372,7 +1409,7 @@ var ToolAgent = class extends base_default {
             response: { output: r.result }
           }
         }))
-      });
+      }));
     }
     this._captureMetadata(response);
     this._cumulativeUsage = {
@@ -1407,7 +1444,7 @@ var ToolAgent = class extends base_default {
     this._stopped = false;
     const allToolCalls = [];
     let fullText = "";
-    let streamResponse = await this.chatSession.sendMessageStream({ message });
+    let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
     for (let round = 0; round < this.maxToolRounds; round++) {
       if (this._stopped) break;
       let roundText = "";
@@ -1465,7 +1502,7 @@ var ToolAgent = class extends base_default {
         yield { type: "tool_result", toolName: call.name, result };
         toolResults.push({ id: call.id, name: call.name, result });
       }
-      streamResponse = await this.chatSession.sendMessageStream({
+      streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
         message: toolResults.map((r) => ({
           functionResponse: {
             id: r.id,
@@ -1473,7 +1510,7 @@ var ToolAgent = class extends base_default {
             response: { output: r.result }
           }
         }))
-      });
+      }));
     }
     yield {
       type: "done",
@@ -1866,7 +1903,7 @@ ${this._userSystemPrompt}`;
     this._stopped = false;
     const codeExecutions = [];
     let consecutiveFailures = 0;
-    let response = await this.chatSession.sendMessage({ message });
+    let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
       const functionCalls = response.functionCalls;
@@ -1902,7 +1939,7 @@ ${this._userSystemPrompt}`;
         });
       }
       if (this._stopped) break;
-      response = await this.chatSession.sendMessage({
+      response = await this._withRetry(() => this.chatSession.sendMessage({
         message: results.map((r) => ({
           functionResponse: {
             id: r.id,
@@ -1910,7 +1947,7 @@ ${this._userSystemPrompt}`;
             response: { output: r.result }
           }
         }))
-      });
+      }));
       if (consecutiveFailures >= this.maxRetries) break;
     }
     this._captureMetadata(response);
@@ -1947,7 +1984,7 @@ ${this._userSystemPrompt}`;
     const codeExecutions = [];
     let fullText = "";
     let consecutiveFailures = 0;
-    let streamResponse = await this.chatSession.sendMessageStream({ message });
+    let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
       const functionCalls = [];
@@ -2008,7 +2045,7 @@ ${this._userSystemPrompt}`;
         });
       }
       if (this._stopped) break;
-      streamResponse = await this.chatSession.sendMessageStream({
+      streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
         message: results.map((r) => ({
           functionResponse: {
             id: r.id,
@@ -2016,7 +2053,7 @@ ${this._userSystemPrompt}`;
             response: { output: r.result }
           }
         }))
-      });
+      }));
       if (consecutiveFailures >= this.maxRetries) break;
     }
     let warning = "Max tool rounds reached";
@@ -2141,10 +2178,10 @@ var RagAgent = class extends base_default {
       logger_default.debug(`Uploading remote file: ${resolvedPath}`);
       const ext = (0, import_node_path2.extname)(resolvedPath).toLowerCase();
       const mimeType = MIME_TYPES[ext] || "application/octet-stream";
-      const uploaded = await this.genAIClient.files.upload({
+      const uploaded = await this._withRetry(() => this.genAIClient.files.upload({
         file: resolvedPath,
         config: { displayName: (0, import_node_path2.basename)(resolvedPath), mimeType }
-      });
+      }));
       await this._waitForFileActive(uploaded);
       this._uploadedRemoteFiles.push({
         ...uploaded,
@@ -2202,7 +2239,7 @@ ${serialized}` });
    */
   async chat(message, opts = {}) {
     if (!this._initialized) await this.init();
-    const response = await this.chatSession.sendMessage({ message });
+    const response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
     this._captureMetadata(response);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -2226,7 +2263,7 @@ ${serialized}` });
   async *stream(message, opts = {}) {
     if (!this._initialized) await this.init();
     let fullText = "";
-    const streamResponse = await this.chatSession.sendMessageStream({ message });
+    const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
     for await (const chunk of streamResponse) {
       if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
         const text = chunk.candidates[0].content.parts[0].text;
@@ -2381,11 +2418,11 @@ var Embedding = class extends base_default {
   	 */
   async embed(text, config = {}) {
     if (!this._initialized) await this.init();
-    const result = await this.genAIClient.models.embedContent({
+    const result = await this._withRetry(() => this.genAIClient.models.embedContent({
       model: this.modelName,
       contents: text,
       config: this._buildConfig(config)
-    });
+    }));
     return result.embeddings[0];
   }
   /**
@@ -2400,11 +2437,11 @@ var Embedding = class extends base_default {
   	 */
   async embedBatch(texts, config = {}) {
     if (!this._initialized) await this.init();
-    const result = await this.genAIClient.models.embedContent({
+    const result = await this._withRetry(() => this.genAIClient.models.embedContent({
       model: this.modelName,
       contents: texts,
       config: this._buildConfig(config)
-    });
+    }));
     return result.embeddings;
   }
   /**

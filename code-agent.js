@@ -449,7 +449,7 @@ class CodeAgent extends BaseGemini {
 		const codeExecutions = [];
 		let consecutiveFailures = 0;
 
-		let response = await this.chatSession.sendMessage({ message });
+		let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
 
 		for (let round = 0; round < this.maxRounds; round++) {
 			if (this._stopped) break;
@@ -495,7 +495,7 @@ class CodeAgent extends BaseGemini {
 			if (this._stopped) break;
 
 			// Send function responses back to the model
-			response = await this.chatSession.sendMessage({
+			response = await this._withRetry(() => this.chatSession.sendMessage({
 				message: results.map(r => ({
 					functionResponse: {
 						id: r.id,
@@ -503,7 +503,7 @@ class CodeAgent extends BaseGemini {
 						response: { output: r.result }
 					}
 				}))
-			});
+			}));
 
 			if (consecutiveFailures >= this.maxRetries) break;
 		}
@@ -548,7 +548,7 @@ class CodeAgent extends BaseGemini {
 		let fullText = '';
 		let consecutiveFailures = 0;
 
-		let streamResponse = await this.chatSession.sendMessageStream({ message });
+		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
 
 		for (let round = 0; round < this.maxRounds; round++) {
 			if (this._stopped) break;
@@ -626,7 +626,7 @@ class CodeAgent extends BaseGemini {
 			if (this._stopped) break;
 
 			// Send function responses back and get next stream
-			streamResponse = await this.chatSession.sendMessageStream({
+			streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
 				message: results.map(r => ({
 					functionResponse: {
 						id: r.id,
@@ -634,7 +634,7 @@ class CodeAgent extends BaseGemini {
 						response: { output: r.result }
 					}
 				}))
-			});
+			}));
 
 			if (consecutiveFailures >= this.maxRetries) break;
 		}

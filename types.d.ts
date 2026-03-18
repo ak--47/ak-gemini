@@ -169,6 +169,11 @@ export interface BaseGeminiOptions {
 
   /** Cached content resource name to use for this session */
   cachedContent?: string;
+
+  /** Max retry attempts for 429 RESOURCE_EXHAUSTED errors (default: 5) */
+  resourceExhaustedRetries?: number;
+  /** Initial backoff delay in ms for 429 retries, doubles each attempt (default: 1000) */
+  resourceExhaustedDelay?: number;
 }
 
 export interface TransformerOptions extends BaseGeminiOptions {

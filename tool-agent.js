@@ -108,7 +108,7 @@ class ToolAgent extends BaseGemini {
 
 		const allToolCalls = [];
 
-		let response = await this.chatSession.sendMessage({ message });
+		let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
 
 		for (let round = 0; round < this.maxToolRounds; round++) {
 			if (this._stopped) break;
@@ -153,7 +153,7 @@ class ToolAgent extends BaseGemini {
 			);
 
 			// Send function responses back to the model
-			response = await this.chatSession.sendMessage({
+			response = await this._withRetry(() => this.chatSession.sendMessage({
 				message: toolResults.map(r => ({
 					functionResponse: {
 						id: r.id,
@@ -161,7 +161,7 @@ class ToolAgent extends BaseGemini {
 						response: { output: r.result }
 					}
 				}))
-			});
+			}));
 		}
 
 		this._captureMetadata(response);
@@ -204,7 +204,7 @@ class ToolAgent extends BaseGemini {
 		const allToolCalls = [];
 		let fullText = '';
 
-		let streamResponse = await this.chatSession.sendMessageStream({ message });
+		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
 
 		for (let round = 0; round < this.maxToolRounds; round++) {
 			if (this._stopped) break;
@@ -277,7 +277,7 @@ class ToolAgent extends BaseGemini {
 			}
 
 			// Send function responses back and get next stream
-			streamResponse = await this.chatSession.sendMessageStream({
+			streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
 				message: toolResults.map(r => ({
 					functionResponse: {
 						id: r.id,
@@ -285,7 +285,7 @@ class ToolAgent extends BaseGemini {
 						response: { output: r.result }
 					}
 				}))
-			});
+			}));
 		}
 
 		// Max rounds reached or stopped

@@ -94,6 +94,10 @@ class BaseGemini {
 			throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
 		}
 
+		// ── Rate Limit Retry ──
+		this.resourceExhaustedRetries = options.resourceExhaustedRetries ?? 5;
+		this.resourceExhaustedDelay = options.resourceExhaustedDelay ?? 1000;
+
 		// ── Logging ──
 		this._configureLogLevel(options.logLevel);
 
@@ -419,10 +423,10 @@ class BaseGemini {
 
 		contents.push({ parts: [{ text: nextMessage }] });
 
-		const resp = await this.genAIClient.models.countTokens({
+		const resp = await this._withRetry(() => this.genAIClient.models.countTokens({
 			model: this.modelName,
 			contents,
-		});
+		}));
 
 		return { inputTokens: resp.totalTokens };
 	}
@@ -472,10 +476,10 @@ class BaseGemini {
 		const sysInstruction = config.systemInstruction !== undefined ? config.systemInstruction : this.systemPrompt;
 		if (sysInstruction) cacheConfig.systemInstruction = sysInstruction;
 
-		const cached = await this.genAIClient.caches.create({
+		const cached = await this._withRetry(() => this.genAIClient.caches.create({
 			model: config.model || this.modelName,
 			config: cacheConfig
-		});
+		}));
 
 		log.debug(`Cache created: ${cached.name}`);
 		return cached;
@@ -487,7 +491,7 @@ class BaseGemini {
 	 * @returns {Promise<Object>} The cached content resource
 	 */
 	async getCache(cacheName) {
-		return await this.genAIClient.caches.get({ name: cacheName });
+		return await this._withRetry(() => this.genAIClient.caches.get({ name: cacheName }));
 	}
 
 	/**
@@ -495,7 +499,7 @@ class BaseGemini {
 	 * @returns {Promise<Object>} Pager of cached content resources
 	 */
 	async listCaches() {
-		const pager = await this.genAIClient.caches.list();
+		const pager = await this._withRetry(() => this.genAIClient.caches.list());
 		const results = [];
 		for await (const cache of pager) {
 			results.push(cache);
@@ -512,13 +516,13 @@ class BaseGemini {
 	 * @returns {Promise<Object>} The updated cache resource
 	 */
 	async updateCache(cacheName, config = {}) {
-		return await this.genAIClient.caches.update({
+		return await this._withRetry(() => this.genAIClient.caches.update({
 			name: cacheName,
 			config: {
 				...(config.ttl && { ttl: config.ttl }),
 				...(config.expireTime && { expireTime: config.expireTime })
 			}
-		});
+		}));
 	}
 
 	/**
@@ -528,7 +532,7 @@ class BaseGemini {
 	 * @returns {Promise<void>}
 	 */
 	async deleteCache(cacheName) {
-		await this.genAIClient.caches.delete({ name: cacheName });
+		await this._withRetry(() => this.genAIClient.caches.delete({ name: cacheName }));
 		log.debug(`Cache deleted: ${cacheName}`);
 		if (this.cachedContent === cacheName) {
 			this.cachedContent = null;
@@ -549,6 +553,44 @@ class BaseGemini {
 			await this.init(true);
 		}
 		log.debug(`Using cache: ${cacheName}`);
+	}
+
+	// ── Rate Limit Retry ────────────────────────────────────────────────────
+
+	/**
+	 * Detects whether an error is a 429 / RESOURCE_EXHAUSTED rate-limit error.
+	 * @param {Error} error
+	 * @returns {boolean}
+	 * @private
+	 */
+	_is429Error(error) {
+		const /** @type {any} */ e = error;
+		if (e.status === 429 || e.code === 429 || e.httpStatusCode === 429) return true;
+		const msg = e.message || '';
+		return msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
+	}
+
+	/**
+	 * Wraps an async function with automatic retry on 429 (RESOURCE_EXHAUSTED) errors.
+	 * Uses exponential backoff with jitter. Non-429 errors are rethrown immediately.
+	 * @param {() => Promise<T>} fn - The async function to execute
+	 * @returns {Promise<T>}
+	 * @template T
+	 * @protected
+	 */
+	async _withRetry(fn) {
+		const maxAttempts = this.resourceExhaustedRetries;
+		for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+			try {
+				return await fn();
+			} catch (error) {
+				if (!this._is429Error(error) || attempt >= maxAttempts) throw error;
+				const jitter = Math.random() * 500;
+				const delay = this.resourceExhaustedDelay * Math.pow(2, attempt) + jitter;
+				log.warn(`Rate limited (429). Retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxAttempts})...`);
+				await new Promise(r => setTimeout(r, delay));
+			}
+		}
 	}
 
 	// ── Private Helpers ──────────────────────────────────────────────────────

@@ -123,10 +123,10 @@ class RagAgent extends BaseGemini {
 			const ext = extname(resolvedPath).toLowerCase();
 			const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
 
-			const uploaded = await this.genAIClient.files.upload({
+			const uploaded = await this._withRetry(() => this.genAIClient.files.upload({
 				file: resolvedPath,
 				config: { displayName: basename(resolvedPath), mimeType }
-			});
+			}));
 
 			await this._waitForFileActive(uploaded);
 
@@ -206,7 +206,7 @@ class RagAgent extends BaseGemini {
 	async chat(message, opts = {}) {
 		if (!this._initialized) await this.init();
 
-		const response = await this.chatSession.sendMessage({ message });
+		const response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
 
 		this._captureMetadata(response);
 
@@ -236,7 +236,7 @@ class RagAgent extends BaseGemini {
 		if (!this._initialized) await this.init();
 
 		let fullText = '';
-		const streamResponse = await this.chatSession.sendMessageStream({ message });
+		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
 
 		for await (const chunk of streamResponse) {
 			if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {

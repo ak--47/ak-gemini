@@ -274,7 +274,7 @@ class Transformer extends BaseGemini {
 				sendParams.config = { labels: mergedLabels };
 			}
 
-			const result = await this.chatSession.sendMessage(sendParams);
+			const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
 
 			this._captureMetadata(result);
 
@@ -327,7 +327,7 @@ Respond with JSON only – no comments or explanations.
 
 		let result;
 		try {
-			result = await this.chatSession.sendMessage({ message: prompt });
+			result = await this._withRetry(() => this.chatSession.sendMessage({ message: prompt }));
 			this._captureMetadata(result);
 		} catch (err) {
 			throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
@@ -374,14 +374,14 @@ Respond with JSON only – no comments or explanations.
 
 		const mergedLabels = { ...this.labels, ...(opts.labels || {}) };
 
-		const result = await this.genAIClient.models.generateContent({
+		const result = await this._withRetry(() => this.genAIClient.models.generateContent({
 			model: this.modelName,
 			contents: contents,
 			config: {
 				...this.chatConfig,
 				...(this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels })
 			}
-		});
+		}));
 
 		this._captureMetadata(result);
 

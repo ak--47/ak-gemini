@@ -97,11 +97,11 @@ export default class Embedding extends BaseGemini {
 	async embed(text, config = {}) {
 		if (!this._initialized) await this.init();
 
-		const result = await this.genAIClient.models.embedContent({
+		const result = await this._withRetry(() => this.genAIClient.models.embedContent({
 			model: this.modelName,
 			contents: text,
 			config: this._buildConfig(config)
-		});
+		}));
 
 		return result.embeddings[0];
 	}
@@ -119,11 +119,11 @@ export default class Embedding extends BaseGemini {
 	async embedBatch(texts, config = {}) {
 		if (!this._initialized) await this.init();
 
-		const result = await this.genAIClient.models.embedContent({
+		const result = await this._withRetry(() => this.genAIClient.models.embedContent({
 			model: this.modelName,
 			contents: texts,
 			config: this._buildConfig(config)
-		});
+		}));
 
 		return result.embeddings;
 	}

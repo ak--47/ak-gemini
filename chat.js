@@ -65,7 +65,7 @@ class Chat extends BaseGemini {
 			sendParams.config = { labels: mergedLabels };
 		}
 
-		const result = await this.chatSession.sendMessage(sendParams);
+		const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
 
 		this._captureMetadata(result);
 

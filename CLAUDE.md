@@ -39,7 +39,7 @@ ak-gemini/
 
 ### Class Hierarchy
 
-All classes extend `BaseGemini` which provides: auth, client init, chat session management, thinking config, log levels, safety settings, token estimation, cost tracking, usage reporting, `seed()`, Google Search grounding, and context caching.
+All classes extend `BaseGemini` which provides: auth, client init, chat session management, thinking config, log levels, safety settings, token estimation, cost tracking, usage reporting, `seed()`, Google Search grounding, context caching, and 429 rate-limit retry.
 
 | Class | Primary Method | Description |
 |-------|---------------|-------------|
@@ -64,6 +64,7 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **Embedding** uses `gemini-embedding-001` by default, supports task types, dimensionality control, and cosine similarity
 - **Google Search grounding** (`enableGrounding`) is available on all classes via BaseGemini, merges with existing tools
 - **Context caching** (`cachedContent`, `createCache()`, `useCache()`) is available on all classes via BaseGemini
+- **429 rate-limit retry** (`resourceExhaustedRetries: 5`, `resourceExhaustedDelay: 1000`) — automatic exponential backoff on RESOURCE_EXHAUSTED, separate from Transformer's validation retries (`maxRetries`)
 - Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding }`
 
 ## Key Classes & APIs
@@ -76,6 +77,7 @@ Shared foundation. Not typically instantiated directly.
 - `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled)
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
 - `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)
+- `resourceExhaustedRetries` / `resourceExhaustedDelay` — 429 rate-limit retry with exponential backoff (default: 5 retries, 1000ms)
 - `cachedContent` — Attach a context cache to reduce costs
 - `createCache(config?)` / `getCache(name)` / `listCaches()` / `updateCache(name, config)` / `deleteCache(name)` — Cache CRUD
 - `useCache(name)` — Attach cache and reinitialize session

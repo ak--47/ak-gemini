@@ -102,14 +102,14 @@ class Message extends BaseGemini {
 
 		const mergedLabels = { ...this.labels, ...(opts.labels || {}) };
 
-		const result = await this.genAIClient.models.generateContent({
+		const result = await this._withRetry(() => this.genAIClient.models.generateContent({
 			model: this.modelName,
 			contents: contents,
 			config: {
 				...this.chatConfig,
 				...(this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels })
 			}
-		});
+		}));
 
 		this._captureMetadata(result);
 

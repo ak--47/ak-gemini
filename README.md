@@ -314,6 +314,29 @@ const sources = result.usage?.groundingMetadata?.groundingChunks;
 
 **Warning**: Google Search grounding costs ~$35/1k queries.
 
+### Rate Limit Handling (429)
+
+All classes automatically retry on 429 `RESOURCE_EXHAUSTED` errors with exponential backoff. This is separate from Transformer's validation retry logic (`maxRetries`).
+
+```javascript
+// Defaults: 5 retries, 1000ms initial delay (doubles each attempt + jitter)
+const chat = new Chat({ systemPrompt: 'Hello' });
+
+// Customize
+const transformer = new Transformer({
+  resourceExhaustedRetries: 10,  // more retries for high-throughput pipelines
+  resourceExhaustedDelay: 2000   // start with 2s backoff
+});
+
+// Disable entirely
+const msg = new Message({ resourceExhaustedRetries: 0 });
+```
+
+When a 429 is encountered, retries are logged at `WARN` level:
+```
+WARN: Rate limited (429). Retrying in 1234ms (attempt 1/5)...
+```
+
 ### Context Caching
 
 Reduce costs by caching repeated system prompts, documents, or tool definitions.
@@ -367,6 +390,8 @@ All classes accept `BaseGeminiOptions`:
 | `enableGrounding` | boolean | `false` | Enable Google Search grounding |
 | `groundingConfig` | object | — | Grounding config (excludeDomains, timeRangeFilter) |
 | `cachedContent` | string | — | Cached content resource name |
+| `resourceExhaustedRetries` | number | `5` | Max retry attempts for 429 rate-limit errors |
+| `resourceExhaustedDelay` | number | `1000` | Initial backoff delay (ms) for 429 retries |
 
 ### Transformer-Specific
 
