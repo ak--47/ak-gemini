@@ -696,6 +696,129 @@ console.log('Best match:', documents[scores[0].index]);
 - Classification — compare against known category embeddings
 - Recommendation — find items similar to user preferences
 
+### Combining Embedding with Other Classes
+
+Embeddings become powerful when paired with other ak-gemini classes. Here are three common patterns:
+
+#### Embedding + RagAgent: Smart Document Selection
+
+Instead of loading all documents into a RagAgent (which costs tokens), use embeddings to find the most relevant ones first:
+
+```javascript
+import { Embedding, RagAgent } from 'ak-gemini';
+import fs from 'fs/promises';
+
+// Step 1: Build an index of your document library
+const docEmbedder = new Embedding({ taskType: 'RETRIEVAL_DOCUMENT' });
+const docPaths = ['./docs/auth.md', './docs/billing.md', './docs/api.md', './docs/deployment.md', './docs/faq.md'];
+const docTexts = await Promise.all(docPaths.map(f => fs.readFile(f, 'utf-8')));
+const docVectors = await docEmbedder.embedBatch(docTexts);
+
+// Step 2: At query time, find relevant documents via embedding similarity
+const queryEmbedder = new Embedding({ taskType: 'RETRIEVAL_QUERY' });
+const query = 'How do I rotate my API keys?';
+const queryVector = await queryEmbedder.embed(query);
+
+const ranked = docVectors
+  .map((v, i) => ({ path: docPaths[i], score: docEmbedder.similarity(queryVector.values, v.values) }))
+  .sort((a, b) => b.score - a.score);
+
+// Step 3: Feed only the top matches to RagAgent for grounded Q&A
+const topDocs = ranked.slice(0, 2).map(r => r.path);
+console.log('Selected docs:', topDocs, 'Scores:', ranked.slice(0, 2).map(r => r.score.toFixed(3)));
+
+const rag = new RagAgent({
+  localFiles: topDocs,
+  systemPrompt: 'Answer based only on the provided documents. Cite which document your answer comes from.',
+});
+const answer = await rag.chat(query);
+console.log(answer.text);
+```
+
+**Why this matters**: If you have 50 documents but only 2-3 are relevant to any given query, embedding-based selection saves significant token costs vs. loading everything into the RagAgent context.
+
+#### Embedding + ToolAgent: Semantic Search Tool
+
+Give a ToolAgent an embedding-powered search tool so it can look up relevant information on demand:
+
+```javascript
+import { Embedding, ToolAgent } from 'ak-gemini';
+
+// Pre-compute embeddings for your knowledge base
+const embedder = new Embedding({ taskType: 'RETRIEVAL_DOCUMENT' });
+const knowledgeBase = [
+  { id: 1, title: 'Password Policy', content: 'Passwords must be at least 12 characters...' },
+  { id: 2, title: 'SSO Setup', content: 'To configure SAML SSO, navigate to...' },
+  { id: 3, title: 'API Rate Limits', content: 'Free tier: 100 req/min. Pro tier: 1000 req/min...' },
+];
+const kbVectors = await embedder.embedBatch(knowledgeBase.map(k => k.content));
+
+// Create a ToolAgent with a search tool
+const queryEmbedder = new Embedding({ taskType: 'RETRIEVAL_QUERY' });
+
+const agent = new ToolAgent({
+  systemPrompt: 'You are a support agent. Use the search tool to find relevant articles before answering.',
+  tools: [{
+    name: 'search_knowledge_base',
+    description: 'Search the knowledge base for articles relevant to a query',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'Search query' } },
+      required: ['query']
+    }
+  }],
+  toolExecutor: async (toolName, args) => {
+    const qv = await queryEmbedder.embed(args.query);
+    const results = kbVectors
+      .map((v, i) => ({ ...knowledgeBase[i], score: embedder.similarity(qv.values, v.values) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3);
+    return results;
+  }
+});
+
+const result = await agent.chat('A customer is asking how to set up single sign-on');
+console.log(result.text); // Agent searched KB and found the SSO article
+```
+
+#### Embedding + Transformer: Dynamic Few-Shot Selection
+
+When you have many examples but only a few are relevant to each input, use embeddings to pick the best few-shot examples dynamically:
+
+```javascript
+import { Embedding, Transformer } from 'ak-gemini';
+
+// Your full library of transformation examples
+const allExamples = [
+  { INPUT: { type: 'blog', title: 'AI News' }, OUTPUT: { slug: 'ai-news', category: 'tech', priority: 'high' } },
+  { INPUT: { type: 'recipe', title: 'Pasta' }, OUTPUT: { slug: 'pasta', category: 'food', priority: 'low' } },
+  { INPUT: { type: 'tutorial', title: 'React Hooks' }, OUTPUT: { slug: 'react-hooks', category: 'tech', priority: 'medium' } },
+  { INPUT: { type: 'review', title: 'New iPhone' }, OUTPUT: { slug: 'new-iphone', category: 'tech', priority: 'medium' } },
+  // ... hundreds more
+];
+
+// Embed all example inputs
+const embedder = new Embedding({ taskType: 'SEMANTIC_SIMILARITY' });
+const exampleVectors = await embedder.embedBatch(allExamples.map(e => JSON.stringify(e.INPUT)));
+
+// For each new input, find the 3 most similar examples and seed the Transformer with just those
+async function transformWithBestExamples(input) {
+  const inputVector = await embedder.embed(JSON.stringify(input));
+  const bestExamples = exampleVectors
+    .map((v, i) => ({ example: allExamples[i], score: embedder.similarity(inputVector.values, v.values) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map(r => r.example);
+
+  const t = new Transformer({ sourceKey: 'INPUT', targetKey: 'OUTPUT' });
+  await t.seed(bestExamples);
+  return await t.send(input);
+}
+
+const result = await transformWithBestExamples({ type: 'article', title: 'GPT-5 Released' });
+// Seeded with the most relevant tech/blog examples → better output
+```
+
 ---
 
 ## Google Search Grounding

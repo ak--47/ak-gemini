@@ -197,6 +197,31 @@ const results = await embedder.embedBatch(['Hello', 'World']);
 const score = embedder.similarity(results[0].values, results[1].values);
 ```
 
+### Embedding + RagAgent — Semantic Search Pipeline
+
+Use embeddings to find relevant documents, then feed only the best matches to a RagAgent for grounded Q&A:
+
+```javascript
+const embedder = new Embedding({ taskType: 'RETRIEVAL_DOCUMENT' });
+const queryEmbedder = new Embedding({ taskType: 'RETRIEVAL_QUERY' });
+
+// Index your documents
+const docs = ['./docs/auth.md', './docs/billing.md', './docs/api.md', './docs/faq.md'];
+const docTexts = await Promise.all(docs.map(f => fs.readFile(f, 'utf-8')));
+const docVectors = await embedder.embedBatch(docTexts);
+
+// Find the most relevant docs for a query
+const query = 'How do I reset my API key?';
+const queryVector = await queryEmbedder.embed(query);
+const ranked = docVectors
+  .map((v, i) => ({ file: docs[i], score: embedder.similarity(queryVector.values, v.values) }))
+  .sort((a, b) => b.score - a.score);
+
+// Feed only the top 2 matches to RagAgent
+const rag = new RagAgent({ localFiles: ranked.slice(0, 2).map(r => r.file) });
+const answer = await rag.chat(query);
+```
+
 ---
 
 ## Stopping Agents
