@@ -174,6 +174,9 @@ export interface BaseGeminiOptions {
   resourceExhaustedRetries?: number;
   /** Initial backoff delay in ms for 429 retries, doubles each attempt (default: 1000) */
   resourceExhaustedDelay?: number;
+
+  /** Run models.list() health check during init() (default: false) */
+  healthCheck?: boolean;
 }
 
 export interface TransformerOptions extends BaseGeminiOptions {

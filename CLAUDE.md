@@ -71,13 +71,14 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 
 ### BaseGemini (`base.js`)
 Shared foundation. Not typically instantiated directly.
-- `init(force?)` — Creates chat session, validates API connection
+- `init(force?)` — Creates chat session; runs `models.list()` health check only if `healthCheck: true`
 - `seed(examples, opts?)` — Add example pairs to chat history
 - `getHistory()` / `clearHistory()` — Manage chat history
 - `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled)
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
 - `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)
 - `resourceExhaustedRetries` / `resourceExhaustedDelay` — 429 rate-limit retry with exponential backoff (default: 5 retries, 1000ms)
+- `healthCheck` — opt-in `models.list()` connectivity check during `init()` (default: `false`)
 - `cachedContent` — Attach a context cache to reduce costs
 - `createCache(config?)` / `getCache(name)` / `listCaches()` / `updateCache(name, config)` / `deleteCache(name)` — Cache CRUD
 - `useCache(name)` — Attach cache and reinitialize session

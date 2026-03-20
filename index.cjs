@@ -363,6 +363,7 @@ var BaseGemini = class {
     }
     this.resourceExhaustedRetries = options.resourceExhaustedRetries ?? 5;
     this.resourceExhaustedDelay = options.resourceExhaustedDelay ?? 1e3;
+    this.healthCheck = options.healthCheck ?? false;
     this._configureLogLevel(options.logLevel);
     this.labels = options.labels || {};
     this.enableGrounding = options.enableGrounding || false;
@@ -425,11 +426,13 @@ var BaseGemini = class {
     logger_default.debug(`Initializing ${this.constructor.name} chat session with model: ${this.modelName}...`);
     const chatOptions = this._getChatCreateOptions();
     this.chatSession = this.genAIClient.chats.create(chatOptions);
-    try {
-      await this._withRetry(() => this.genAIClient.models.list());
-      logger_default.debug(`${this.constructor.name}: API connection successful.`);
-    } catch (e) {
-      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    if (this.healthCheck) {
+      try {
+        await this._withRetry(() => this.genAIClient.models.list());
+        logger_default.debug(`${this.constructor.name}: API connection successful.`);
+      } catch (e) {
+        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+      }
     }
     logger_default.debug(`${this.constructor.name}: Chat session initialized.`);
   }

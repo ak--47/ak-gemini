@@ -98,6 +98,9 @@ class BaseGemini {
 		this.resourceExhaustedRetries = options.resourceExhaustedRetries ?? 5;
 		this.resourceExhaustedDelay = options.resourceExhaustedDelay ?? 1000;
 
+		// ── Health Check ──
+		this.healthCheck = options.healthCheck ?? false;
+
 		// ── Logging ──
 		this._configureLogLevel(options.logLevel);
 
@@ -192,11 +195,13 @@ class BaseGemini {
 		const chatOptions = this._getChatCreateOptions();
 		this.chatSession = this.genAIClient.chats.create(chatOptions);
 
-		try {
-			await this._withRetry(() => this.genAIClient.models.list());
-			log.debug(`${this.constructor.name}: API connection successful.`);
-		} catch (e) {
-			throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+		if (this.healthCheck) {
+			try {
+				await this._withRetry(() => this.genAIClient.models.list());
+				log.debug(`${this.constructor.name}: API connection successful.`);
+			} catch (e) {
+				throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+			}
 		}
 
 		log.debug(`${this.constructor.name}: Chat session initialized.`);
