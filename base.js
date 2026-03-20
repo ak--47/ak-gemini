@@ -193,7 +193,7 @@ class BaseGemini {
 		this.chatSession = this.genAIClient.chats.create(chatOptions);
 
 		try {
-			await this.genAIClient.models.list();
+			await this._withRetry(() => this.genAIClient.models.list());
 			log.debug(`${this.constructor.name}: API connection successful.`);
 		} catch (e) {
 			throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);

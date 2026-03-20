@@ -426,7 +426,7 @@ var BaseGemini = class {
     const chatOptions = this._getChatCreateOptions();
     this.chatSession = this.genAIClient.chats.create(chatOptions);
     try {
-      await this.genAIClient.models.list();
+      await this._withRetry(() => this.genAIClient.models.list());
       logger_default.debug(`${this.constructor.name}: API connection successful.`);
     } catch (e) {
       throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
