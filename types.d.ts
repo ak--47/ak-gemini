@@ -279,6 +279,8 @@ export interface ToolAgentOptions extends BaseGeminiOptions {
   onBeforeExecution?: (toolName: string, args: Record<string, any>) => Promise<boolean>;
   /** Directory for tool-written files (pass-through for toolExecutor use) */
   writeDir?: string;
+  /** Parallel tool execution: false = sequential, true = unlimited parallel, number = concurrency limit (default: true) */
+  parallelToolCalls?: boolean | number;
 }
 
 export interface LocalDataEntry {
@@ -539,6 +541,7 @@ export declare class ToolAgent extends BaseGemini {
   onBeforeExecution: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null;
   /** Directory for tool-written files (pass-through for toolExecutor use) */
   writeDir: string | null;
+  parallelToolCalls: boolean | number;
 
   chat(message: string, opts?: { labels?: Record<string, string> }): Promise<AgentResponse>;
   stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<AgentStreamEvent, void, unknown>;

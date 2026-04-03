@@ -413,6 +413,7 @@ All classes accept `BaseGeminiOptions`:
 | `maxToolRounds` | number | `10` | Max tool-use loop iterations |
 | `onToolCall` | function | — | Notification callback when tool is called |
 | `onBeforeExecution` | function | — | `async (toolName, args) => boolean` — gate execution |
+| `parallelToolCalls` | boolean \| number | `true` | Parallel tool execution: `false` = sequential, `true` = unlimited, number = concurrency limit |
 
 ### CodeAgent-Specific
 

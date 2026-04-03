@@ -14,6 +14,31 @@ import log from './logger.js';
  */
 
 /**
+ * Execute async task factories with a concurrency limit.
+ * @param {Array<() => Promise<any>>} tasks
+ * @param {number} concurrency - Infinity for unlimited, 1 for sequential
+ * @returns {Promise<any[]>} Results in same order as tasks
+ */
+async function runWithConcurrency(tasks, concurrency) {
+	if (concurrency === Infinity) return Promise.all(tasks.map(t => t()));
+	if (concurrency === 1) {
+		const results = [];
+		for (const t of tasks) results.push(await t());
+		return results;
+	}
+	const results = new Array(tasks.length);
+	let next = 0;
+	async function worker() {
+		while (next < tasks.length) {
+			const i = next++;
+			results[i] = await tasks[i]();
+		}
+	}
+	await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+	return results;
+}
+
+/**
  * AI agent that uses user-provided tools to accomplish tasks.
  * Automatically manages the tool-use loop: when the model decides to call
  * a tool, the agent executes it via your toolExecutor, sends the result back,
@@ -75,6 +100,13 @@ class ToolAgent extends BaseGemini {
 			throw new Error("ToolAgent: toolExecutor provided without tools. Provide tool declarations so the model knows what tools are available.");
 		}
 
+		// ── Parallel execution ──
+		this.parallelToolCalls = options.parallelToolCalls ?? true;
+		/** @private */
+		this._concurrency = this.parallelToolCalls === true ? Infinity
+			: this.parallelToolCalls === false ? 1
+			: this.parallelToolCalls;
+
 		// ── Tool loop config ──
 		this.maxToolRounds = options.maxToolRounds || 10;
 		this.onToolCall = options.onToolCall || null;
@@ -116,41 +148,39 @@ class ToolAgent extends BaseGemini {
 			const functionCalls = response.functionCalls;
 			if (!functionCalls || functionCalls.length === 0) break;
 
-			const toolResults = await Promise.all(
-				functionCalls.map(async (call) => {
-					// Fire onToolCall callback
-					if (this.onToolCall) {
-						try { this.onToolCall(call.name, call.args); }
-						catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
-					}
+			const tasks = functionCalls.map(call => async () => {
+				// Fire onToolCall callback
+				if (this.onToolCall) {
+					try { this.onToolCall(call.name, call.args); }
+					catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
+				}
 
-					// Check onBeforeExecution gate
-					if (this.onBeforeExecution) {
-						try {
-							const allowed = await this.onBeforeExecution(call.name, call.args);
-							if (allowed === false) {
-								const result = { error: 'Execution denied by onBeforeExecution callback' };
-								allToolCalls.push({ name: call.name, args: call.args, result });
-								return { id: call.id, name: call.name, result };
-							}
-						} catch (e) {
-							log.warn(`onBeforeExecution callback error: ${e.message}`);
-						}
-					}
-
-					let result;
+				// Check onBeforeExecution gate
+				if (this.onBeforeExecution) {
 					try {
-						result = await this.toolExecutor(call.name, call.args);
-					} catch (err) {
-						log.warn(`Tool ${call.name} failed: ${err.message}`);
-						result = { error: err.message };
+						const allowed = await this.onBeforeExecution(call.name, call.args);
+						if (allowed === false) {
+							const result = { error: 'Execution denied by onBeforeExecution callback' };
+							return { id: call.id, name: call.name, args: call.args, result };
+						}
+					} catch (e) {
+						log.warn(`onBeforeExecution callback error: ${e.message}`);
 					}
+				}
 
-					allToolCalls.push({ name: call.name, args: call.args, result });
+				let result;
+				try {
+					result = await this.toolExecutor(call.name, call.args);
+				} catch (err) {
+					log.warn(`Tool ${call.name} failed: ${err.message}`);
+					result = { error: err.message };
+				}
 
-					return { id: call.id, name: call.name, result };
-				})
-			);
+				return { id: call.id, name: call.name, args: call.args, result };
+			});
+
+			const toolResults = await runWithConcurrency(tasks, this._concurrency);
+			for (const r of toolResults) allToolCalls.push({ name: r.name, args: r.args, result: r.result });
 
 			// Send function responses back to the model
 			response = await this._withRetry(() => this.chatSession.sendMessage({
@@ -234,46 +264,90 @@ class ToolAgent extends BaseGemini {
 				return;
 			}
 
-			// Execute tools sequentially so we can yield events
+			// Execute tools and yield events
 			const toolResults = [];
-			for (const call of functionCalls) {
-				if (this._stopped) break;
+			if (this._concurrency === 1) {
+				// Sequential: yield tool_call, execute, yield tool_result for each
+				for (const call of functionCalls) {
+					if (this._stopped) break;
 
-				yield { type: 'tool_call', toolName: call.name, args: call.args };
+					yield { type: 'tool_call', toolName: call.name, args: call.args };
 
-				// Fire onToolCall callback
-				if (this.onToolCall) {
-					try { this.onToolCall(call.name, call.args); }
-					catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
-				}
-
-				// Check onBeforeExecution gate
-				let denied = false;
-				if (this.onBeforeExecution) {
-					try {
-						const allowed = await this.onBeforeExecution(call.name, call.args);
-						if (allowed === false) denied = true;
-					} catch (e) {
-						log.warn(`onBeforeExecution callback error: ${e.message}`);
+					if (this.onToolCall) {
+						try { this.onToolCall(call.name, call.args); }
+						catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
 					}
-				}
 
-				let result;
-				if (denied) {
-					result = { error: 'Execution denied by onBeforeExecution callback' };
-				} else {
-					try {
-						result = await this.toolExecutor(call.name, call.args);
-					} catch (err) {
-						log.warn(`Tool ${call.name} failed: ${err.message}`);
-						result = { error: err.message };
+					let denied = false;
+					if (this.onBeforeExecution) {
+						try {
+							const allowed = await this.onBeforeExecution(call.name, call.args);
+							if (allowed === false) denied = true;
+						} catch (e) {
+							log.warn(`onBeforeExecution callback error: ${e.message}`);
+						}
 					}
+
+					let result;
+					if (denied) {
+						result = { error: 'Execution denied by onBeforeExecution callback' };
+					} else {
+						try {
+							result = await this.toolExecutor(call.name, call.args);
+						} catch (err) {
+							log.warn(`Tool ${call.name} failed: ${err.message}`);
+							result = { error: err.message };
+						}
+					}
+
+					allToolCalls.push({ name: call.name, args: call.args, result });
+					yield { type: 'tool_result', toolName: call.name, result };
+
+					toolResults.push({ id: call.id, name: call.name, result });
+				}
+			} else {
+				// Parallel: yield all tool_call events, execute all, yield all tool_result events
+				for (const call of functionCalls) {
+					yield { type: 'tool_call', toolName: call.name, args: call.args };
 				}
 
-				allToolCalls.push({ name: call.name, args: call.args, result });
-				yield { type: 'tool_result', toolName: call.name, result };
+				const tasks = functionCalls.map(call => async () => {
+					if (this.onToolCall) {
+						try { this.onToolCall(call.name, call.args); }
+						catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
+					}
 
-				toolResults.push({ id: call.id, name: call.name, result });
+					let denied = false;
+					if (this.onBeforeExecution) {
+						try {
+							const allowed = await this.onBeforeExecution(call.name, call.args);
+							if (allowed === false) denied = true;
+						} catch (e) {
+							log.warn(`onBeforeExecution callback error: ${e.message}`);
+						}
+					}
+
+					let result;
+					if (denied) {
+						result = { error: 'Execution denied by onBeforeExecution callback' };
+					} else {
+						try {
+							result = await this.toolExecutor(call.name, call.args);
+						} catch (err) {
+							log.warn(`Tool ${call.name} failed: ${err.message}`);
+							result = { error: err.message };
+						}
+					}
+
+					return { id: call.id, name: call.name, args: call.args, result };
+				});
+
+				const results = await runWithConcurrency(tasks, this._concurrency);
+				for (const r of results) {
+					allToolCalls.push({ name: r.name, args: r.args, result: r.result });
+					yield { type: 'tool_result', toolName: r.name, result: r.result };
+					toolResults.push({ id: r.id, name: r.name, result: r.result });
+				}
 			}
 
 			// Send function responses back and get next stream

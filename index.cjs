@@ -1325,6 +1325,24 @@ var Message = class extends base_default {
 var message_default = Message;
 
 // tool-agent.js
+async function runWithConcurrency(tasks, concurrency) {
+  if (concurrency === Infinity) return Promise.all(tasks.map((t) => t()));
+  if (concurrency === 1) {
+    const results2 = [];
+    for (const t of tasks) results2.push(await t());
+    return results2;
+  }
+  const results = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+  return results;
+}
 var ToolAgent = class extends base_default {
   /**
    * @param {ToolAgentOptions} [options={}]
@@ -1342,6 +1360,8 @@ var ToolAgent = class extends base_default {
     if (this.toolExecutor && this.tools.length === 0) {
       throw new Error("ToolAgent: toolExecutor provided without tools. Provide tool declarations so the model knows what tools are available.");
     }
+    this.parallelToolCalls = options.parallelToolCalls ?? true;
+    this._concurrency = this.parallelToolCalls === true ? Infinity : this.parallelToolCalls === false ? 1 : this.parallelToolCalls;
     this.maxToolRounds = options.maxToolRounds || 10;
     this.onToolCall = options.onToolCall || null;
     this.onBeforeExecution = options.onBeforeExecution || null;
@@ -1372,38 +1392,36 @@ var ToolAgent = class extends base_default {
       if (this._stopped) break;
       const functionCalls = response.functionCalls;
       if (!functionCalls || functionCalls.length === 0) break;
-      const toolResults = await Promise.all(
-        functionCalls.map(async (call) => {
-          if (this.onToolCall) {
-            try {
-              this.onToolCall(call.name, call.args);
-            } catch (e) {
-              logger_default.warn(`onToolCall callback error: ${e.message}`);
-            }
-          }
-          if (this.onBeforeExecution) {
-            try {
-              const allowed = await this.onBeforeExecution(call.name, call.args);
-              if (allowed === false) {
-                const result2 = { error: "Execution denied by onBeforeExecution callback" };
-                allToolCalls.push({ name: call.name, args: call.args, result: result2 });
-                return { id: call.id, name: call.name, result: result2 };
-              }
-            } catch (e) {
-              logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
-            }
-          }
-          let result;
+      const tasks = functionCalls.map((call) => async () => {
+        if (this.onToolCall) {
           try {
-            result = await this.toolExecutor(call.name, call.args);
-          } catch (err) {
-            logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
-            result = { error: err.message };
+            this.onToolCall(call.name, call.args);
+          } catch (e) {
+            logger_default.warn(`onToolCall callback error: ${e.message}`);
           }
-          allToolCalls.push({ name: call.name, args: call.args, result });
-          return { id: call.id, name: call.name, result };
-        })
-      );
+        }
+        if (this.onBeforeExecution) {
+          try {
+            const allowed = await this.onBeforeExecution(call.name, call.args);
+            if (allowed === false) {
+              const result2 = { error: "Execution denied by onBeforeExecution callback" };
+              return { id: call.id, name: call.name, args: call.args, result: result2 };
+            }
+          } catch (e) {
+            logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+          }
+        }
+        let result;
+        try {
+          result = await this.toolExecutor(call.name, call.args);
+        } catch (err) {
+          logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
+          result = { error: err.message };
+        }
+        return { id: call.id, name: call.name, args: call.args, result };
+      });
+      const toolResults = await runWithConcurrency(tasks, this._concurrency);
+      for (const r of toolResults) allToolCalls.push({ name: r.name, args: r.args, result: r.result });
       response = await this._withRetry(() => this.chatSession.sendMessage({
         message: toolResults.map((r) => ({
           functionResponse: {
@@ -1471,39 +1489,81 @@ var ToolAgent = class extends base_default {
         return;
       }
       const toolResults = [];
-      for (const call of functionCalls) {
-        if (this._stopped) break;
-        yield { type: "tool_call", toolName: call.name, args: call.args };
-        if (this.onToolCall) {
-          try {
-            this.onToolCall(call.name, call.args);
-          } catch (e) {
-            logger_default.warn(`onToolCall callback error: ${e.message}`);
+      if (this._concurrency === 1) {
+        for (const call of functionCalls) {
+          if (this._stopped) break;
+          yield { type: "tool_call", toolName: call.name, args: call.args };
+          if (this.onToolCall) {
+            try {
+              this.onToolCall(call.name, call.args);
+            } catch (e) {
+              logger_default.warn(`onToolCall callback error: ${e.message}`);
+            }
           }
-        }
-        let denied = false;
-        if (this.onBeforeExecution) {
-          try {
-            const allowed = await this.onBeforeExecution(call.name, call.args);
-            if (allowed === false) denied = true;
-          } catch (e) {
-            logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+          let denied = false;
+          if (this.onBeforeExecution) {
+            try {
+              const allowed = await this.onBeforeExecution(call.name, call.args);
+              if (allowed === false) denied = true;
+            } catch (e) {
+              logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+            }
           }
-        }
-        let result;
-        if (denied) {
-          result = { error: "Execution denied by onBeforeExecution callback" };
-        } else {
-          try {
-            result = await this.toolExecutor(call.name, call.args);
-          } catch (err) {
-            logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
-            result = { error: err.message };
+          let result;
+          if (denied) {
+            result = { error: "Execution denied by onBeforeExecution callback" };
+          } else {
+            try {
+              result = await this.toolExecutor(call.name, call.args);
+            } catch (err) {
+              logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
+              result = { error: err.message };
+            }
           }
+          allToolCalls.push({ name: call.name, args: call.args, result });
+          yield { type: "tool_result", toolName: call.name, result };
+          toolResults.push({ id: call.id, name: call.name, result });
         }
-        allToolCalls.push({ name: call.name, args: call.args, result });
-        yield { type: "tool_result", toolName: call.name, result };
-        toolResults.push({ id: call.id, name: call.name, result });
+      } else {
+        for (const call of functionCalls) {
+          yield { type: "tool_call", toolName: call.name, args: call.args };
+        }
+        const tasks = functionCalls.map((call) => async () => {
+          if (this.onToolCall) {
+            try {
+              this.onToolCall(call.name, call.args);
+            } catch (e) {
+              logger_default.warn(`onToolCall callback error: ${e.message}`);
+            }
+          }
+          let denied = false;
+          if (this.onBeforeExecution) {
+            try {
+              const allowed = await this.onBeforeExecution(call.name, call.args);
+              if (allowed === false) denied = true;
+            } catch (e) {
+              logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+            }
+          }
+          let result;
+          if (denied) {
+            result = { error: "Execution denied by onBeforeExecution callback" };
+          } else {
+            try {
+              result = await this.toolExecutor(call.name, call.args);
+            } catch (err) {
+              logger_default.warn(`Tool ${call.name} failed: ${err.message}`);
+              result = { error: err.message };
+            }
+          }
+          return { id: call.id, name: call.name, args: call.args, result };
+        });
+        const results = await runWithConcurrency(tasks, this._concurrency);
+        for (const r of results) {
+          allToolCalls.push({ name: r.name, args: r.args, result: r.result });
+          yield { type: "tool_result", toolName: r.name, result: r.result };
+          toolResults.push({ id: r.id, name: r.name, result: r.result });
+        }
       }
       streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
         message: toolResults.map((r) => ({

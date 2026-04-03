@@ -166,6 +166,24 @@ describe('ToolAgent', () => {
 		});
 	});
 
+	describe('parallelToolCalls', () => {
+		it('should default to true', () => {
+			const agent = makeAgentWithTools();
+			expect(agent.parallelToolCalls).toBe(true);
+			expect(agent._concurrency).toBe(Infinity);
+		});
+		it('should accept false for sequential execution', () => {
+			const agent = makeAgentWithTools({ parallelToolCalls: false });
+			expect(agent.parallelToolCalls).toBe(false);
+			expect(agent._concurrency).toBe(1);
+		});
+		it('should accept a number for concurrency limit', () => {
+			const agent = makeAgentWithTools({ parallelToolCalls: 3 });
+			expect(agent.parallelToolCalls).toBe(3);
+			expect(agent._concurrency).toBe(3);
+		});
+	});
+
 	// ── Initialization ───────────────────────────────────────────────────────
 
 	describe('init()', () => {

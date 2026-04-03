@@ -109,7 +109,7 @@ Agent with user-provided tools. Extends BaseGemini.
 - `stream(message)` → AsyncGenerator yielding `{ type, text?, toolName?, args?, result? }`
 - `stop()` — Cancel the agent before the next tool execution round
 - Constructor requires: `tools` (FunctionDeclaration[]) + `toolExecutor` (async fn)
-- Optional: `maxToolRounds`, `onToolCall`, `onBeforeExecution`, `writeDir`
+- Optional: `maxToolRounds`, `onToolCall`, `onBeforeExecution`, `writeDir`, `parallelToolCalls`
 
 ### CodeAgent (`code-agent.js`)
 Agent that writes and executes JavaScript autonomously. Extends BaseGemini.
