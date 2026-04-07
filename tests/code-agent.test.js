@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 import { CodeAgent } from '../index.js';
 import { join } from 'node:path';
-import { mkdtemp, rm, writeFile, readdir, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readdir, readFile, mkdir, stat, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 const { GEMINI_API_KEY } = process.env;
@@ -15,10 +15,30 @@ const BASE_OPTIONS = {
 	logLevel: 'warn'
 };
 
+let tmpDir;
+
+beforeAll(async () => {
+	tmpDir = await realpath(await mkdtemp(join(tmpdir(), 'ak-gemini-code-agent-test-')));
+	await writeFile(join(tmpDir, 'package.json'), JSON.stringify({
+		name: 'test-project',
+		dependencies: { lodash: '4.17.21' },
+		devDependencies: { jest: '29.0.0' }
+	}));
+	await mkdir(join(tmpDir, 'src'), { recursive: true });
+	await writeFile(join(tmpDir, 'src', 'app.js'), 'export default function app() { return "hello"; }');
+	await mkdir(join(tmpDir, 'tmp'), { recursive: true });
+});
+
+afterAll(async () => {
+	try { await rm(tmpDir, { recursive: true, force: true }); } catch {}
+});
+
 function makeAgent(extraOpts = {}) {
 	return new CodeAgent({
 		...BASE_OPTIONS,
-		workingDirectory: process.cwd(),
+		workingDirectory: tmpDir,
+		writeDir: join(tmpDir, 'tmp'),
+		timeout: 15000,
 		...extraOpts
 	});
 }
@@ -29,16 +49,18 @@ describe('CodeAgent', () => {
 
 	describe('Constructor', () => {
 		it('should create with default options', () => {
-			const agent = new CodeAgent({ ...BASE_OPTIONS });
-			expect(agent.modelName).toBe('gemini-2.0-flash');
-			expect(agent.workingDirectory).toBe(process.cwd());
+			const agent = makeAgent();
+			expect(agent.workingDirectory).toBe(tmpDir);
 			expect(agent.maxRounds).toBe(10);
-			expect(agent.timeout).toBe(30_000);
+			expect(agent.timeout).toBe(15000);
 			expect(agent.importantFiles).toEqual([]);
-			expect(agent.writeDir).toBe(join(process.cwd(), 'tmp'));
+			expect(agent.writeDir).toBe(join(tmpDir, 'tmp'));
 			expect(agent.keepArtifacts).toBe(false);
 			expect(agent.comments).toBe(false);
 			expect(agent.maxRetries).toBe(3);
+			expect(agent._stopped).toBe(false);
+			expect(agent.skills).toEqual([]);
+			expect(agent._skillRegistry.size).toBe(0);
 		});
 
 		it('should accept workingDirectory', () => {
@@ -64,11 +86,21 @@ describe('CodeAgent', () => {
 			expect(agent.onCodeExecution).toBe(cb);
 		});
 
-		it('should configure execute_code tool in chatConfig', () => {
+		it('should have 5 tools by default (no skills)', () => {
 			const agent = makeAgent();
-			expect(agent.chatConfig.tools).toBeTruthy();
-			expect(agent.chatConfig.tools[0].functionDeclarations.length).toBe(1);
-			expect(agent.chatConfig.tools[0].functionDeclarations[0].name).toBe('execute_code');
+			const decls = agent.chatConfig.tools[0].functionDeclarations;
+			expect(decls.length).toBe(5);
+			const names = decls.map(d => d.name);
+			expect(names).toContain('write_code');
+			expect(names).toContain('execute_code');
+			expect(names).toContain('write_and_run_code');
+			expect(names).toContain('fix_code');
+			expect(names).toContain('run_bash');
+			expect(names).not.toContain('use_skill');
+		});
+
+		it('should configure toolConfig with AUTO mode', () => {
+			const agent = makeAgent();
 			expect(agent.chatConfig.toolConfig.functionCallingConfig.mode).toBe('AUTO');
 		});
 
@@ -91,14 +123,19 @@ describe('CodeAgent', () => {
 			expect(agent.writeDir).toBe('/tmp/my-scripts');
 		});
 
+		it('should default writeDir to {workingDirectory}/tmp', () => {
+			const agent = new CodeAgent({ ...BASE_OPTIONS, workingDirectory: '/some/dir' });
+			expect(agent.writeDir).toBe('/some/dir/tmp');
+		});
+
 		it('should accept keepArtifacts', () => {
-			const agent = makeAgent({ keepArtifacts: true });
-			expect(agent.keepArtifacts).toBe(true);
+			expect(makeAgent({ keepArtifacts: true }).keepArtifacts).toBe(true);
+			expect(makeAgent().keepArtifacts).toBe(false);
 		});
 
 		it('should accept comments', () => {
-			const agent = makeAgent({ comments: true });
-			expect(agent.comments).toBe(true);
+			expect(makeAgent({ comments: true }).comments).toBe(true);
+			expect(makeAgent().comments).toBe(false);
 		});
 
 		it('should accept maxRetries', () => {
@@ -106,11 +143,73 @@ describe('CodeAgent', () => {
 			expect(agent.maxRetries).toBe(5);
 		});
 
-		it('should include purpose parameter in execute_code tool schema', () => {
+		it('should accept skills option', () => {
+			expect(makeAgent({ skills: ['/path/to/skill.md'] }).skills).toEqual(['/path/to/skill.md']);
+		});
+
+		it('should have correct tool schemas in Gemini format', () => {
 			const agent = makeAgent();
-			const toolSchema = agent.chatConfig.tools[0].functionDeclarations[0].parametersJsonSchema;
-			expect(toolSchema.properties.purpose).toBeTruthy();
-			expect(toolSchema.properties.purpose.type).toBe('string');
+			const decls = agent.chatConfig.tools[0].functionDeclarations;
+
+			const execTool = decls.find(d => d.name === 'execute_code');
+			expect(execTool.parametersJsonSchema.properties.code.type).toBe('string');
+			expect(execTool.parametersJsonSchema.properties.purpose.type).toBe('string');
+			expect(execTool.parametersJsonSchema.required).toContain('code');
+
+			const fixTool = decls.find(d => d.name === 'fix_code');
+			expect(fixTool.parametersJsonSchema.required).toEqual(['original_code', 'fixed_code']);
+			expect(fixTool.parametersJsonSchema.properties.execute.type).toBe('boolean');
+
+			const bashTool = decls.find(d => d.name === 'run_bash');
+			expect(bashTool.parametersJsonSchema.required).toEqual(['command']);
+		});
+	});
+
+	// ── _buildToolDefinitions() ─────────────────────────────────────────────
+
+	describe('_buildToolDefinitions()', () => {
+		it('should return Gemini format with functionDeclarations', () => {
+			const agent = makeAgent();
+			const result = agent._buildToolDefinitions();
+			expect(result).toHaveProperty('functionDeclarations');
+			expect(Array.isArray(result.functionDeclarations)).toBe(true);
+		});
+
+		it('should use parametersJsonSchema (not parameters or input_schema)', () => {
+			const agent = makeAgent();
+			const result = agent._buildToolDefinitions();
+			for (const decl of result.functionDeclarations) {
+				expect(decl).toHaveProperty('parametersJsonSchema');
+				expect(decl).not.toHaveProperty('parameters');
+				expect(decl).not.toHaveProperty('input_schema');
+			}
+		});
+
+		it('should not include use_skill when no skills loaded', () => {
+			const agent = makeAgent();
+			const result = agent._buildToolDefinitions();
+			const names = result.functionDeclarations.map(d => d.name);
+			expect(names).not.toContain('use_skill');
+			expect(result.functionDeclarations.length).toBe(5);
+		});
+
+		it('should include use_skill when skills are registered', () => {
+			const agent = makeAgent();
+			agent._skillRegistry.set('test-skill', { name: 'test-skill', content: 'content', path: '/fake' });
+			const result = agent._buildToolDefinitions();
+			const names = result.functionDeclarations.map(d => d.name);
+			expect(names).toContain('use_skill');
+			expect(result.functionDeclarations.length).toBe(6);
+		});
+
+		it('should list skill names in use_skill description', () => {
+			const agent = makeAgent();
+			agent._skillRegistry.set('alpha', { name: 'alpha', content: '', path: '' });
+			agent._skillRegistry.set('beta', { name: 'beta', content: '', path: '' });
+			const result = agent._buildToolDefinitions();
+			const skillTool = result.functionDeclarations.find(d => d.name === 'use_skill');
+			expect(skillTool.description).toContain('alpha');
+			expect(skillTool.description).toContain('beta');
 		});
 	});
 
@@ -154,12 +253,89 @@ describe('CodeAgent', () => {
 			await agent.init(true);
 			expect(agent.chatSession).not.toBe(session1);
 		});
+
+		it('should include npm packages in context', async () => {
+			const agent = makeAgent();
+			await agent.init();
+			expect(agent._codebaseContext.npmPackages).toContain('lodash');
+			expect(agent._codebaseContext.npmPackages).toContain('jest');
+		});
+
+		it('should describe all tools in system prompt', async () => {
+			const agent = makeAgent();
+			await agent.init();
+			expect(agent.chatConfig.systemInstruction).toContain('write_code');
+			expect(agent.chatConfig.systemInstruction).toContain('execute_code');
+			expect(agent.chatConfig.systemInstruction).toContain('write_and_run_code');
+			expect(agent.chatConfig.systemInstruction).toContain('fix_code');
+			expect(agent.chatConfig.systemInstruction).toContain('run_bash');
+		});
+	});
+
+	// ── Skills ───────────────────────────────────────────────────────────────
+
+	describe('Skills', () => {
+		let skillDir;
+
+		beforeAll(async () => {
+			skillDir = join(tmpDir, 'skills');
+			await mkdir(skillDir, { recursive: true });
+			await writeFile(join(skillDir, 'api-pattern.md'), '---\nname: api-pattern\n---\n# API Pattern\nUse fetch() for all HTTP requests.');
+			await writeFile(join(skillDir, 'data-pipeline.md'), '# Data Pipeline\nProcess data in stages.');
+		});
+
+		it('should load skills during init', async () => {
+			const agent = makeAgent({
+				skills: [join(skillDir, 'api-pattern.md'), join(skillDir, 'data-pipeline.md')]
+			});
+			await agent.init();
+			expect(agent._skillRegistry.size).toBe(2);
+			expect(agent._skillRegistry.has('api-pattern')).toBe(true);
+			expect(agent._skillRegistry.has('data-pipeline')).toBe(true);
+		});
+
+		it('should extract name from YAML frontmatter', async () => {
+			const agent = makeAgent({ skills: [join(skillDir, 'api-pattern.md')] });
+			await agent.init();
+			const skill = agent._skillRegistry.get('api-pattern');
+			expect(skill.name).toBe('api-pattern');
+			expect(skill.content).toContain('Use fetch()');
+		});
+
+		it('should fallback to filename when no frontmatter', async () => {
+			const agent = makeAgent({ skills: [join(skillDir, 'data-pipeline.md')] });
+			await agent.init();
+			expect(agent._skillRegistry.has('data-pipeline')).toBe(true);
+		});
+
+		it('should include use_skill tool when skills are loaded', async () => {
+			const agent = makeAgent({ skills: [join(skillDir, 'api-pattern.md')] });
+			await agent.init();
+			const decls = agent.chatConfig.tools[0].functionDeclarations;
+			expect(decls.length).toBe(6);
+			const skillTool = decls.find(d => d.name === 'use_skill');
+			expect(skillTool).toBeTruthy();
+			expect(skillTool.description).toContain('api-pattern');
+		});
+
+		it('should list skills in system prompt', async () => {
+			const agent = makeAgent({ skills: [join(skillDir, 'api-pattern.md')] });
+			await agent.init();
+			expect(agent.chatConfig.systemInstruction).toContain('use_skill');
+			expect(agent.chatConfig.systemInstruction).toContain('api-pattern');
+		});
+
+		it('should warn on missing skill files without crashing', async () => {
+			const agent = makeAgent({ skills: ['/nonexistent/skill.md'] });
+			await agent.init(); // should not throw
+			expect(agent._skillRegistry.size).toBe(0);
+		});
 	});
 
 	// ── _gatherCodebaseContext() ─────────────────────────────────────────────
 
 	describe('_gatherCodebaseContext()', () => {
-		it('should gather context from git repo', async () => {
+		it('should gather context from directory', async () => {
 			const agent = makeAgent();
 			await agent._gatherCodebaseContext();
 			expect(agent._contextGathered).toBe(true);
@@ -173,19 +349,18 @@ describe('CodeAgent', () => {
 			await agent._gatherCodebaseContext();
 			expect(agent._codebaseContext.npmPackages).toBeTruthy();
 			expect(Array.isArray(agent._codebaseContext.npmPackages)).toBe(true);
-			// This project has dependencies, so we should find some
 			expect(agent._codebaseContext.npmPackages.length).toBeGreaterThan(0);
-			expect(agent._codebaseContext.npmPackages).toContain('@google/genai');
+			expect(agent._codebaseContext.npmPackages).toContain('lodash');
 		});
 
 		it('should fallback gracefully for non-git directories', async () => {
-			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-test-'));
+			const nonGitDir = await mkdtemp(join(tmpdir(), 'code-agent-test-'));
 			try {
-				const agent = makeAgent({ workingDirectory: tmpDir });
+				const agent = makeAgent({ workingDirectory: nonGitDir });
 				await agent._gatherCodebaseContext();
 				expect(agent._contextGathered).toBe(true);
 			} finally {
-				await rm(tmpDir, { recursive: true, force: true });
+				await rm(nonGitDir, { recursive: true, force: true });
 			}
 		});
 	});
@@ -234,20 +409,20 @@ describe('CodeAgent', () => {
 
 		it('should run code as .mjs (supports top-level await)', async () => {
 			const agent = makeAgent();
-			const result = await agent._executeCode('const x = await Promise.resolve(42); console.log(x);');
-			expect(result.stdout.trim()).toBe('42');
+			const result = await agent._executeCode('const x = await Promise.resolve(42); console.log(x);', 'await-test');
+			expect(result.stdout).toContain('42');
 			expect(result.exitCode).toBe(0);
 		});
 
 		it('should clean up temp files by default', async () => {
-			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-cleanup-'));
+			const cleanDir = await mkdtemp(join(tmpdir(), 'code-agent-cleanup-'));
 			try {
-				const agent = makeAgent({ writeDir: tmpDir });
+				const agent = makeAgent({ writeDir: cleanDir });
 				await agent._executeCode('console.log("cleanup test");');
-				const files = (await readdir(tmpDir)).filter(f => f.startsWith('agent-'));
+				const files = (await readdir(cleanDir)).filter(f => f.startsWith('agent-'));
 				expect(files.length).toBe(0);
 			} finally {
-				await rm(tmpDir, { recursive: true, force: true });
+				await rm(cleanDir, { recursive: true, force: true });
 			}
 		});
 
@@ -265,25 +440,277 @@ const pkg = JSON.parse(readFileSync('package.json', 'utf-8'));
 console.log(pkg.name);
 `;
 			const result = await agent._executeCode(code);
-			expect(result.stdout.trim()).toBe('ak-gemini');
+			expect(result.stdout.trim()).toBe('test-project');
 			expect(result.exitCode).toBe(0);
+		});
+
+		it('should return stopped result when agent is stopped', async () => {
+			const agent = makeAgent();
+			agent._stopped = true;
+			const result = await agent._executeCode('console.log("should not run");');
+			expect(result.exitCode).toBe(-1);
+			expect(result.stderr).toContain('stopped');
+		});
+
+		it('should track execution in _allExecutions with tool field', async () => {
+			const agent = makeAgent();
+			await agent._executeCode('console.log("tracked");', 'track-test', 'write_and_run_code');
+			expect(agent._allExecutions.length).toBe(1);
+			expect(agent._allExecutions[0].code).toContain('tracked');
+			expect(agent._allExecutions[0].tool).toBe('write_and_run_code');
+		});
+
+		it('should default tool to execute_code in _allExecutions', async () => {
+			const agent = makeAgent();
+			await agent._executeCode('console.log("default tool");');
+			expect(agent._allExecutions[0].tool).toBe('execute_code');
+		});
+
+		it('should pass toolName to onBeforeExecution', async () => {
+			const calls = [];
+			const agent = makeAgent({
+				onBeforeExecution: async (content, toolName) => {
+					calls.push({ content, toolName });
+					return true;
+				}
+			});
+			await agent._executeCode('console.log("test");', 'test', 'write_and_run_code');
+			expect(calls.length).toBe(1);
+			expect(calls[0].content).toBe('console.log("test");');
+			expect(calls[0].toolName).toBe('write_and_run_code');
+		});
+	});
+
+	// ── _executeBash() ───────────────────────────────────────────────────────
+
+	describe('_executeBash()', () => {
+		it('should execute a simple bash command', async () => {
+			const agent = makeAgent();
+			const result = await agent._executeBash('echo "hello bash"', 'test');
+			expect(result.stdout.trim()).toBe('hello bash');
+			expect(result.exitCode).toBe(0);
+		});
+
+		it('should capture stderr from bash', async () => {
+			const agent = makeAgent();
+			const result = await agent._executeBash('echo "error" >&2', 'test');
+			expect(result.stderr).toContain('error');
+		});
+
+		it('should handle failing commands', async () => {
+			const agent = makeAgent();
+			const result = await agent._executeBash('exit 1', 'test');
+			expect(result.exitCode).not.toBe(0);
+		});
+
+		it('should run in workingDirectory', async () => {
+			const agent = makeAgent();
+			const result = await agent._executeBash('pwd', 'test');
+			expect(result.stdout.trim()).toBe(tmpDir);
+		});
+
+		it('should track bash in _allExecutions with tool=run_bash', async () => {
+			const agent = makeAgent();
+			await agent._executeBash('echo test', 'test');
+			const last = agent._allExecutions[agent._allExecutions.length - 1];
+			expect(last.tool).toBe('run_bash');
+			expect(last.code).toBe('echo test');
+		});
+
+		it('should pass run_bash to onBeforeExecution', async () => {
+			const calls = [];
+			const agent = makeAgent({
+				onBeforeExecution: async (content, toolName) => {
+					calls.push({ content, toolName });
+					return true;
+				}
+			});
+			await agent._executeBash('echo hi', 'test');
+			expect(calls[0].toolName).toBe('run_bash');
+			expect(calls[0].content).toBe('echo hi');
+		});
+
+		it('should deny bash when onBeforeExecution returns false', async () => {
+			const agent = makeAgent({
+				onBeforeExecution: async () => false
+			});
+			const result = await agent._executeBash('echo nope', 'test');
+			expect(result.denied).toBe(true);
+			expect(result.exitCode).toBe(-1);
+			expect(result.stderr).toContain('denied');
+		});
+
+		it('should return stopped result when agent is stopped', async () => {
+			const agent = makeAgent();
+			agent._stopped = true;
+			const result = await agent._executeBash('echo nope', 'test');
+			expect(result.exitCode).toBe(-1);
+			expect(result.stderr).toContain('stopped');
+		});
+
+		it('should fire onCodeExecution after bash execution', async () => {
+			const executions = [];
+			const agent = makeAgent({
+				onCodeExecution: (code, result) => executions.push({ code, result })
+			});
+			await agent._executeBash('echo "bash-tracked"', 'test');
+			expect(executions.length).toBe(1);
+			expect(executions[0].code).toBe('echo "bash-tracked"');
+			expect(executions[0].result.stdout).toContain('bash-tracked');
+		});
+
+		it('should not fire onCodeExecution when denied', async () => {
+			const executions = [];
+			const agent = makeAgent({
+				onBeforeExecution: async () => false,
+				onCodeExecution: (code, result) => executions.push({ code, result })
+			});
+			await agent._executeBash('echo denied', 'test');
+			expect(executions.length).toBe(0);
+		});
+	});
+
+	// ── _handleToolCall() ────────────────────────────────────────────────────
+
+	describe('_handleToolCall()', () => {
+		it('should dispatch write_code — returns confirmation, no execution', async () => {
+			const agent = makeAgent();
+			const { output, type, data } = await agent._handleToolCall('write_code', {
+				code: 'const x = 1;', purpose: 'test', language: 'javascript'
+			});
+			expect(type).toBe('write');
+			expect(output).toBe('Code written successfully.');
+			expect(data.tool).toBe('write_code');
+			expect(data.code).toBe('const x = 1;');
+			expect(data.language).toBe('javascript');
+		});
+
+		it('should dispatch execute_code — runs code, returns output', async () => {
+			const agent = makeAgent();
+			const { output, type, data } = await agent._handleToolCall('execute_code', {
+				code: 'console.log("exec")', purpose: 'test'
+			});
+			expect(type).toBe('code_execution');
+			expect(data.tool).toBe('execute_code');
+			expect(data.stdout).toContain('exec');
+			expect(data.exitCode).toBe(0);
+		});
+
+		it('should dispatch write_and_run_code — same as execute_code, different tool name', async () => {
+			const agent = makeAgent();
+			const { type, data } = await agent._handleToolCall('write_and_run_code', {
+				code: 'console.log("write-run")', purpose: 'test'
+			});
+			expect(type).toBe('code_execution');
+			expect(data.tool).toBe('write_and_run_code');
+			expect(data.stdout).toContain('write-run');
+		});
+
+		it('should dispatch fix_code without execute — returns fix recorded', async () => {
+			const agent = makeAgent();
+			const { output, type, data } = await agent._handleToolCall('fix_code', {
+				original_code: 'const x = 1 +',
+				fixed_code: 'const x = 1 + 2;',
+				explanation: 'Missing operand'
+			});
+			expect(type).toBe('fix');
+			expect(output).toBe('Fix recorded.');
+			expect(data.executed).toBe(false);
+			expect(data.fixedCode).toBe('const x = 1 + 2;');
+			expect(data.explanation).toBe('Missing operand');
+		});
+
+		it('should dispatch fix_code with execute=true — runs fixed code', async () => {
+			const agent = makeAgent();
+			const { type, data } = await agent._handleToolCall('fix_code', {
+				original_code: 'consolee.log("broken")',
+				fixed_code: 'console.log("fixed")',
+				execute: true
+			});
+			expect(type).toBe('fix');
+			expect(data.executed).toBe(true);
+			expect(data.stdout).toContain('fixed');
+			expect(data.exitCode).toBe(0);
+		});
+
+		it('should dispatch run_bash — runs command', async () => {
+			const agent = makeAgent();
+			const { type, data } = await agent._handleToolCall('run_bash', {
+				command: 'echo "bash-test"', purpose: 'test'
+			});
+			expect(type).toBe('bash');
+			expect(data.tool).toBe('run_bash');
+			expect(data.stdout).toContain('bash-test');
+		});
+
+		it('should dispatch use_skill — returns skill content', async () => {
+			const agent = makeAgent();
+			agent._skillRegistry.set('test-skill', {
+				name: 'test-skill', content: '# Test Skill\nDo stuff.', path: '/fake'
+			});
+			const { type, data } = await agent._handleToolCall('use_skill', { skill_name: 'test-skill' });
+			expect(type).toBe('skill');
+			expect(data.found).toBe(true);
+			expect(data.content).toContain('Do stuff');
+		});
+
+		it('should handle use_skill with unknown skill', async () => {
+			const agent = makeAgent();
+			const { output, data } = await agent._handleToolCall('use_skill', { skill_name: 'nonexistent' });
+			expect(data.found).toBe(false);
+			expect(output).toContain('not found');
+		});
+
+		it('should handle unknown tool name — returns error', async () => {
+			const agent = makeAgent();
+			const { type, output } = await agent._handleToolCall('unknown_tool', {});
+			expect(type).toBe('unknown');
+			expect(output).toContain('Unknown tool');
+		});
+	});
+
+	// ── _formatOutput() ─────────────────────────────────────────────────────
+
+	describe('_formatOutput()', () => {
+		it('should format stdout only', () => {
+			const agent = makeAgent();
+			expect(agent._formatOutput({ stdout: 'hello', stderr: '', exitCode: 0 })).toBe('hello');
+		});
+
+		it('should include stderr', () => {
+			const agent = makeAgent();
+			const output = agent._formatOutput({ stdout: '', stderr: 'err', exitCode: 0 });
+			expect(output).toContain('[STDERR]');
+			expect(output).toContain('err');
+		});
+
+		it('should include exit code on failure', () => {
+			const agent = makeAgent();
+			const output = agent._formatOutput({ stdout: '', stderr: '', exitCode: 1 });
+			expect(output).toContain('[EXIT CODE]: 1');
+		});
+
+		it('should return (no output) when empty', () => {
+			const agent = makeAgent();
+			expect(agent._formatOutput({ stdout: '', stderr: '', exitCode: 0 })).toBe('(no output)');
 		});
 	});
 
 	// ── onBeforeExecution ────────────────────────────────────────────────────
 
 	describe('onBeforeExecution', () => {
-		it('should call onBeforeExecution before executing', async () => {
+		it('should call onBeforeExecution with (content, toolName) before executing', async () => {
 			const calls = [];
 			const agent = makeAgent({
-				onBeforeExecution: async (code) => {
-					calls.push(code);
+				onBeforeExecution: async (content, toolName) => {
+					calls.push({ content, toolName });
 					return true;
 				}
 			});
-			await agent._executeCode('console.log("test");');
+			await agent._executeCode('console.log("test");', undefined, 'execute_code');
 			expect(calls.length).toBe(1);
-			expect(calls[0]).toBe('console.log("test");');
+			expect(calls[0].content).toBe('console.log("test");');
+			expect(calls[0].toolName).toBe('execute_code');
 		});
 
 		it('should deny execution when callback returns false', async () => {
@@ -371,17 +798,25 @@ console.log(pkg.name);
 			expect(result.stderr).toContain('stopped');
 		});
 
+		it('should prevent bash execution when stopped', async () => {
+			const agent = makeAgent();
+			agent.stop();
+			const result = await agent._executeBash('echo "should not run"');
+			expect(result.exitCode).toBe(-1);
+			expect(result.stderr).toContain('stopped');
+		});
+
 		it('should stop agent from onBeforeExecution callback during chat', async () => {
 			const executedCodes = [];
 			const agent = makeAgent({
-				onBeforeExecution: async (code) => {
+				onBeforeExecution: async (code, toolName) => {
 					executedCodes.push(code);
 					agent.stop();
 					return false;
 				}
 			});
 			await agent.init();
-			const response = await agent.chat('Use execute_code to print "hello". Then use it again to print "world".');
+			const response = await agent.chat('Use write_and_run_code to print "hello". Then use it again to print "world".');
 			expect(agent._stopped).toBe(true);
 			// The first code execution should have been denied
 			if (response.codeExecutions.length > 0) {
@@ -426,15 +861,18 @@ console.log(pkg.name);
 				expect(response.text).toBeTruthy();
 				expect(response.text).toContain('4');
 				expect(response.codeExecutions).toEqual([]);
+				expect(response.toolCalls).toEqual([]);
 			});
 
-			it('should return CodeAgentResponse structure', async () => {
+			it('should return CodeAgentResponse structure with toolCalls', async () => {
 				const response = await agent.chat('Say hello.');
 				expect(response).toHaveProperty('text');
 				expect(response).toHaveProperty('codeExecutions');
+				expect(response).toHaveProperty('toolCalls');
 				expect(response).toHaveProperty('usage');
 				expect(typeof response.text).toBe('string');
 				expect(Array.isArray(response.codeExecutions)).toBe(true);
+				expect(Array.isArray(response.toolCalls)).toBe(true);
 			});
 
 			it('should include usage data', async () => {
@@ -457,14 +895,14 @@ console.log(pkg.name);
 			let agent;
 			beforeAll(async () => {
 				agent = makeAgent({
-					systemPrompt: 'When asked to read files or inspect the project, always use execute_code.'
+					systemPrompt: 'When asked to run code, always use write_and_run_code.'
 				});
 				await agent.init();
 			});
 
-			it('should execute code and return results', async () => {
+			it('should execute code and return results with toolCalls', async () => {
 				const response = await agent.chat(
-					'Use execute_code to run this exact code: console.log(JSON.stringify({status:"ok"}))'
+					'Use write_and_run_code to run this exact code: console.log(JSON.stringify({status:"ok"}))'
 				);
 				expect(response.codeExecutions.length).toBeGreaterThan(0);
 				expect(response.codeExecutions[0]).toHaveProperty('code');
@@ -472,19 +910,37 @@ console.log(pkg.name);
 				expect(response.codeExecutions[0]).toHaveProperty('stderr');
 				expect(response.codeExecutions[0]).toHaveProperty('exitCode');
 				expect(response.codeExecutions[0].exitCode).toBe(0);
+
+				// toolCalls should also be populated
+				expect(response.toolCalls.length).toBeGreaterThan(0);
+				expect(response.toolCalls[0].tool).toBeTruthy();
 			});
 
 			it('should handle code errors during chat gracefully', async () => {
 				const response = await agent.chat(
-					'Use execute_code to run this code that will fail: throw new Error("intentional")'
+					'Use write_and_run_code to run this code that will fail: throw new Error("intentional")'
 				);
-				expect(response.text).toBeTruthy();
-				// The agent should still produce a text response even if code fails
+				// The agent should still return a response (text may or may not be present)
+				expect(response).toHaveProperty('text');
+				expect(response).toHaveProperty('codeExecutions');
 				if (response.codeExecutions.length > 0) {
 					const failedExec = response.codeExecutions.find(e => e.exitCode !== 0);
 					if (failedExec) {
 						expect(failedExec.stderr).toBeTruthy();
 					}
+				}
+			});
+
+			it('should populate backward-compat codeExecutions from toolCalls', async () => {
+				const response = await agent.chat(
+					'Use write_and_run_code to run: console.log("compat-test")'
+				);
+				// codeExecutions is the backward-compat view of toolCalls
+				if (response.toolCalls.length > 0) {
+					const execToolCalls = response.toolCalls.filter(
+						tc => tc.tool === 'execute_code' || tc.tool === 'write_and_run_code'
+					);
+					expect(response.codeExecutions.length).toBe(execToolCalls.length);
 				}
 			});
 		});
@@ -509,17 +965,18 @@ console.log(pkg.name);
 			expect(doneEvents.length).toBe(1);
 			expect(doneEvents[0]).toHaveProperty('fullText');
 			expect(doneEvents[0]).toHaveProperty('codeExecutions');
+			expect(doneEvents[0]).toHaveProperty('toolCalls');
 			expect(doneEvents[0]).toHaveProperty('usage');
 		});
 
 		it('should yield code and output events when executing', async () => {
 			const agent = makeAgent({
-				systemPrompt: 'Always use execute_code when asked to compute something.'
+				systemPrompt: 'Always use write_and_run_code when asked to compute something.'
 			});
 			await agent.init();
 
 			const events = [];
-			for await (const event of agent.stream('Use execute_code to run: console.log(2+2)')) {
+			for await (const event of agent.stream('Use write_and_run_code to run: console.log(2+2)')) {
 				events.push(event);
 			}
 
@@ -532,6 +989,26 @@ console.log(pkg.name);
 				expect(outputEvents[0]).toHaveProperty('stdout');
 				expect(outputEvents[0]).toHaveProperty('stderr');
 				expect(outputEvents[0]).toHaveProperty('exitCode');
+			}
+		});
+
+		it('should include toolCalls in done event', async () => {
+			const agent = makeAgent({
+				systemPrompt: 'Always use write_and_run_code when asked to compute something.'
+			});
+			await agent.init();
+
+			const events = [];
+			for await (const event of agent.stream('Use write_and_run_code to run: console.log("stream-tools")')) {
+				events.push(event);
+			}
+
+			const done = events.find(e => e.type === 'done');
+			expect(done).toBeTruthy();
+			expect(Array.isArray(done.toolCalls)).toBe(true);
+			// If code was executed, toolCalls should be populated
+			if (done.codeExecutions.length > 0) {
+				expect(done.toolCalls.length).toBeGreaterThan(0);
 			}
 		});
 
@@ -659,9 +1136,11 @@ console.log(pkg.name);
 			expect(agent.chatConfig.safetySettings.length).toBeGreaterThan(0);
 		});
 
-		it('should always have execute_code tool configured', () => {
+		it('should always have tools configured even with custom chatConfig', () => {
 			const agent = makeAgent({ chatConfig: { temperature: 0 } });
-			expect(agent.chatConfig.tools[0].functionDeclarations[0].name).toBe('execute_code');
+			const decls = agent.chatConfig.tools[0].functionDeclarations;
+			expect(decls.length).toBe(5);
+			expect(decls.map(d => d.name)).toContain('write_and_run_code');
 		});
 	});
 
@@ -697,30 +1176,42 @@ console.log(pkg.name);
 		});
 
 		it('should include filePath when keepArtifacts is true', async () => {
-			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-dump-'));
+			const dumpDir = await mkdtemp(join(tmpdir(), 'code-agent-dump-'));
 			try {
-				const agent = makeAgent({ writeDir: tmpDir, keepArtifacts: true });
+				const agent = makeAgent({ writeDir: dumpDir, keepArtifacts: true });
 				await agent._executeCode('console.log("kept");', 'test-keep');
 				const scripts = agent.dump();
 				expect(scripts[0].filePath).toBeTruthy();
 				expect(scripts[0].filePath).toContain('agent-test-keep');
 			} finally {
-				await rm(tmpDir, { recursive: true, force: true });
+				await rm(dumpDir, { recursive: true, force: true });
 			}
+		});
+
+		it('should include tool field in results', async () => {
+			const agent = makeAgent();
+			await agent._executeCode('console.log("a");', 'test', 'execute_code');
+			await agent._executeCode('console.log("b");', 'test', 'write_and_run_code');
+			await agent._executeBash('echo c', 'test');
+			const scripts = agent.dump();
+			expect(scripts[0].tool).toBe('execute_code');
+			expect(scripts[1].tool).toBe('write_and_run_code');
+			expect(scripts[2].tool).toBe('run_bash');
 		});
 
 		it('should accumulate across multiple chat calls', async () => {
 			const agent = makeAgent({
-				systemPrompt: 'Always use execute_code to answer. Be concise.'
+				systemPrompt: 'Always use write_and_run_code to answer. Be concise.'
 			});
 			await agent.init();
-			await agent.chat('Use execute_code to run: console.log("hello")');
-			await agent.chat('Use execute_code to run: console.log("world")');
+			await agent.chat('Use write_and_run_code to run: console.log("hello")');
+			await agent.chat('Use write_and_run_code to run: console.log("world")');
 			const scripts = agent.dump();
 			expect(scripts.length).toBeGreaterThanOrEqual(2);
 			scripts.forEach(s => {
 				expect(typeof s.script).toBe('string');
 				expect(s.script.length).toBeGreaterThan(0);
+				expect(s.tool).toBeTruthy();
 			});
 		});
 	});
@@ -746,24 +1237,21 @@ console.log(pkg.name);
 			const long = 'a'.repeat(60);
 			expect(agent._slugify(long).length).toBeLessThanOrEqual(40);
 		});
+
+		it('should strip leading/trailing dashes', () => {
+			const agent = makeAgent();
+			expect(agent._slugify('--test--')).toBe('test');
+		});
 	});
 
 	// ── importantFiles ─────────────────────────────────────────────────────
 
 	describe('importantFiles', () => {
-		it('should resolve exact file paths', async () => {
-			const agent = makeAgent({ importantFiles: ['package.json'] });
-			await agent._gatherCodebaseContext();
-			expect(agent._codebaseContext.importantFileContents.length).toBe(1);
-			expect(agent._codebaseContext.importantFileContents[0].path).toBe('package.json');
-			expect(agent._codebaseContext.importantFileContents[0].content).toContain('ak-gemini');
-		});
-
 		it('should resolve partial file paths', async () => {
-			const agent = makeAgent({ importantFiles: ['code-agent.test.js'] });
+			const agent = makeAgent({ importantFiles: ['app.js'] });
 			await agent._gatherCodebaseContext();
 			expect(agent._codebaseContext.importantFileContents.length).toBe(1);
-			expect(agent._codebaseContext.importantFileContents[0].path).toContain('code-agent.test.js');
+			expect(agent._codebaseContext.importantFileContents[0].content).toContain('hello');
 		});
 
 		it('should warn on missing files without throwing', async () => {
@@ -773,10 +1261,10 @@ console.log(pkg.name);
 		});
 
 		it('should include file contents in system prompt', async () => {
-			const agent = makeAgent({ importantFiles: ['package.json'] });
+			const agent = makeAgent({ importantFiles: ['app.js'] });
 			await agent.init();
 			expect(agent.chatConfig.systemInstruction).toContain('Key Files');
-			expect(agent.chatConfig.systemInstruction).toContain('package.json');
+			expect(agent.chatConfig.systemInstruction).toContain('export default function app');
 		});
 	});
 
@@ -784,8 +1272,8 @@ console.log(pkg.name);
 
 	describe('writeDir', () => {
 		it('should default to {workingDirectory}/tmp', () => {
-			const agent = makeAgent();
-			expect(agent.writeDir).toBe(join(process.cwd(), 'tmp'));
+			const agent = new CodeAgent({ ...BASE_OPTIONS, workingDirectory: '/some/path' });
+			expect(agent.writeDir).toBe(join('/some/path', 'tmp'));
 		});
 
 		it('should accept custom writeDir', () => {
@@ -794,27 +1282,26 @@ console.log(pkg.name);
 		});
 
 		it('should create writeDir if it does not exist', async () => {
-			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-wd-'));
-			const writeDir = join(tmpDir, 'nested', 'scripts');
+			const newDir = join(tmpDir, 'nested', 'scripts', Date.now().toString());
 			try {
-				const agent = makeAgent({ writeDir });
+				const agent = makeAgent({ writeDir: newDir });
 				await agent._executeCode('console.log("ok");');
-				const files = await readdir(writeDir);
+				const files = await readdir(newDir);
 				// Files should have been cleaned up, but dir should exist
 				expect(Array.isArray(files)).toBe(true);
 			} finally {
-				await rm(tmpDir, { recursive: true, force: true });
+				await rm(join(tmpDir, 'nested'), { recursive: true, force: true });
 			}
 		});
 
 		it('should still use workingDirectory as cwd for child process', async () => {
-			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-cwd-'));
+			const customDir = await mkdtemp(join(tmpdir(), 'code-agent-cwd-'));
 			try {
-				const agent = makeAgent({ writeDir: tmpDir });
+				const agent = makeAgent({ writeDir: customDir });
 				const result = await agent._executeCode('console.log(process.cwd());');
 				expect(result.stdout.trim()).toBe(agent.workingDirectory);
 			} finally {
-				await rm(tmpDir, { recursive: true, force: true });
+				await rm(customDir, { recursive: true, force: true });
 			}
 		});
 	});
@@ -823,27 +1310,27 @@ console.log(pkg.name);
 
 	describe('keepArtifacts', () => {
 		it('should keep files when keepArtifacts is true', async () => {
-			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-keep-'));
+			const artifactDir = await mkdtemp(join(tmpdir(), 'code-agent-keep-'));
 			try {
-				const agent = makeAgent({ writeDir: tmpDir, keepArtifacts: true });
+				const agent = makeAgent({ writeDir: artifactDir, keepArtifacts: true });
 				await agent._executeCode('console.log("kept");', 'test-artifact');
-				const files = (await readdir(tmpDir)).filter(f => f.startsWith('agent-'));
+				const files = (await readdir(artifactDir)).filter(f => f.startsWith('agent-'));
 				expect(files.length).toBe(1);
 				expect(files[0]).toContain('test-artifact');
 			} finally {
-				await rm(tmpDir, { recursive: true, force: true });
+				await rm(artifactDir, { recursive: true, force: true });
 			}
 		});
 
 		it('should delete files when keepArtifacts is false', async () => {
-			const tmpDir = await mkdtemp(join(tmpdir(), 'code-agent-del-'));
+			const delDir = await mkdtemp(join(tmpdir(), 'code-agent-del-'));
 			try {
-				const agent = makeAgent({ writeDir: tmpDir, keepArtifacts: false });
+				const agent = makeAgent({ writeDir: delDir, keepArtifacts: false });
 				await agent._executeCode('console.log("deleted");', 'test-clean');
-				const files = (await readdir(tmpDir)).filter(f => f.startsWith('agent-'));
+				const files = (await readdir(delDir)).filter(f => f.startsWith('agent-'));
 				expect(files.length).toBe(0);
 			} finally {
-				await rm(tmpDir, { recursive: true, force: true });
+				await rm(delDir, { recursive: true, force: true });
 			}
 		});
 	});

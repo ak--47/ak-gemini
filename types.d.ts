@@ -306,9 +306,9 @@ export interface CodeAgentOptions extends BaseGeminiOptions {
   maxRounds?: number;
   /** Per-execution timeout in milliseconds (default: 30000) */
   timeout?: number;
-  /** Async callback before code execution; return false to deny */
-  onBeforeExecution?: (code: string) => Promise<boolean>;
-  /** Notification callback after code execution */
+  /** Async callback before code/bash execution; return false to deny. Receives (content, toolName). */
+  onBeforeExecution?: (content: string, toolName: string) => Promise<boolean> | boolean;
+  /** Notification callback after code/bash execution */
   onCodeExecution?: (code: string, output: { stdout: string; stderr: string; exitCode: number }) => void;
   /** Files whose contents are included in the system prompt for project context */
   importantFiles?: string[];
@@ -320,6 +320,10 @@ export interface CodeAgentOptions extends BaseGeminiOptions {
   comments?: boolean;
   /** Max consecutive failed executions before stopping (default: 3) */
   maxRetries?: number;
+  /** Paths to skill files (markdown) loaded dynamically via the use_skill tool */
+  skills?: string[];
+  /** Plain text environment overview appended to the system prompt — describe the project, stack, conventions, etc. */
+  envOverview?: string;
 }
 
 export interface CodeExecution {
@@ -335,35 +339,57 @@ export interface CodeExecution {
   exitCode: number;
 }
 
+export interface ToolCallResult {
+  tool: 'write_code' | 'execute_code' | 'write_and_run_code' | 'fix_code' | 'run_bash' | 'use_skill';
+  code?: string;
+  purpose?: string;
+  language?: string;
+  originalCode?: string;
+  fixedCode?: string;
+  explanation?: string;
+  executed?: boolean;
+  command?: string;
+  skillName?: string;
+  content?: string;
+  found?: boolean;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  denied?: boolean;
+}
+
 export interface CodeAgentResponse {
   /** The agent's final text response */
   text: string;
-  /** All code executions during this interaction */
+  /** Backward-compatible: only code executions (execute_code, write_and_run_code, fix_code with execute) */
   codeExecutions: CodeExecution[];
+  /** All tool calls made during this chat turn */
+  toolCalls: ToolCallResult[];
   /** Token usage data */
   usage: UsageData | null;
 }
 
 export interface CodeAgentStreamEvent {
-  type: 'text' | 'code' | 'output' | 'done';
-  /** For 'text' events: the text chunk */
+  type: 'text' | 'code' | 'output' | 'write' | 'fix' | 'bash' | 'skill' | 'done';
   text?: string;
-  /** For 'code' events: the code about to be executed */
   code?: string;
-  /** For 'output' events: stdout from execution */
   stdout?: string;
-  /** For 'output' events: stderr from execution */
   stderr?: string;
-  /** For 'output' events: process exit code */
   exitCode?: number;
-  /** For 'done' events: complete accumulated text */
   fullText?: string;
-  /** For 'done' events: all code executions */
   codeExecutions?: CodeExecution[];
-  /** For 'done' events: token usage */
+  toolCalls?: ToolCallResult[];
   usage?: UsageData | null;
-  /** For 'done' events: e.g. "Max tool rounds reached" or "Agent was stopped" */
   warning?: string;
+  purpose?: string;
+  language?: string;
+  originalCode?: string;
+  fixedCode?: string;
+  explanation?: string;
+  command?: string;
+  skillName?: string;
+  content?: string;
+  found?: boolean;
 }
 
 // ── Per-Message Options ──────────────────────────────────────────────────────
@@ -582,25 +608,20 @@ export declare class CodeAgent extends BaseGemini {
   workingDirectory: string;
   maxRounds: number;
   timeout: number;
-  onBeforeExecution: ((code: string) => Promise<boolean>) | null;
+  onBeforeExecution: ((content: string, toolName: string) => Promise<boolean> | boolean) | null;
   onCodeExecution: ((code: string, output: { stdout: string; stderr: string; exitCode: number }) => void) | null;
-  /** Files whose contents are included in the system prompt */
   importantFiles: string[];
-  /** Directory for writing script files */
   writeDir: string;
-  /** Keep script files on disk after execution */
   keepArtifacts: boolean;
-  /** Whether the model writes comments in generated code */
   comments: boolean;
-  /** Max consecutive failed executions before stopping */
   maxRetries: number;
+  skills: string[];
+  envOverview: string;
 
   init(force?: boolean): Promise<void>;
   chat(message: string, opts?: { labels?: Record<string, string> }): Promise<CodeAgentResponse>;
   stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<CodeAgentStreamEvent, void, unknown>;
-  /** Returns all code scripts written across all chat/stream calls. */
-  dump(): Array<{ fileName: string; purpose: string | null; script: string; filePath: string | null }>;
-  /** Stop the agent before the next code execution. Kills any running child process. */
+  dump(): Array<{ fileName: string; purpose: string | null; script: string; filePath: string | null; tool: string }>;
   stop(): void;
 }
 

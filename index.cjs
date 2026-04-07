@@ -1603,6 +1603,7 @@ var import_node_crypto = require("node:crypto");
 var MAX_OUTPUT_CHARS = 5e4;
 var MAX_FILE_TREE_LINES = 500;
 var IGNORE_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "coverage", ".next", "build", "__pycache__"]);
+var EXECUTING_TOOLS = /* @__PURE__ */ new Set(["execute_code", "write_and_run_code", "run_bash"]);
 var CodeAgent = class extends base_default {
   /**
    * @param {CodeAgentOptions} [options={}]
@@ -1622,53 +1623,145 @@ var CodeAgent = class extends base_default {
     this.keepArtifacts = options.keepArtifacts ?? false;
     this.comments = options.comments ?? false;
     this.maxRetries = options.maxRetries ?? 3;
+    this.skills = options.skills || [];
     this._codebaseContext = null;
     this._contextGathered = false;
     this._stopped = false;
     this._activeProcess = null;
     this._userSystemPrompt = options.systemPrompt || "";
     this._allExecutions = [];
-    this.chatConfig.tools = [{
-      functionDeclarations: [{
-        name: "execute_code",
-        description: "Execute JavaScript code in a Node.js child process. The code has access to all Node.js built-in modules (fs, path, child_process, http, etc.). Use console.log() to produce output that will be returned to you. The code runs in the working directory with the same environment variables as the parent process.",
-        parametersJsonSchema: {
-          type: "object",
-          properties: {
-            code: {
-              type: "string",
-              description: "JavaScript code to execute. Use console.log() for output. You can import any built-in Node.js module."
-            },
-            purpose: {
-              type: "string",
-              description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs", "fetch-api-data"). Used for naming the script file.'
-            }
-          },
-          required: ["code"]
-        }
-      }]
-    }];
+    this._skillRegistry = /* @__PURE__ */ new Map();
+    this.chatConfig.tools = [this._buildToolDefinitions()];
     this.chatConfig.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
     logger_default.debug(`CodeAgent created for directory: ${this.workingDirectory}`);
   }
+  // ── Tool Definitions ─────────────────────────────────────────────────────
+  /**
+   * Build tool definitions in Gemini format.
+   * use_skill is only included when skills are registered.
+   * @private
+   * @returns {{ functionDeclarations: Array<Object> }}
+   */
+  _buildToolDefinitions() {
+    const declarations = [
+      {
+        name: "write_code",
+        description: "Output code without executing it. Use this when you want to show, propose, or present code to the user without running it.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            code: { type: "string", description: "The code to output." },
+            purpose: { type: "string", description: 'A short 2-4 word slug describing the code (e.g., "api-client", "data-parser").' },
+            language: { type: "string", description: 'Programming language of the code (default: "javascript").' }
+          },
+          required: ["code"]
+        }
+      },
+      {
+        name: "execute_code",
+        description: "Execute a given piece of JavaScript code in a Node.js child process. Use this when you already have code to run \u2014 e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use console.log() for output.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            code: { type: "string", description: "JavaScript code to execute. Use console.log() for output. Use import syntax (ES modules)." },
+            purpose: { type: "string", description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs").' }
+          },
+          required: ["code"]
+        }
+      },
+      {
+        name: "write_and_run_code",
+        description: "Write a fresh solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it \u2014 the autonomous, end-to-end tool for solving problems with code.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            code: { type: "string", description: "JavaScript code to write and execute. Use console.log() for output. Use import syntax (ES modules)." },
+            purpose: { type: "string", description: 'A short 2-4 word slug describing what this script does (e.g., "fetch-api-data", "generate-report").' }
+          },
+          required: ["code"]
+        }
+      },
+      {
+        name: "fix_code",
+        description: "Fix broken code. Provide the original and fixed versions with an explanation. Optionally execute the fix to verify it works.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            original_code: { type: "string", description: "The original broken code." },
+            fixed_code: { type: "string", description: "The corrected code." },
+            explanation: { type: "string", description: "Brief explanation of what was wrong and how it was fixed." },
+            execute: { type: "boolean", description: "If true, execute the fixed code to verify it works (default: false)." }
+          },
+          required: ["original_code", "fixed_code"]
+        }
+      },
+      {
+        name: "run_bash",
+        description: "Execute a shell command in the working directory. Use this for file operations, git commands, installing packages, or any shell task. Prefer this over execute_code for simple shell operations.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            command: { type: "string", description: "The shell command to execute." },
+            purpose: { type: "string", description: 'A short 2-4 word slug describing the command (e.g., "list-files", "install-deps").' }
+          },
+          required: ["command"]
+        }
+      }
+    ];
+    if (this._skillRegistry && this._skillRegistry.size > 0) {
+      declarations.push({
+        name: "use_skill",
+        description: `Load a skill by name to get instructions, templates, or patterns. Available skills: ${[...this._skillRegistry.keys()].join(", ")}`,
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            skill_name: { type: "string", description: "The name of the skill to load." }
+          },
+          required: ["skill_name"]
+        }
+      });
+    }
+    return { functionDeclarations: declarations };
+  }
   // ── Init ─────────────────────────────────────────────────────────────────
   /**
-   * Initialize the agent: gather codebase context, build system prompt,
-   * and create the chat session.
+   * Initialize the agent: load skills, gather codebase context, and build system prompt.
    * @param {boolean} [force=false]
    */
   async init(force = false) {
     if (this.chatSession && !force) return;
+    if (this.skills.length > 0 && (this._skillRegistry.size === 0 || force)) {
+      await this._loadSkills();
+    }
+    this.chatConfig.tools = [this._buildToolDefinitions()];
     if (!this._contextGathered || force) {
       await this._gatherCodebaseContext();
     }
-    const systemPrompt = this._buildSystemPrompt();
-    this.chatConfig.systemInstruction = systemPrompt;
+    this.chatConfig.systemInstruction = this._buildSystemPrompt();
     await super.init(force);
+  }
+  // ── Skill Loading ────────────────────────────────────────────────────────
+  /**
+   * Load skill files into the skill registry.
+   * @private
+   */
+  async _loadSkills() {
+    this._skillRegistry.clear();
+    for (const filePath of this.skills) {
+      try {
+        const content = await (0, import_promises2.readFile)(filePath, "utf-8");
+        let name = (0, import_node_path.basename)(filePath).replace(/\.md$/i, "");
+        const fmMatch = content.match(/^---\s*\n[\s\S]*?^name:\s*(.+)$/m);
+        if (fmMatch) name = fmMatch[1].trim();
+        this._skillRegistry.set(name, { name, content, path: filePath });
+        logger_default.debug(`Loaded skill: ${name} from ${filePath}`);
+      } catch (e) {
+        logger_default.warn(`skills: could not load "${filePath}": ${e.message}`);
+      }
+    }
   }
   // ── Context Gathering ────────────────────────────────────────────────────
   /**
-   * Gather file tree and key file contents from the working directory.
    * @private
    */
   async _gatherCodebaseContext() {
@@ -1717,12 +1810,7 @@ var CodeAgent = class extends base_default {
     this._contextGathered = true;
   }
   /**
-   * Resolve an importantFiles entry against the file tree.
-   * Supports exact matches and partial (basename/suffix) matches.
    * @private
-   * @param {string} filename
-   * @param {string[]} fileTreeLines
-   * @returns {string|null}
    */
   _resolveImportantFile(filename, fileTreeLines) {
     const exact = fileTreeLines.find((line) => line === filename);
@@ -1733,9 +1821,7 @@ var CodeAgent = class extends base_default {
     return partial || null;
   }
   /**
-   * Get file tree using git ls-files.
    * @private
-   * @returns {Promise<string>}
    */
   async _getFileTreeGit() {
     return new Promise((resolve2, reject) => {
@@ -1750,12 +1836,7 @@ var CodeAgent = class extends base_default {
     });
   }
   /**
-   * Fallback file tree via recursive readdir.
    * @private
-   * @param {string} dir
-   * @param {number} depth
-   * @param {number} maxDepth
-   * @returns {Promise<string>}
    */
   async _getFileTreeReaddir(dir, depth, maxDepth) {
     if (depth >= maxDepth) return "";
@@ -1779,17 +1860,39 @@ var CodeAgent = class extends base_default {
     return entries.join("\n");
   }
   /**
-   * Build the full system prompt with codebase context.
    * @private
-   * @returns {string}
    */
   _buildSystemPrompt() {
     const { fileTree, npmPackages, importantFileContents } = this._codebaseContext || { fileTree: "", npmPackages: [], importantFileContents: [] };
     let prompt = `You are a coding agent working in ${this.workingDirectory}.
 
-## Instructions
-- Use the execute_code tool to accomplish tasks by writing JavaScript code
-- Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config") when calling execute_code
+## Available Tools
+
+### write_code
+Output code without executing it. Use when showing, proposing, or presenting code to the user.
+
+### execute_code
+Run a given piece of JavaScript code. Use when you already have code to run \u2014 e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.
+
+### write_and_run_code
+Write a fresh solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code.
+
+### fix_code
+Fix broken code by providing original and fixed versions. Set execute=true to verify the fix works.
+
+### run_bash
+Run shell commands directly (e.g., ls, grep, curl, git, npm, cat). Prefer this over execute_code for simple shell operations.`;
+    if (this._skillRegistry.size > 0) {
+      prompt += `
+
+### use_skill
+Load a skill by name to get detailed instructions and templates. Available skills: ${[...this._skillRegistry.keys()].join(", ")}`;
+    }
+    prompt += `
+
+## Code Execution Rules
+These rules apply when using execute_code, write_and_run_code, or fix_code (with execute=true):
+- Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config")
 - Your code runs in a Node.js child process with access to all built-in modules
 - IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
   - import fs from 'fs';
@@ -1797,9 +1900,7 @@ var CodeAgent = class extends base_default {
   - import { execSync } from 'child_process';
 - Use console.log() to produce output \u2014 that's how results are returned to you
 - Write efficient scripts that do multiple things per execution when possible
-- For parallel async operations, use Promise.all():
-  const [a, b] = await Promise.all([fetchA(), fetchB()]);
-- Read files with fs.readFileSync() when you need to understand their contents
+- For parallel async operations, use Promise.all()
 - Handle errors in your scripts with try/catch so you get useful error messages
 - Top-level await is supported
 - The working directory is: ${this.workingDirectory}`;
@@ -1848,29 +1949,22 @@ ${this._userSystemPrompt}`;
   }
   // ── Code Execution ───────────────────────────────────────────────────────
   /**
-   * Generate a sanitized slug from a purpose string.
    * @private
-   * @param {string} [purpose]
-   * @returns {string}
    */
   _slugify(purpose) {
     if (!purpose) return (0, import_node_crypto.randomUUID)().slice(0, 8);
     return purpose.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
   }
   /**
-   * Execute a JavaScript code string in a child process.
    * @private
-   * @param {string} code - JavaScript code to execute
-   * @param {string} [purpose] - Short description for file naming
-   * @returns {Promise<{stdout: string, stderr: string, exitCode: number, denied?: boolean}>}
    */
-  async _executeCode(code, purpose) {
+  async _executeCode(code, purpose, toolName) {
     if (this._stopped) {
       return { stdout: "", stderr: "Agent was stopped", exitCode: -1 };
     }
     if (this.onBeforeExecution) {
       try {
-        const allowed = await this.onBeforeExecution(code);
+        const allowed = await this.onBeforeExecution(code, toolName || "execute_code");
         if (allowed === false) {
           return { stdout: "", stderr: "Execution denied by onBeforeExecution callback", exitCode: -1, denied: true };
         }
@@ -1919,7 +2013,8 @@ ${this._userSystemPrompt}`;
         output: result.stdout,
         stderr: result.stderr,
         exitCode: result.exitCode,
-        filePath: this.keepArtifacts ? tempFile : null
+        filePath: this.keepArtifacts ? tempFile : null,
+        tool: toolName || "execute_code"
       });
       if (this.onCodeExecution) {
         try {
@@ -1938,11 +2033,75 @@ ${this._userSystemPrompt}`;
       }
     }
   }
+  // ── Bash Execution ───────────────────────────────────────────────────────
   /**
-   * Format execution result as a string for the model.
+   * Execute a bash command in the working directory.
    * @private
-   * @param {{stdout: string, stderr: string, exitCode: number}} result
-   * @returns {string}
+   */
+  async _executeBash(command, purpose) {
+    if (this._stopped) {
+      return { stdout: "", stderr: "Agent was stopped", exitCode: -1 };
+    }
+    if (this.onBeforeExecution) {
+      try {
+        const allowed = await this.onBeforeExecution(command, "run_bash");
+        if (allowed === false) {
+          return { stdout: "", stderr: "Execution denied by onBeforeExecution callback", exitCode: -1, denied: true };
+        }
+      } catch (e) {
+        logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+      }
+    }
+    const result = await new Promise((resolve2) => {
+      const child = (0, import_node_child_process.execFile)("bash", ["-c", command], {
+        cwd: this.workingDirectory,
+        timeout: this.timeout,
+        env: process.env,
+        maxBuffer: 10 * 1024 * 1024
+      }, (err, stdout, stderr) => {
+        this._activeProcess = null;
+        if (err) {
+          resolve2({
+            stdout: err.stdout || stdout || "",
+            stderr: (err.stderr || stderr || "") + (err.killed ? "\n[EXECUTION TIMED OUT]" : ""),
+            exitCode: err.code || 1
+          });
+        } else {
+          resolve2({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
+        }
+      });
+      this._activeProcess = child;
+    });
+    const totalLen = result.stdout.length + result.stderr.length;
+    if (totalLen > MAX_OUTPUT_CHARS) {
+      const half = Math.floor(MAX_OUTPUT_CHARS / 2);
+      if (result.stdout.length > half) {
+        result.stdout = result.stdout.slice(0, half) + "\n...[OUTPUT TRUNCATED]";
+      }
+      if (result.stderr.length > half) {
+        result.stderr = result.stderr.slice(0, half) + "\n...[STDERR TRUNCATED]";
+      }
+    }
+    this._allExecutions.push({
+      code: command,
+      purpose: purpose || null,
+      output: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      filePath: null,
+      tool: "run_bash"
+    });
+    if (this.onCodeExecution) {
+      try {
+        this.onCodeExecution(command, result);
+      } catch (e) {
+        logger_default.warn(`onCodeExecution callback error: ${e.message}`);
+      }
+    }
+    return result;
+  }
+  /**
+   * @private
    */
   _formatOutput(result) {
     let output = "";
@@ -1951,20 +2110,121 @@ ${this._userSystemPrompt}`;
     if (result.exitCode !== 0) output += (output ? "\n" : "") + `[EXIT CODE]: ${result.exitCode}`;
     return output || "(no output)";
   }
+  // ── Tool Call Dispatch ───────────────────────────────────────────────────
+  /**
+   * Handle a tool call by name, dispatching to the appropriate handler.
+   * @private
+   * @param {string} name - Tool name
+   * @param {Object} input - Tool arguments
+   * @returns {Promise<{output: string, type: string, data: Object}>}
+   */
+  async _handleToolCall(name, input) {
+    switch (name) {
+      case "execute_code":
+      case "write_and_run_code": {
+        const result = await this._executeCode(input.code || "", input.purpose, name);
+        return {
+          output: this._formatOutput(result),
+          type: "code_execution",
+          data: {
+            tool: name,
+            code: input.code || "",
+            purpose: input.purpose,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.exitCode,
+            denied: result.denied
+          }
+        };
+      }
+      case "write_code": {
+        return {
+          output: "Code written successfully.",
+          type: "write",
+          data: {
+            tool: "write_code",
+            code: input.code || "",
+            purpose: input.purpose,
+            language: input.language || "javascript"
+          }
+        };
+      }
+      case "fix_code": {
+        let execResult = null;
+        if (input.execute) {
+          execResult = await this._executeCode(input.fixed_code || "", "fix", "fix_code");
+        }
+        return {
+          output: input.execute ? this._formatOutput(execResult) : "Fix recorded.",
+          type: "fix",
+          data: {
+            tool: "fix_code",
+            originalCode: input.original_code || "",
+            fixedCode: input.fixed_code || "",
+            explanation: input.explanation,
+            executed: !!input.execute,
+            stdout: execResult?.stdout,
+            stderr: execResult?.stderr,
+            exitCode: execResult?.exitCode,
+            denied: execResult?.denied
+          }
+        };
+      }
+      case "run_bash": {
+        const result = await this._executeBash(input.command || "", input.purpose);
+        return {
+          output: this._formatOutput(result),
+          type: "bash",
+          data: {
+            tool: "run_bash",
+            command: input.command || "",
+            purpose: input.purpose,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.exitCode,
+            denied: result.denied
+          }
+        };
+      }
+      case "use_skill": {
+        const skillName = input.skill_name || "";
+        const skill = this._skillRegistry.get(skillName);
+        if (!skill) {
+          const available = [...this._skillRegistry.keys()].join(", ");
+          return {
+            output: `Skill "${skillName}" not found. Available skills: ${available || "(none)"}`,
+            type: "skill",
+            data: { tool: "use_skill", skillName, found: false }
+          };
+        }
+        return {
+          output: skill.content,
+          type: "skill",
+          data: { tool: "use_skill", skillName: skill.name, content: skill.content, found: true }
+        };
+      }
+      default:
+        return {
+          output: `Unknown tool: ${name}`,
+          type: "unknown",
+          data: { tool: name }
+        };
+    }
+  }
   // ── Non-Streaming Chat ───────────────────────────────────────────────────
   /**
    * Send a message and get a complete response (non-streaming).
-   * Automatically handles the code execution loop.
+   * Automatically handles the multi-tool execution loop.
    *
    * @param {string} message - The user's message
    * @param {Object} [opts={}] - Per-message options
    * @param {Record<string, string>} [opts.labels] - Per-message billing labels
-   * @returns {Promise<CodeAgentResponse>} Response with text, codeExecutions, and usage
+   * @returns {Promise<CodeAgentResponse>}
    */
   async chat(message, opts = {}) {
     if (!this.chatSession) await this.init();
     this._stopped = false;
-    const codeExecutions = [];
+    const toolCalls = [];
     let consecutiveFailures = 0;
     let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
     for (let round = 0; round < this.maxRounds; round++) {
@@ -1974,31 +2234,26 @@ ${this._userSystemPrompt}`;
       const results = [];
       for (const call of functionCalls) {
         if (this._stopped) break;
-        const code = call.args?.code || "";
-        const purpose = call.args?.purpose;
-        const result = await this._executeCode(code, purpose);
-        codeExecutions.push({
-          code,
-          purpose: this._slugify(purpose),
-          output: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode
-        });
-        if (result.exitCode !== 0 && !result.denied) {
-          consecutiveFailures++;
-        } else {
-          consecutiveFailures = 0;
+        const { output, type, data } = await this._handleToolCall(call.name, call.args || {});
+        toolCalls.push(data);
+        const isExecutingTool = EXECUTING_TOOLS.has(call.name) || call.name === "fix_code" && call.args?.execute;
+        if (isExecutingTool) {
+          if (data.exitCode !== 0 && !data.denied) {
+            consecutiveFailures++;
+          } else {
+            consecutiveFailures = 0;
+          }
         }
-        let output = this._formatOutput(result);
+        let toolOutput = output;
         if (consecutiveFailures >= this.maxRetries) {
-          output += `
+          toolOutput += `
 
 [RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
         }
         results.push({
           id: call.id,
           name: call.name,
-          result: output
+          result: toolOutput
         });
       }
       if (this._stopped) break;
@@ -2020,31 +2275,42 @@ ${this._userSystemPrompt}`;
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
+    const codeExecutions = toolCalls.filter((tc) => tc.tool === "execute_code" || tc.tool === "write_and_run_code" || tc.tool === "fix_code" && tc.executed).map((tc) => ({
+      code: tc.code || tc.fixedCode,
+      purpose: this._slugify(tc.purpose),
+      output: tc.stdout || "",
+      stderr: tc.stderr || "",
+      exitCode: tc.exitCode ?? 0
+    }));
     return {
       text: response.text || "",
       codeExecutions,
+      toolCalls,
       usage: this.getLastUsage()
     };
   }
   // ── Streaming ────────────────────────────────────────────────────────────
   /**
    * Send a message and stream the response as events.
-   * Automatically handles the code execution loop between streamed rounds.
    *
    * Event types:
    * - `text` — A chunk of the agent's text response
-   * - `code` — The agent is about to execute code
-   * - `output` — Code finished executing
+   * - `code` — The agent is about to execute code (execute_code or write_and_run_code)
+   * - `output` — Code/bash finished executing
+   * - `write` — The agent wrote code without executing (write_code)
+   * - `fix` — The agent fixed code (fix_code)
+   * - `bash` — The agent is about to run a bash command
+   * - `skill` — The agent loaded a skill
    * - `done` — The agent finished
    *
    * @param {string} message - The user's message
-   * @param {Object} [opts={}] - Per-message options
+   * @param {Object} [opts={}]
    * @yields {CodeAgentStreamEvent}
    */
   async *stream(message, opts = {}) {
     if (!this.chatSession) await this.init();
     this._stopped = false;
-    const codeExecutions = [];
+    const toolCalls = [];
     let fullText = "";
     let consecutiveFailures = 0;
     let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
@@ -2061,50 +2327,62 @@ ${this._userSystemPrompt}`;
         }
       }
       if (functionCalls.length === 0) {
-        yield {
-          type: "done",
-          fullText,
-          codeExecutions,
-          usage: this.getLastUsage()
-        };
+        const codeExecutions2 = toolCalls.filter((tc) => tc.tool === "execute_code" || tc.tool === "write_and_run_code" || tc.tool === "fix_code" && tc.executed).map((tc) => ({
+          code: tc.code || tc.fixedCode,
+          purpose: this._slugify(tc.purpose),
+          output: tc.stdout || "",
+          stderr: tc.stderr || "",
+          exitCode: tc.exitCode ?? 0
+        }));
+        yield { type: "done", fullText, codeExecutions: codeExecutions2, toolCalls, usage: this.getLastUsage() };
         return;
       }
       const results = [];
       for (const call of functionCalls) {
         if (this._stopped) break;
-        const code = call.args?.code || "";
-        const purpose = call.args?.purpose;
-        yield { type: "code", code };
-        const result = await this._executeCode(code, purpose);
-        codeExecutions.push({
-          code,
-          purpose: this._slugify(purpose),
-          output: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode
-        });
-        yield {
-          type: "output",
-          code,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode
-        };
-        if (result.exitCode !== 0 && !result.denied) {
-          consecutiveFailures++;
-        } else {
-          consecutiveFailures = 0;
+        const toolName = call.name;
+        const toolInput = call.args || {};
+        if (toolName === "write_code") {
+          yield { type: "write", code: toolInput.code, purpose: toolInput.purpose, language: toolInput.language || "javascript" };
+        } else if (toolName === "fix_code") {
+          yield { type: "fix", originalCode: toolInput.original_code, fixedCode: toolInput.fixed_code, explanation: toolInput.explanation };
+        } else if (toolName === "run_bash") {
+          yield { type: "bash", command: toolInput.command };
+        } else if (toolName === "execute_code" || toolName === "write_and_run_code") {
+          yield { type: "code", code: toolInput.code };
         }
-        let output = this._formatOutput(result);
+        const { output, type, data } = await this._handleToolCall(toolName, toolInput);
+        toolCalls.push(data);
+        if (data.stdout !== void 0 || data.stderr !== void 0) {
+          yield {
+            type: "output",
+            code: data.code || data.command || data.fixedCode,
+            stdout: data.stdout || "",
+            stderr: data.stderr || "",
+            exitCode: data.exitCode ?? 0
+          };
+        }
+        if (toolName === "use_skill") {
+          yield { type: "skill", skillName: data.skillName, content: data.content, found: data.found };
+        }
+        const isExecutingTool = EXECUTING_TOOLS.has(toolName) || toolName === "fix_code" && toolInput.execute;
+        if (isExecutingTool) {
+          if (data.exitCode !== 0 && !data.denied) {
+            consecutiveFailures++;
+          } else {
+            consecutiveFailures = 0;
+          }
+        }
+        let toolOutput = output;
         if (consecutiveFailures >= this.maxRetries) {
-          output += `
+          toolOutput += `
 
 [RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
         }
         results.push({
           id: call.id,
           name: call.name,
-          result: output
+          result: toolOutput
         });
       }
       if (this._stopped) break;
@@ -2122,31 +2400,32 @@ ${this._userSystemPrompt}`;
     let warning = "Max tool rounds reached";
     if (this._stopped) warning = "Agent was stopped";
     else if (consecutiveFailures >= this.maxRetries) warning = "Retry limit reached";
-    yield {
-      type: "done",
-      fullText,
-      codeExecutions,
-      usage: this.getLastUsage(),
-      warning
-    };
+    const codeExecutions = toolCalls.filter((tc) => tc.tool === "execute_code" || tc.tool === "write_and_run_code" || tc.tool === "fix_code" && tc.executed).map((tc) => ({
+      code: tc.code || tc.fixedCode,
+      purpose: this._slugify(tc.purpose),
+      output: tc.stdout || "",
+      stderr: tc.stderr || "",
+      exitCode: tc.exitCode ?? 0
+    }));
+    yield { type: "done", fullText, codeExecutions, toolCalls, usage: this.getLastUsage(), warning };
   }
   // ── Dump ─────────────────────────────────────────────────────────────────
   /**
-   * Returns all code scripts the agent has written across all chat/stream calls.
-   * @returns {Array<{fileName: string, script: string}>}
+   * Returns all code scripts and bash commands the agent has executed.
+   * @returns {Array<{fileName: string, purpose: string|null, script: string, filePath: string|null, tool: string}>}
    */
   dump() {
     return this._allExecutions.map((exec, i) => ({
       fileName: exec.purpose ? `agent-${exec.purpose}.mjs` : `script-${i + 1}.mjs`,
       purpose: exec.purpose || null,
       script: exec.code,
-      filePath: exec.filePath || null
+      filePath: exec.filePath || null,
+      tool: exec.tool || "execute_code"
     }));
   }
   // ── Stop ─────────────────────────────────────────────────────────────────
   /**
-   * Stop the agent before the next code execution.
-   * If a child process is currently running, it will be killed.
+   * Stop the agent. Kills any running child process.
    */
   stop() {
     this._stopped = true;

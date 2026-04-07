@@ -1,19 +1,14 @@
 /**
- * @fileoverview CodeAgent class — AI agent that writes and executes code.
- * Instead of traditional tool-calling with many round-trips, the model gets
- * a single `execute_code` tool and writes JavaScript that can do everything
- * (read files, write files, run commands) in a single script. Output feeds
- * back, and the model decides what to do next.
- *
- * Inspired by the "code mode" philosophy: LLMs are better at writing code
- * to call APIs than at calling APIs directly via tool-calling.
+ * @fileoverview CodeAgent class — AI agent with multiple code-oriented tools.
+ * Provides write_code, execute_code, write_and_run_code, fix_code, run_bash,
+ * and (optionally) use_skill tools for autonomous coding tasks.
  */
 
 import BaseGemini from './base.js';
 import log from './logger.js';
 import { execFile } from 'node:child_process';
 import { writeFile, unlink, readdir, readFile, mkdir } from 'node:fs/promises';
-import { join, sep } from 'node:path';
+import { join, sep, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -26,30 +21,9 @@ const MAX_OUTPUT_CHARS = 50_000;
 const MAX_FILE_TREE_LINES = 500;
 const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.next', 'build', '__pycache__']);
 
-/**
- * AI agent that writes and executes JavaScript code autonomously. ... what could possibly go wrong, right?
- *
- * During init, gathers codebase context (file tree + key files) and injects it
- * into the system prompt. The model uses the `execute_code` tool to run scripts
- * in a Node.js child process that inherits the parent's environment variables.
- *
- * @example
- * ```javascript
- * import { CodeAgent } from 'ak-gemini';
- *
- * const agent = new CodeAgent({
- *   workingDirectory: '/path/to/my/project',
- *   onCodeExecution: (code, output) => {
- *     console.log('Executed:', code.slice(0, 100));
- *     console.log('Output:', output.stdout);
- *   }
- * });
- *
- * const result = await agent.chat('List all TODO comments in the codebase');
- * console.log(result.text);
- * console.log(`Ran ${result.codeExecutions.length} scripts`);
- * ```
- */
+/** Tools that execute code/commands and can fail */
+const EXECUTING_TOOLS = new Set(['execute_code', 'write_and_run_code', 'run_bash']);
+
 class CodeAgent extends BaseGemini {
 	/**
 	 * @param {CodeAgentOptions} [options={}]
@@ -72,6 +46,8 @@ class CodeAgent extends BaseGemini {
 		this.keepArtifacts = options.keepArtifacts ?? false;
 		this.comments = options.comments ?? false;
 		this.maxRetries = options.maxRetries ?? 3;
+		this.skills = options.skills || [];
+		this.envOverview = options.envOverview || '';
 
 		// ── Internal state ──
 		this._codebaseContext = null;
@@ -80,42 +56,125 @@ class CodeAgent extends BaseGemini {
 		this._activeProcess = null;
 		this._userSystemPrompt = options.systemPrompt || '';
 		this._allExecutions = [];
+		this._skillRegistry = new Map();
 
-		// ── Single tool: execute_code ──
-		this.chatConfig.tools = [{
-			functionDeclarations: [{
-				name: 'execute_code',
-				description: 'Execute JavaScript code in a Node.js child process. The code has access to all Node.js built-in modules (fs, path, child_process, http, etc.). Use console.log() to produce output that will be returned to you. The code runs in the working directory with the same environment variables as the parent process.',
-				parametersJsonSchema: {
-					type: 'object',
-					properties: {
-						code: {
-							type: 'string',
-							description: 'JavaScript code to execute. Use console.log() for output. You can import any built-in Node.js module.'
-						},
-						purpose: {
-							type: 'string',
-							description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs", "fetch-api-data"). Used for naming the script file.'
-						}
-					},
-					required: ['code']
-				}
-			}]
-		}];
+		// ── Tools (built after skill loading; placeholder until init) ──
+		this.chatConfig.tools = [this._buildToolDefinitions()];
 		this.chatConfig.toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
 
 		log.debug(`CodeAgent created for directory: ${this.workingDirectory}`);
 	}
 
+	// ── Tool Definitions ─────────────────────────────────────────────────────
+
+	/**
+	 * Build tool definitions in Gemini format.
+	 * use_skill is only included when skills are registered.
+	 * @private
+	 * @returns {{ functionDeclarations: Array<Object> }}
+	 */
+	_buildToolDefinitions() {
+		/** @type {Array<Object>} */
+		const declarations = [
+			{
+				name: 'write_code',
+				description: 'Output code without executing it. Use this when you want to show, propose, or present code to the user without running it.',
+				parametersJsonSchema: {
+					type: 'object',
+					properties: {
+						code: { type: 'string', description: 'The code to output.' },
+						purpose: { type: 'string', description: 'A short 2-4 word slug describing the code (e.g., "api-client", "data-parser").' },
+						language: { type: 'string', description: 'Programming language of the code (default: "javascript").' }
+					},
+					required: ['code']
+				}
+			},
+			{
+				name: 'execute_code',
+				description: 'Execute a given piece of JavaScript code in a Node.js child process. Use this when you already have code to run — e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use console.log() for output.',
+				parametersJsonSchema: {
+					type: 'object',
+					properties: {
+						code: { type: 'string', description: 'JavaScript code to execute. Use console.log() for output. Use import syntax (ES modules).' },
+						purpose: { type: 'string', description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs").' }
+					},
+					required: ['code']
+				}
+			},
+			{
+				name: 'write_and_run_code',
+				description: 'Write a fresh solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it — the autonomous, end-to-end tool for solving problems with code.',
+				parametersJsonSchema: {
+					type: 'object',
+					properties: {
+						code: { type: 'string', description: 'JavaScript code to write and execute. Use console.log() for output. Use import syntax (ES modules).' },
+						purpose: { type: 'string', description: 'A short 2-4 word slug describing what this script does (e.g., "fetch-api-data", "generate-report").' }
+					},
+					required: ['code']
+				}
+			},
+			{
+				name: 'fix_code',
+				description: 'Fix broken code. Provide the original and fixed versions with an explanation. Optionally execute the fix to verify it works.',
+				parametersJsonSchema: {
+					type: 'object',
+					properties: {
+						original_code: { type: 'string', description: 'The original broken code.' },
+						fixed_code: { type: 'string', description: 'The corrected code.' },
+						explanation: { type: 'string', description: 'Brief explanation of what was wrong and how it was fixed.' },
+						execute: { type: 'boolean', description: 'If true, execute the fixed code to verify it works (default: false).' }
+					},
+					required: ['original_code', 'fixed_code']
+				}
+			},
+			{
+				name: 'run_bash',
+				description: 'Execute a shell command in the working directory. Use this for file operations, git commands, installing packages, or any shell task. Prefer this over execute_code for simple shell operations.',
+				parametersJsonSchema: {
+					type: 'object',
+					properties: {
+						command: { type: 'string', description: 'The shell command to execute.' },
+						purpose: { type: 'string', description: 'A short 2-4 word slug describing the command (e.g., "list-files", "install-deps").' }
+					},
+					required: ['command']
+				}
+			}
+		];
+
+		// Conditionally add use_skill
+		if (this._skillRegistry && this._skillRegistry.size > 0) {
+			declarations.push({
+				name: 'use_skill',
+				description: `Load a skill by name to get instructions, templates, or patterns. Available skills: ${[...this._skillRegistry.keys()].join(', ')}`,
+				parametersJsonSchema: {
+					type: 'object',
+					properties: {
+						skill_name: { type: 'string', description: 'The name of the skill to load.' }
+					},
+					required: ['skill_name']
+				}
+			});
+		}
+
+		return { functionDeclarations: declarations };
+	}
+
 	// ── Init ─────────────────────────────────────────────────────────────────
 
 	/**
-	 * Initialize the agent: gather codebase context, build system prompt,
-	 * and create the chat session.
+	 * Initialize the agent: load skills, gather codebase context, and build system prompt.
 	 * @param {boolean} [force=false]
 	 */
 	async init(force = false) {
 		if (this.chatSession && !force) return;
+
+		// Load skills
+		if (this.skills.length > 0 && (this._skillRegistry.size === 0 || force)) {
+			await this._loadSkills();
+		}
+
+		// Rebuild tools (use_skill may now be included)
+		this.chatConfig.tools = [this._buildToolDefinitions()];
 
 		// Gather codebase context
 		if (!this._contextGathered || force) {
@@ -123,22 +182,43 @@ class CodeAgent extends BaseGemini {
 		}
 
 		// Build augmented system prompt
-		const systemPrompt = this._buildSystemPrompt();
-		this.chatConfig.systemInstruction = systemPrompt;
+		this.chatConfig.systemInstruction = this._buildSystemPrompt();
 
 		await super.init(force);
+	}
+
+	// ── Skill Loading ────────────────────────────────────────────────────────
+
+	/**
+	 * Load skill files into the skill registry.
+	 * @private
+	 */
+	async _loadSkills() {
+		this._skillRegistry.clear();
+
+		for (const filePath of this.skills) {
+			try {
+				const content = await readFile(filePath, 'utf-8');
+				// Extract name from YAML frontmatter if present
+				let name = basename(filePath).replace(/\.md$/i, '');
+				const fmMatch = content.match(/^---\s*\n[\s\S]*?^name:\s*(.+)$/m);
+				if (fmMatch) name = fmMatch[1].trim();
+				this._skillRegistry.set(name, { name, content, path: filePath });
+				log.debug(`Loaded skill: ${name} from ${filePath}`);
+			} catch (e) {
+				log.warn(`skills: could not load "${filePath}": ${e.message}`);
+			}
+		}
 	}
 
 	// ── Context Gathering ────────────────────────────────────────────────────
 
 	/**
-	 * Gather file tree and key file contents from the working directory.
 	 * @private
 	 */
 	async _gatherCodebaseContext() {
 		let fileTree = '';
 
-		// Get file tree
 		try {
 			fileTree = await this._getFileTreeGit();
 		} catch {
@@ -146,14 +226,12 @@ class CodeAgent extends BaseGemini {
 			fileTree = await this._getFileTreeReaddir(this.workingDirectory, 0, 3);
 		}
 
-		// Truncate file tree
 		const lines = fileTree.split('\n');
 		if (lines.length > MAX_FILE_TREE_LINES) {
 			const truncated = lines.slice(0, MAX_FILE_TREE_LINES).join('\n');
 			fileTree = `${truncated}\n... (${lines.length - MAX_FILE_TREE_LINES} more files)`;
 		}
 
-		// Extract npm package names (lightweight — just the keys)
 		let npmPackages = [];
 		try {
 			const pkgPath = join(this.workingDirectory, 'package.json');
@@ -164,7 +242,6 @@ class CodeAgent extends BaseGemini {
 			];
 		} catch { /* no package.json */ }
 
-		// Resolve and read important files
 		const importantFileContents = [];
 		if (this.importantFiles.length > 0) {
 			const fileTreeLines = fileTree.split('\n').map(l => l.trim()).filter(Boolean);
@@ -189,19 +266,12 @@ class CodeAgent extends BaseGemini {
 	}
 
 	/**
-	 * Resolve an importantFiles entry against the file tree.
-	 * Supports exact matches and partial (basename/suffix) matches.
 	 * @private
-	 * @param {string} filename
-	 * @param {string[]} fileTreeLines
-	 * @returns {string|null}
 	 */
 	_resolveImportantFile(filename, fileTreeLines) {
-		// Exact match
 		const exact = fileTreeLines.find(line => line === filename);
 		if (exact) return exact;
 
-		// Partial match — filename matches end of path
 		const partial = fileTreeLines.find(line =>
 			line.endsWith('/' + filename) || line.endsWith(sep + filename)
 		);
@@ -209,9 +279,7 @@ class CodeAgent extends BaseGemini {
 	}
 
 	/**
-	 * Get file tree using git ls-files.
 	 * @private
-	 * @returns {Promise<string>}
 	 */
 	async _getFileTreeGit() {
 		return new Promise((resolve, reject) => {
@@ -227,12 +295,7 @@ class CodeAgent extends BaseGemini {
 	}
 
 	/**
-	 * Fallback file tree via recursive readdir.
 	 * @private
-	 * @param {string} dir
-	 * @param {number} depth
-	 * @param {number} maxDepth
-	 * @returns {Promise<string>}
 	 */
 	async _getFileTreeReaddir(dir, depth, maxDepth) {
 		if (depth >= maxDepth) return '';
@@ -253,24 +316,48 @@ class CodeAgent extends BaseGemini {
 				}
 			}
 		} catch {
-			// Permission errors, etc. — skip
+			// Permission errors, etc.
 		}
 		return entries.join('\n');
 	}
 
 	/**
-	 * Build the full system prompt with codebase context.
 	 * @private
-	 * @returns {string}
 	 */
 	_buildSystemPrompt() {
 		const { fileTree, npmPackages, importantFileContents } = this._codebaseContext || { fileTree: '', npmPackages: [], importantFileContents: [] };
 
 		let prompt = `You are a coding agent working in ${this.workingDirectory}.
 
-## Instructions
-- Use the execute_code tool to accomplish tasks by writing JavaScript code
-- Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config") when calling execute_code
+## Available Tools
+
+### write_code
+Output code without executing it. Use when showing, proposing, or presenting code to the user.
+
+### execute_code
+Run a given piece of JavaScript code. Use when you already have code to run — e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.
+
+### write_and_run_code
+Write a fresh solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code.
+
+### fix_code
+Fix broken code by providing original and fixed versions. Set execute=true to verify the fix works.
+
+### run_bash
+Run shell commands directly (e.g., ls, grep, curl, git, npm, cat). Prefer this over execute_code for simple shell operations.`;
+
+		if (this._skillRegistry.size > 0) {
+			prompt += `
+
+### use_skill
+Load a skill by name to get detailed instructions and templates. Available skills: ${[...this._skillRegistry.keys()].join(', ')}`;
+		}
+
+		prompt += `
+
+## Code Execution Rules
+These rules apply when using execute_code, write_and_run_code, or fix_code (with execute=true):
+- Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config")
 - Your code runs in a Node.js child process with access to all built-in modules
 - IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
   - import fs from 'fs';
@@ -278,9 +365,7 @@ class CodeAgent extends BaseGemini {
   - import { execSync } from 'child_process';
 - Use console.log() to produce output — that's how results are returned to you
 - Write efficient scripts that do multiple things per execution when possible
-- For parallel async operations, use Promise.all():
-  const [a, b] = await Promise.all([fetchA(), fetchB()]);
-- Read files with fs.readFileSync() when you need to understand their contents
+- For parallel async operations, use Promise.all()
 - Handle errors in your scripts with try/catch so you get useful error messages
 - Top-level await is supported
 - The working directory is: ${this.workingDirectory}`;
@@ -310,16 +395,17 @@ class CodeAgent extends BaseGemini {
 			prompt += `\n\n## Additional Instructions\n${this._userSystemPrompt}`;
 		}
 
+		if (this.envOverview) {
+			prompt += `\n\n## Environment Overview\n${this.envOverview}`;
+		}
+
 		return prompt;
 	}
 
 	// ── Code Execution ───────────────────────────────────────────────────────
 
 	/**
-	 * Generate a sanitized slug from a purpose string.
 	 * @private
-	 * @param {string} [purpose]
-	 * @returns {string}
 	 */
 	_slugify(purpose) {
 		if (!purpose) return randomUUID().slice(0, 8);
@@ -327,22 +413,16 @@ class CodeAgent extends BaseGemini {
 	}
 
 	/**
-	 * Execute a JavaScript code string in a child process.
 	 * @private
-	 * @param {string} code - JavaScript code to execute
-	 * @param {string} [purpose] - Short description for file naming
-	 * @returns {Promise<{stdout: string, stderr: string, exitCode: number, denied?: boolean}>}
 	 */
-	async _executeCode(code, purpose) {
-		// Check if stopped
+	async _executeCode(code, purpose, toolName) {
 		if (this._stopped) {
 			return { stdout: '', stderr: 'Agent was stopped', exitCode: -1 };
 		}
 
-		// Check onBeforeExecution gate
 		if (this.onBeforeExecution) {
 			try {
-				const allowed = await this.onBeforeExecution(code);
+				const allowed = await this.onBeforeExecution(code, toolName || 'execute_code');
 				if (allowed === false) {
 					return { stdout: '', stderr: 'Execution denied by onBeforeExecution callback', exitCode: -1, denied: true };
 				}
@@ -351,17 +431,14 @@ class CodeAgent extends BaseGemini {
 			}
 		}
 
-		// Ensure writeDir exists
 		await mkdir(this.writeDir, { recursive: true });
 
 		const slug = this._slugify(purpose);
 		const tempFile = join(this.writeDir, `agent-${slug}-${Date.now()}.mjs`);
 
 		try {
-			// Write code to temp file
 			await writeFile(tempFile, code, 'utf-8');
 
-			// Execute in child process
 			const result = await new Promise((resolve) => {
 				const child = execFile('node', [tempFile], {
 					cwd: this.workingDirectory,
@@ -383,7 +460,6 @@ class CodeAgent extends BaseGemini {
 				this._activeProcess = child;
 			});
 
-			// Truncate output
 			const totalLen = result.stdout.length + result.stderr.length;
 			if (totalLen > MAX_OUTPUT_CHARS) {
 				const half = Math.floor(MAX_OUTPUT_CHARS / 2);
@@ -395,13 +471,12 @@ class CodeAgent extends BaseGemini {
 				}
 			}
 
-			// Track execution
 			this._allExecutions.push({
 				code, purpose: purpose || null, output: result.stdout, stderr: result.stderr,
-				exitCode: result.exitCode, filePath: this.keepArtifacts ? tempFile : null
+				exitCode: result.exitCode, filePath: this.keepArtifacts ? tempFile : null,
+				tool: toolName || 'execute_code'
 			});
 
-			// Fire notification callback
 			if (this.onCodeExecution) {
 				try { this.onCodeExecution(code, result); }
 				catch (e) { log.warn(`onCodeExecution callback error: ${e.message}`); }
@@ -409,7 +484,6 @@ class CodeAgent extends BaseGemini {
 
 			return result;
 		} finally {
-			// Cleanup temp file (unless keeping artifacts)
 			if (!this.keepArtifacts) {
 				try { await unlink(tempFile); }
 				catch { /* file may already be gone */ }
@@ -417,11 +491,75 @@ class CodeAgent extends BaseGemini {
 		}
 	}
 
+	// ── Bash Execution ───────────────────────────────────────────────────────
+
 	/**
-	 * Format execution result as a string for the model.
+	 * Execute a bash command in the working directory.
 	 * @private
-	 * @param {{stdout: string, stderr: string, exitCode: number}} result
-	 * @returns {string}
+	 */
+	async _executeBash(command, purpose) {
+		if (this._stopped) {
+			return { stdout: '', stderr: 'Agent was stopped', exitCode: -1 };
+		}
+
+		if (this.onBeforeExecution) {
+			try {
+				const allowed = await this.onBeforeExecution(command, 'run_bash');
+				if (allowed === false) {
+					return { stdout: '', stderr: 'Execution denied by onBeforeExecution callback', exitCode: -1, denied: true };
+				}
+			} catch (e) {
+				log.warn(`onBeforeExecution callback error: ${e.message}`);
+			}
+		}
+
+		const result = await new Promise((resolve) => {
+			const child = execFile('bash', ['-c', command], {
+				cwd: this.workingDirectory,
+				timeout: this.timeout,
+				env: process.env,
+				maxBuffer: 10 * 1024 * 1024
+			}, (err, stdout, stderr) => {
+				this._activeProcess = null;
+				if (err) {
+					resolve({
+						stdout: err.stdout || stdout || '',
+						stderr: (err.stderr || stderr || '') + (err.killed ? '\n[EXECUTION TIMED OUT]' : ''),
+						exitCode: err.code || 1
+					});
+				} else {
+					resolve({ stdout: stdout || '', stderr: stderr || '', exitCode: 0 });
+				}
+			});
+			this._activeProcess = child;
+		});
+
+		const totalLen = result.stdout.length + result.stderr.length;
+		if (totalLen > MAX_OUTPUT_CHARS) {
+			const half = Math.floor(MAX_OUTPUT_CHARS / 2);
+			if (result.stdout.length > half) {
+				result.stdout = result.stdout.slice(0, half) + '\n...[OUTPUT TRUNCATED]';
+			}
+			if (result.stderr.length > half) {
+				result.stderr = result.stderr.slice(0, half) + '\n...[STDERR TRUNCATED]';
+			}
+		}
+
+		this._allExecutions.push({
+			code: command, purpose: purpose || null, output: result.stdout, stderr: result.stderr,
+			exitCode: result.exitCode, filePath: null, tool: 'run_bash'
+		});
+
+		if (this.onCodeExecution) {
+			try { this.onCodeExecution(command, result); }
+			catch (e) { log.warn(`onCodeExecution callback error: ${e.message}`); }
+		}
+
+		return result;
+	}
+
+	/**
+	 * @private
 	 */
 	_formatOutput(result) {
 		let output = '';
@@ -431,22 +569,113 @@ class CodeAgent extends BaseGemini {
 		return output || '(no output)';
 	}
 
+	// ── Tool Call Dispatch ───────────────────────────────────────────────────
+
+	/**
+	 * Handle a tool call by name, dispatching to the appropriate handler.
+	 * @private
+	 * @param {string} name - Tool name
+	 * @param {Object} input - Tool arguments
+	 * @returns {Promise<{output: string, type: string, data: Object}>}
+	 */
+	async _handleToolCall(name, input) {
+		switch (name) {
+			case 'execute_code':
+			case 'write_and_run_code': {
+				const result = await this._executeCode(input.code || '', input.purpose, name);
+				return {
+					output: this._formatOutput(result),
+					type: 'code_execution',
+					data: {
+						tool: name, code: input.code || '', purpose: input.purpose,
+						stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode,
+						denied: result.denied
+					}
+				};
+			}
+			case 'write_code': {
+				return {
+					output: 'Code written successfully.',
+					type: 'write',
+					data: {
+						tool: 'write_code', code: input.code || '',
+						purpose: input.purpose, language: input.language || 'javascript'
+					}
+				};
+			}
+			case 'fix_code': {
+				let execResult = null;
+				if (input.execute) {
+					execResult = await this._executeCode(input.fixed_code || '', 'fix', 'fix_code');
+				}
+				return {
+					output: input.execute ? this._formatOutput(execResult) : 'Fix recorded.',
+					type: 'fix',
+					data: {
+						tool: 'fix_code',
+						originalCode: input.original_code || '',
+						fixedCode: input.fixed_code || '',
+						explanation: input.explanation,
+						executed: !!input.execute,
+						stdout: execResult?.stdout, stderr: execResult?.stderr,
+						exitCode: execResult?.exitCode, denied: execResult?.denied
+					}
+				};
+			}
+			case 'run_bash': {
+				const result = await this._executeBash(input.command || '', input.purpose);
+				return {
+					output: this._formatOutput(result),
+					type: 'bash',
+					data: {
+						tool: 'run_bash', command: input.command || '', purpose: input.purpose,
+						stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode,
+						denied: result.denied
+					}
+				};
+			}
+			case 'use_skill': {
+				const skillName = input.skill_name || '';
+				const skill = this._skillRegistry.get(skillName);
+				if (!skill) {
+					const available = [...this._skillRegistry.keys()].join(', ');
+					return {
+						output: `Skill "${skillName}" not found. Available skills: ${available || '(none)'}`,
+						type: 'skill',
+						data: { tool: 'use_skill', skillName, found: false }
+					};
+				}
+				return {
+					output: skill.content,
+					type: 'skill',
+					data: { tool: 'use_skill', skillName: skill.name, content: skill.content, found: true }
+				};
+			}
+			default:
+				return {
+					output: `Unknown tool: ${name}`,
+					type: 'unknown',
+					data: { tool: name }
+				};
+		}
+	}
+
 	// ── Non-Streaming Chat ───────────────────────────────────────────────────
 
 	/**
 	 * Send a message and get a complete response (non-streaming).
-	 * Automatically handles the code execution loop.
+	 * Automatically handles the multi-tool execution loop.
 	 *
 	 * @param {string} message - The user's message
 	 * @param {Object} [opts={}] - Per-message options
 	 * @param {Record<string, string>} [opts.labels] - Per-message billing labels
-	 * @returns {Promise<CodeAgentResponse>} Response with text, codeExecutions, and usage
+	 * @returns {Promise<CodeAgentResponse>}
 	 */
 	async chat(message, opts = {}) {
 		if (!this.chatSession) await this.init();
 		this._stopped = false;
 
-		const codeExecutions = [];
+		const toolCalls = [];
 		let consecutiveFailures = 0;
 
 		let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
@@ -461,34 +690,29 @@ class CodeAgent extends BaseGemini {
 			for (const call of functionCalls) {
 				if (this._stopped) break;
 
-				const code = call.args?.code || '';
-				const purpose = call.args?.purpose;
-				const result = await this._executeCode(code, purpose);
+				const { output, type, data } = await this._handleToolCall(call.name, call.args || {});
 
-				codeExecutions.push({
-					code,
-					purpose: this._slugify(purpose),
-					output: result.stdout,
-					stderr: result.stderr,
-					exitCode: result.exitCode
-				});
+				toolCalls.push(data);
 
-				if (result.exitCode !== 0 && !result.denied) {
-					consecutiveFailures++;
-				} else {
-					consecutiveFailures = 0;
+				// Track consecutive failures for executing tools
+				const isExecutingTool = EXECUTING_TOOLS.has(call.name) || (call.name === 'fix_code' && call.args?.execute);
+				if (isExecutingTool) {
+					if (data.exitCode !== 0 && !data.denied) {
+						consecutiveFailures++;
+					} else {
+						consecutiveFailures = 0;
+					}
 				}
 
-				let output = this._formatOutput(result);
-
+				let toolOutput = output;
 				if (consecutiveFailures >= this.maxRetries) {
-					output += `\n\n[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
+					toolOutput += `\n\n[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
 				}
 
 				results.push({
 					id: call.id,
 					name: call.name,
-					result: output
+					result: toolOutput
 				});
 			}
 
@@ -517,9 +741,21 @@ class CodeAgent extends BaseGemini {
 			attempts: 1
 		};
 
+		// Build backward-compat codeExecutions (only execute_code + write_and_run_code + fix_code with execute)
+		const codeExecutions = toolCalls
+			.filter(tc => tc.tool === 'execute_code' || tc.tool === 'write_and_run_code' || (tc.tool === 'fix_code' && tc.executed))
+			.map(tc => ({
+				code: tc.code || tc.fixedCode,
+				purpose: this._slugify(tc.purpose),
+				output: tc.stdout || '',
+				stderr: tc.stderr || '',
+				exitCode: tc.exitCode ?? 0
+			}));
+
 		return {
 			text: response.text || '',
 			codeExecutions,
+			toolCalls,
 			usage: this.getLastUsage()
 		};
 	}
@@ -528,23 +764,26 @@ class CodeAgent extends BaseGemini {
 
 	/**
 	 * Send a message and stream the response as events.
-	 * Automatically handles the code execution loop between streamed rounds.
 	 *
 	 * Event types:
 	 * - `text` — A chunk of the agent's text response
-	 * - `code` — The agent is about to execute code
-	 * - `output` — Code finished executing
+	 * - `code` — The agent is about to execute code (execute_code or write_and_run_code)
+	 * - `output` — Code/bash finished executing
+	 * - `write` — The agent wrote code without executing (write_code)
+	 * - `fix` — The agent fixed code (fix_code)
+	 * - `bash` — The agent is about to run a bash command
+	 * - `skill` — The agent loaded a skill
 	 * - `done` — The agent finished
 	 *
 	 * @param {string} message - The user's message
-	 * @param {Object} [opts={}] - Per-message options
+	 * @param {Object} [opts={}]
 	 * @yields {CodeAgentStreamEvent}
 	 */
 	async *stream(message, opts = {}) {
 		if (!this.chatSession) await this.init();
 		this._stopped = false;
 
-		const codeExecutions = [];
+		const toolCalls = [];
 		let fullText = '';
 		let consecutiveFailures = 0;
 
@@ -568,58 +807,77 @@ class CodeAgent extends BaseGemini {
 
 			// No function calls — we're done
 			if (functionCalls.length === 0) {
-				yield {
-					type: 'done',
-					fullText,
-					codeExecutions,
-					usage: this.getLastUsage()
-				};
+				const codeExecutions = toolCalls
+					.filter(tc => tc.tool === 'execute_code' || tc.tool === 'write_and_run_code' || (tc.tool === 'fix_code' && tc.executed))
+					.map(tc => ({
+						code: tc.code || tc.fixedCode,
+						purpose: this._slugify(tc.purpose),
+						output: tc.stdout || '',
+						stderr: tc.stderr || '',
+						exitCode: tc.exitCode ?? 0
+					}));
+				yield { type: 'done', fullText, codeExecutions, toolCalls, usage: this.getLastUsage() };
 				return;
 			}
 
-			// Execute code sequentially so we can yield events
+			// Handle tool calls
 			const results = [];
 			for (const call of functionCalls) {
 				if (this._stopped) break;
 
-				const code = call.args?.code || '';
-				const purpose = call.args?.purpose;
-				yield { type: 'code', code };
+				const toolName = call.name;
+				const toolInput = call.args || {};
 
-				const result = await this._executeCode(code, purpose);
-
-				codeExecutions.push({
-					code,
-					purpose: this._slugify(purpose),
-					output: result.stdout,
-					stderr: result.stderr,
-					exitCode: result.exitCode
-				});
-
-				yield {
-					type: 'output',
-					code,
-					stdout: result.stdout,
-					stderr: result.stderr,
-					exitCode: result.exitCode
-				};
-
-				if (result.exitCode !== 0 && !result.denied) {
-					consecutiveFailures++;
-				} else {
-					consecutiveFailures = 0;
+				// Emit pre-execution events
+				if (toolName === 'write_code') {
+					yield { type: 'write', code: toolInput.code, purpose: toolInput.purpose, language: toolInput.language || 'javascript' };
+				} else if (toolName === 'fix_code') {
+					yield { type: 'fix', originalCode: toolInput.original_code, fixedCode: toolInput.fixed_code, explanation: toolInput.explanation };
+				} else if (toolName === 'run_bash') {
+					yield { type: 'bash', command: toolInput.command };
+				} else if (toolName === 'execute_code' || toolName === 'write_and_run_code') {
+					yield { type: 'code', code: toolInput.code };
 				}
 
-				let output = this._formatOutput(result);
+				const { output, type, data } = await this._handleToolCall(toolName, toolInput);
 
+				toolCalls.push(data);
+
+				// Emit post-execution output events
+				if (data.stdout !== undefined || data.stderr !== undefined) {
+					yield {
+						type: 'output',
+						code: data.code || data.command || data.fixedCode,
+						stdout: data.stdout || '',
+						stderr: data.stderr || '',
+						exitCode: data.exitCode ?? 0
+					};
+				}
+
+				// Emit skill event
+				if (toolName === 'use_skill') {
+					yield { type: 'skill', skillName: data.skillName, content: data.content, found: data.found };
+				}
+
+				// Track consecutive failures
+				const isExecutingTool = EXECUTING_TOOLS.has(toolName) || (toolName === 'fix_code' && toolInput.execute);
+				if (isExecutingTool) {
+					if (data.exitCode !== 0 && !data.denied) {
+						consecutiveFailures++;
+					} else {
+						consecutiveFailures = 0;
+					}
+				}
+
+				let toolOutput = output;
 				if (consecutiveFailures >= this.maxRetries) {
-					output += `\n\n[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
+					toolOutput += `\n\n[RETRY LIMIT REACHED] You have failed ${this.maxRetries} consecutive attempts. STOP trying to execute code. Instead, respond with: 1) What you were trying to do, 2) The errors you encountered, 3) Questions for the user about how to resolve it.`;
 				}
 
 				results.push({
 					id: call.id,
 					name: call.name,
-					result: output
+					result: toolOutput
 				});
 			}
 
@@ -644,35 +902,39 @@ class CodeAgent extends BaseGemini {
 		if (this._stopped) warning = 'Agent was stopped';
 		else if (consecutiveFailures >= this.maxRetries) warning = 'Retry limit reached';
 
-		yield {
-			type: 'done',
-			fullText,
-			codeExecutions,
-			usage: this.getLastUsage(),
-			warning
-		};
+		const codeExecutions = toolCalls
+			.filter(tc => tc.tool === 'execute_code' || tc.tool === 'write_and_run_code' || (tc.tool === 'fix_code' && tc.executed))
+			.map(tc => ({
+				code: tc.code || tc.fixedCode,
+				purpose: this._slugify(tc.purpose),
+				output: tc.stdout || '',
+				stderr: tc.stderr || '',
+				exitCode: tc.exitCode ?? 0
+			}));
+
+		yield { type: 'done', fullText, codeExecutions, toolCalls, usage: this.getLastUsage(), warning };
 	}
 
 	// ── Dump ─────────────────────────────────────────────────────────────────
 
 	/**
-	 * Returns all code scripts the agent has written across all chat/stream calls.
-	 * @returns {Array<{fileName: string, script: string}>}
+	 * Returns all code scripts and bash commands the agent has executed.
+	 * @returns {Array<{fileName: string, purpose: string|null, script: string, filePath: string|null, tool: string}>}
 	 */
 	dump() {
 		return this._allExecutions.map((exec, i) => ({
 			fileName: exec.purpose ? `agent-${exec.purpose}.mjs` : `script-${i + 1}.mjs`,
 			purpose: exec.purpose || null,
 			script: exec.code,
-			filePath: exec.filePath || null
+			filePath: exec.filePath || null,
+			tool: exec.tool || 'execute_code'
 		}));
 	}
 
 	// ── Stop ─────────────────────────────────────────────────────────────────
 
 	/**
-	 * Stop the agent before the next code execution.
-	 * If a child process is currently running, it will be killed.
+	 * Stop the agent. Kills any running child process.
 	 */
 	stop() {
 		this._stopped = true;
