@@ -9,6 +9,7 @@ import log from './logger.js';
 /**
  * @typedef {import('./types').ChatOptions} ChatOptions
  * @typedef {import('./types').ChatResponse} ChatResponse
+ * @typedef {import('./types').ChatStreamEvent} ChatStreamEvent
  */
 
 /**
@@ -79,6 +80,34 @@ class Chat extends BaseGemini {
 
 		return {
 			text: result.text || '',
+			usage: this.getLastUsage()
+		};
+	}
+
+	/**
+	 * Send a message and stream the response as events.
+	 *
+	 * @param {string} message - The user's message
+	 * @param {Object} [opts={}] - Per-message options
+	 * @yields {ChatStreamEvent}
+	 */
+	async *stream(message, opts = {}) {
+		if (!this.chatSession) await this.init();
+
+		let fullText = '';
+		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+
+		for await (const chunk of streamResponse) {
+			if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+				const text = chunk.candidates[0].content.parts[0].text;
+				fullText += text;
+				yield { type: 'text', text };
+			}
+		}
+
+		yield {
+			type: 'done',
+			fullText,
 			usage: this.getLastUsage()
 		};
 	}
