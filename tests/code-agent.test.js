@@ -163,6 +163,74 @@ describe('CodeAgent', () => {
 			const bashTool = decls.find(d => d.name === 'run_bash');
 			expect(bashTool.parametersJsonSchema.required).toEqual(['command']);
 		});
+
+		it('should accept custom tools and toolExecutor', () => {
+			const tools = [{ name: 'lookup', description: 'Look up a value', parametersJsonSchema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } }];
+			const executor = async () => ({});
+			const agent = makeAgent({ tools, toolExecutor: executor });
+			expect(agent.customTools.length).toBe(1);
+			expect(agent.customTools[0].name).toBe('lookup');
+			expect(agent.toolExecutor).toBe(executor);
+		});
+
+		it('should throw when tools provided without toolExecutor', () => {
+			const tools = [{ name: 'lookup', description: 'Look up', parametersJsonSchema: { type: 'object', properties: {} } }];
+			expect(() => makeAgent({ tools })).toThrow('toolExecutor');
+		});
+	});
+
+	// ── Custom Tools ────────────────────────────────────────────────────────
+
+	describe('Custom Tools', () => {
+		const CUSTOM_TOOLS = [{ name: 'db_query', description: 'Run a database query', parametersJsonSchema: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] } }];
+
+		it('should include custom tools in _buildToolDefinitions()', () => {
+			const agent = makeAgent({ tools: CUSTOM_TOOLS, toolExecutor: async () => ({}) });
+			const decls = agent.chatConfig.tools[0].functionDeclarations;
+			const toolNames = decls.map(d => d.name);
+			expect(toolNames).toContain('write_code');
+			expect(toolNames).toContain('db_query');
+		});
+
+		it('should dispatch custom tool via _handleToolCall()', async () => {
+			let calledWith = null;
+			const executor = async (name, args) => { calledWith = { name, args }; return { rows: [{ id: 1 }] }; };
+			const agent = makeAgent({ tools: CUSTOM_TOOLS, toolExecutor: executor });
+			const result = await agent._handleToolCall('db_query', { sql: 'SELECT 1' });
+			expect(calledWith).toEqual({ name: 'db_query', args: { sql: 'SELECT 1' } });
+			expect(result.type).toBe('tool');
+			expect(result.data.tool).toBe('db_query');
+			expect(result.data.result).toEqual({ rows: [{ id: 1 }] });
+		});
+
+		it('should handle toolExecutor errors gracefully', async () => {
+			const executor = async () => { throw new Error('connection refused'); };
+			const agent = makeAgent({ tools: CUSTOM_TOOLS, toolExecutor: executor });
+			const result = await agent._handleToolCall('db_query', { sql: 'SELECT 1' });
+			expect(result.type).toBe('tool');
+			expect(result.data.error).toBe('connection refused');
+			expect(result.output).toContain('connection refused');
+		});
+
+		it('should stringify non-string results', async () => {
+			const executor = async () => ({ count: 42 });
+			const agent = makeAgent({ tools: CUSTOM_TOOLS, toolExecutor: executor });
+			const result = await agent._handleToolCall('db_query', { sql: 'SELECT 1' });
+			expect(result.output).toBe('{"count":42}');
+		});
+
+		it('should return string results as-is', async () => {
+			const executor = async () => 'done';
+			const agent = makeAgent({ tools: CUSTOM_TOOLS, toolExecutor: executor });
+			const result = await agent._handleToolCall('db_query', { sql: 'SELECT 1' });
+			expect(result.output).toBe('done');
+		});
+
+		it('should still handle built-in tools when custom tools are present', async () => {
+			const agent = makeAgent({ tools: CUSTOM_TOOLS, toolExecutor: async () => ({}) });
+			const result = await agent._handleToolCall('write_code', { code: 'console.log("hi")' });
+			expect(result.type).toBe('write');
+		});
 	});
 
 	// ── _buildToolDefinitions() ─────────────────────────────────────────────
@@ -1265,6 +1333,37 @@ console.log(pkg.name);
 			await agent.init();
 			expect(agent.chatConfig.systemInstruction).toContain('Key Files');
 			expect(agent.chatConfig.systemInstruction).toContain('export default function app');
+		});
+
+		it('should resolve absolute paths outside workingDirectory', async () => {
+			const externalDir = await realpath(await mkdtemp(join(tmpdir(), 'ak-gemini-ext-')));
+			const externalFile = join(externalDir, 'external-ref.js');
+			await writeFile(externalFile, 'export const REF = "external-reference";');
+			try {
+				const agent = makeAgent({ importantFiles: [externalFile] });
+				await agent._gatherCodebaseContext();
+				expect(agent._codebaseContext.importantFileContents.length).toBe(1);
+				expect(agent._codebaseContext.importantFileContents[0].path).toBe(externalFile);
+				expect(agent._codebaseContext.importantFileContents[0].content).toContain('external-reference');
+			} finally {
+				await rm(externalDir, { recursive: true, force: true });
+			}
+		});
+
+		it('should handle mix of absolute and relative importantFiles', async () => {
+			const externalDir = await realpath(await mkdtemp(join(tmpdir(), 'ak-gemini-ext-')));
+			const externalFile = join(externalDir, 'types.d.ts');
+			await writeFile(externalFile, 'export type Foo = string;');
+			try {
+				const agent = makeAgent({ importantFiles: [externalFile, 'app.js'] });
+				await agent._gatherCodebaseContext();
+				expect(agent._codebaseContext.importantFileContents.length).toBe(2);
+				const paths = agent._codebaseContext.importantFileContents.map(f => f.path);
+				expect(paths).toContain(externalFile);
+				expect(paths.some(p => p.endsWith('app.js'))).toBe(true);
+			} finally {
+				await rm(externalDir, { recursive: true, force: true });
+			}
 		});
 	});
 

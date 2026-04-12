@@ -324,6 +324,17 @@ export interface CodeAgentOptions extends BaseGeminiOptions {
   skills?: string[];
   /** Plain text environment overview appended to the system prompt — describe the project, stack, conventions, etc. */
   envOverview?: string;
+  /** Custom tool declarations to add alongside built-in CodeAgent tools. Accepts Gemini, Claude, or OpenAI tool formats (auto-mapped). */
+  tools?: Array<{
+    name: string;
+    description: string;
+    parametersJsonSchema?: any;
+    parameters?: any;
+    input_schema?: any;
+    inputSchema?: any;
+  }>;
+  /** Function to execute custom tool calls: (toolName, args) => result */
+  toolExecutor?: (toolName: string, args: Record<string, any>) => Promise<any>;
 }
 
 export interface CodeExecution {
@@ -340,7 +351,7 @@ export interface CodeExecution {
 }
 
 export interface ToolCallResult {
-  tool: 'write_code' | 'execute_code' | 'write_and_run_code' | 'fix_code' | 'run_bash' | 'use_skill';
+  tool: 'write_code' | 'execute_code' | 'write_and_run_code' | 'fix_code' | 'run_bash' | 'use_skill' | string;
   code?: string;
   purpose?: string;
   language?: string;
@@ -370,7 +381,7 @@ export interface CodeAgentResponse {
 }
 
 export interface CodeAgentStreamEvent {
-  type: 'text' | 'code' | 'output' | 'write' | 'fix' | 'bash' | 'skill' | 'done';
+  type: 'text' | 'code' | 'output' | 'write' | 'fix' | 'bash' | 'skill' | 'tool' | 'done';
   text?: string;
   code?: string;
   stdout?: string;
@@ -390,6 +401,14 @@ export interface CodeAgentStreamEvent {
   skillName?: string;
   content?: string;
   found?: boolean;
+  /** custom tool: tool name */
+  toolName?: string;
+  /** custom tool: arguments passed */
+  args?: Record<string, any>;
+  /** custom tool: result returned */
+  result?: any;
+  /** custom tool: error message (if failed) */
+  error?: string;
 }
 
 // ── Per-Message Options ──────────────────────────────────────────────────────
@@ -625,6 +644,8 @@ export declare class CodeAgent extends BaseGemini {
   maxRetries: number;
   skills: string[];
   envOverview: string;
+  customTools: Array<{ name: string; description: string; parametersJsonSchema: any }>;
+  toolExecutor: ((toolName: string, args: Record<string, any>) => Promise<any>) | null;
 
   init(force?: boolean): Promise<void>;
   chat(message: string, opts?: { labels?: Record<string, string> }): Promise<CodeAgentResponse>;

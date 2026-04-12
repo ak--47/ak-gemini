@@ -1216,6 +1216,30 @@ var Chat = class extends base_default {
       usage: this.getLastUsage()
     };
   }
+  /**
+   * Send a message and stream the response as events.
+   *
+   * @param {string} message - The user's message
+   * @param {Object} [opts={}] - Per-message options
+   * @yields {ChatStreamEvent}
+   */
+  async *stream(message, opts = {}) {
+    if (!this.chatSession) await this.init();
+    let fullText = "";
+    const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+    for await (const chunk of streamResponse) {
+      if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+        const text = chunk.candidates[0].content.parts[0].text;
+        fullText += text;
+        yield { type: "text", text };
+      }
+    }
+    yield {
+      type: "done",
+      fullText,
+      usage: this.getLastUsage()
+    };
+  }
 };
 var chat_default = Chat;
 
@@ -1625,6 +1649,15 @@ var CodeAgent = class extends base_default {
     this.maxRetries = options.maxRetries ?? 3;
     this.skills = options.skills || [];
     this.envOverview = options.envOverview || "";
+    this.customTools = (options.tools || []).map((t) => ({
+      name: t.name,
+      description: t.description,
+      parametersJsonSchema: t.parametersJsonSchema || t.parameters || t.input_schema || t.inputSchema
+    }));
+    this.toolExecutor = options.toolExecutor || null;
+    if (this.customTools.length > 0 && !this.toolExecutor) {
+      throw new Error("CodeAgent: tools provided without a toolExecutor.");
+    }
     this._codebaseContext = null;
     this._contextGathered = false;
     this._stopped = false;
@@ -1722,6 +1755,9 @@ var CodeAgent = class extends base_default {
         }
       });
     }
+    for (const t of this.customTools) {
+      declarations.push({ name: t.name, description: t.description, parametersJsonSchema: t.parametersJsonSchema });
+    }
     return { functionDeclarations: declarations };
   }
   // ── Init ─────────────────────────────────────────────────────────────────
@@ -1799,7 +1835,7 @@ var CodeAgent = class extends base_default {
           continue;
         }
         try {
-          const fullPath = (0, import_node_path.join)(this.workingDirectory, resolved);
+          const fullPath = (0, import_node_path.isAbsolute)(resolved) ? resolved : (0, import_node_path.join)(this.workingDirectory, resolved);
           const content = await (0, import_promises2.readFile)(fullPath, "utf-8");
           importantFileContents.push({ path: resolved, content });
         } catch (e) {
@@ -1814,6 +1850,7 @@ var CodeAgent = class extends base_default {
    * @private
    */
   _resolveImportantFile(filename, fileTreeLines) {
+    if ((0, import_node_path.isAbsolute)(filename)) return filename;
     const exact = fileTreeLines.find((line) => line === filename);
     if (exact) return exact;
     const partial = fileTreeLines.find(
@@ -2210,12 +2247,30 @@ ${this.envOverview}`;
           data: { tool: "use_skill", skillName: skill.name, content: skill.content, found: true }
         };
       }
-      default:
+      default: {
+        if (this.toolExecutor) {
+          try {
+            const result = await this.toolExecutor(name, input);
+            const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+            return {
+              output: resultStr,
+              type: "tool",
+              data: { tool: name, args: input, result }
+            };
+          } catch (err) {
+            return {
+              output: `Tool "${name}" failed: ${err.message}`,
+              type: "tool",
+              data: { tool: name, args: input, error: err.message }
+            };
+          }
+        }
         return {
           output: `Unknown tool: ${name}`,
           type: "unknown",
           data: { tool: name }
         };
+      }
     }
   }
   // ── Non-Streaming Chat ───────────────────────────────────────────────────
@@ -2371,6 +2426,9 @@ ${this.envOverview}`;
         }
         if (toolName === "use_skill") {
           yield { type: "skill", skillName: data.skillName, content: data.content, found: data.found };
+        }
+        if (type === "tool") {
+          yield { type: "tool", toolName, args: data.args, result: data.result, error: data.error };
         }
         const isExecutingTool = EXECUTING_TOOLS.has(toolName) || toolName === "fix_code" && toolInput.execute;
         if (isExecutingTool) {
