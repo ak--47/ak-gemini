@@ -19,7 +19,54 @@ import { randomUUID } from 'node:crypto';
 
 const MAX_OUTPUT_CHARS = 50_000;
 const MAX_FILE_TREE_LINES = 500;
-const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.next', 'build', '__pycache__']);
+const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.next', 'build', '__pycache__', '.venv']);
+
+const LANG_CONFIG = {
+	javascript: {
+		toolDescExecute: 'Execute a given piece of JavaScript code in a Node.js child process. Use this when you already have code to run — e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use console.log() for output.',
+		toolDescWriteAndRun: 'Write a fresh solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it — the autonomous, end-to-end tool for solving problems with code.',
+		codeParamDesc: 'JavaScript code to execute. Use console.log() for output. Use import syntax (ES modules).',
+		codeRules: `- Your code runs in a Node.js child process with access to all built-in modules
+- IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
+  - import fs from 'fs';
+  - import path from 'path';
+  - import { execSync } from 'child_process';
+- Use console.log() to produce output — that's how results are returned to you
+- Write efficient scripts that do multiple things per execution when possible
+- For parallel async operations, use Promise.all()
+- Handle errors in your scripts with try/catch so you get useful error messages
+- Top-level await is supported`,
+		commentsEnabled: `- Add a JSDoc @fileoverview comment at the top of each script explaining what it does\n- Add brief JSDoc @param comments for any functions you define`,
+		commentsDisabled: `- Do NOT write any comments in your code — save tokens. The code should be self-explanatory.`,
+		packageLabel: 'Available Packages',
+		packageIntro: 'These npm packages are installed and can be imported',
+		bashExamples: 'ls, grep, curl, git, npm, cat',
+		codeBlockLang: 'javascript',
+		execToolSummary: 'Run a given piece of JavaScript code. Use when you already have code to run — e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.',
+		writeRunToolSummary: 'Write a fresh solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code.',
+	},
+	python: {
+		toolDescExecute: 'Execute a given piece of Python code in a child process. Use this when you already have code to run — e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use print() for output.',
+		toolDescWriteAndRun: 'Write a fresh Python solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it — the autonomous, end-to-end tool for solving problems with code.',
+		codeParamDesc: 'Python code to execute. Use print() for output.',
+		codeRules: `- Your code runs in a Python 3 child process
+- Use print() to produce output — that's how results are returned to you
+- Use standard Python imports (import os, import json, from pathlib import Path, etc.)
+- Write efficient scripts; prefer list comprehensions and built-in functions
+- For async operations, use asyncio
+- Handle errors with try/except so you get useful error messages
+- A virtual environment is active — you can install packages using run_bash with: pip install <package>
+- Installed packages persist across executions in this session`,
+		commentsEnabled: `- Add a module-level docstring at the top of each script explaining what it does\n- Add brief docstrings for any functions you define`,
+		commentsDisabled: `- Do NOT write any comments in your code — save tokens. The code should be self-explanatory.`,
+		packageLabel: 'Available Packages',
+		packageIntro: 'These Python packages are available for import',
+		bashExamples: 'ls, grep, curl, git, pip, cat',
+		codeBlockLang: 'python',
+		execToolSummary: 'Run a given piece of Python code. Use when you already have code to run — e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.',
+		writeRunToolSummary: 'Write a fresh Python solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code.',
+	}
+};
 
 /** Tools that execute code/commands and can fail */
 const EXECUTING_TOOLS = new Set(['execute_code', 'write_and_run_code', 'run_bash']);
@@ -37,6 +84,8 @@ class CodeAgent extends BaseGemini {
 
 		// ── Agent config ──
 		this.workingDirectory = options.workingDirectory || process.cwd();
+		this.language = options.language || 'javascript';
+		this.pythonPath = options.pythonPath || null;
 		this.maxRounds = options.maxRounds || 10;
 		this.timeout = options.timeout || 30_000;
 		this.onBeforeExecution = options.onBeforeExecution || null;
@@ -48,6 +97,11 @@ class CodeAgent extends BaseGemini {
 		this.maxRetries = options.maxRetries ?? 3;
 		this.skills = options.skills || [];
 		this.envOverview = options.envOverview || '';
+
+		// ── Python state (resolved during init) ──
+		this._pythonBinary = null;
+		this._venvPath = null;
+		this._venvEnv = null;
 
 		// ── Custom tools ──
 		this.customTools = (options.tools || []).map(t => ({
@@ -85,6 +139,8 @@ class CodeAgent extends BaseGemini {
 	 * @returns {{ functionDeclarations: Array<Object> }}
 	 */
 	_buildToolDefinitions() {
+		const lang = LANG_CONFIG[this.language] || LANG_CONFIG.javascript;
+
 		/** @type {Array<Object>} */
 		const declarations = [
 			{
@@ -102,11 +158,11 @@ class CodeAgent extends BaseGemini {
 			},
 			{
 				name: 'execute_code',
-				description: 'Execute a given piece of JavaScript code in a Node.js child process. Use this when you already have code to run — e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use console.log() for output.',
+				description: lang.toolDescExecute,
 				parametersJsonSchema: {
 					type: 'object',
 					properties: {
-						code: { type: 'string', description: 'JavaScript code to execute. Use console.log() for output. Use import syntax (ES modules).' },
+						code: { type: 'string', description: lang.codeParamDesc },
 						purpose: { type: 'string', description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs").' }
 					},
 					required: ['code']
@@ -114,11 +170,11 @@ class CodeAgent extends BaseGemini {
 			},
 			{
 				name: 'write_and_run_code',
-				description: 'Write a fresh solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it — the autonomous, end-to-end tool for solving problems with code.',
+				description: lang.toolDescWriteAndRun,
 				parametersJsonSchema: {
 					type: 'object',
 					properties: {
-						code: { type: 'string', description: 'JavaScript code to write and execute. Use console.log() for output. Use import syntax (ES modules).' },
+						code: { type: 'string', description: lang.codeParamDesc },
 						purpose: { type: 'string', description: 'A short 2-4 word slug describing what this script does (e.g., "fetch-api-data", "generate-report").' }
 					},
 					required: ['code']
@@ -140,7 +196,7 @@ class CodeAgent extends BaseGemini {
 			},
 			{
 				name: 'run_bash',
-				description: 'Execute a shell command in the working directory. Use this for file operations, git commands, installing packages, or any shell task. Prefer this over execute_code for simple shell operations.',
+				description: `Execute a shell command in the working directory. Use this for file operations, git commands, installing packages, or any shell task (e.g., ${lang.bashExamples}). Prefer this over execute_code for simple shell operations.`,
 				parametersJsonSchema: {
 					type: 'object',
 					properties: {
@@ -189,6 +245,12 @@ class CodeAgent extends BaseGemini {
 			await this._loadSkills();
 		}
 
+		// Resolve Python and set up venv if needed
+		if (this.language === 'python' && (!this._pythonBinary || force)) {
+			await this._resolvePython();
+			await this._setupVenv();
+		}
+
 		// Rebuild tools (use_skill may now be included)
 		this.chatConfig.tools = [this._buildToolDefinitions()];
 
@@ -227,6 +289,73 @@ class CodeAgent extends BaseGemini {
 		}
 	}
 
+	// ── Python Resolution ───────────────────────────────────────────────────
+
+	/**
+	 * Resolve the Python 3 binary path.
+	 * @private
+	 */
+	async _resolvePython() {
+		const tryBinary = (bin) => new Promise((resolve) => {
+			execFile(bin, ['--version'], { timeout: 5000 }, (err, stdout, stderr) => {
+				if (err) return resolve(null);
+				const output = (stdout || '') + (stderr || '');
+				if (output.includes('Python 3.')) return resolve(bin);
+				resolve(null);
+			});
+		});
+
+		if (this.pythonPath) {
+			const result = await tryBinary(this.pythonPath);
+			if (result) { this._pythonBinary = result; return; }
+			throw new Error(`CodeAgent: pythonPath "${this.pythonPath}" is not a valid Python 3 binary.`);
+		}
+
+		const python3 = await tryBinary('python3');
+		if (python3) { this._pythonBinary = python3; return; }
+
+		const python = await tryBinary('python');
+		if (python) { this._pythonBinary = python; return; }
+
+		throw new Error('CodeAgent: language is "python" but python3 was not found on PATH. Install Python 3 or provide the pythonPath option.');
+	}
+
+	/**
+	 * Create a virtual environment for Python execution.
+	 * @private
+	 */
+	async _setupVenv() {
+		await mkdir(this.writeDir, { recursive: true });
+		this._venvPath = join(this.writeDir, '.venv');
+		const isWin = process.platform === 'win32';
+		const venvBin = isWin ? join(this._venvPath, 'Scripts') : join(this._venvPath, 'bin');
+		const venvPython = join(venvBin, isWin ? 'python.exe' : 'python');
+
+		// Create venv if it doesn't exist
+		try {
+			await readFile(venvPython);
+		} catch {
+			log.debug(`Creating Python venv at ${this._venvPath}`);
+			await new Promise((resolve, reject) => {
+				execFile(this._pythonBinary, ['-m', 'venv', this._venvPath], {
+					timeout: 30_000
+				}, (err) => {
+					if (err) return reject(new Error(`CodeAgent: failed to create venv: ${err.message}`));
+					resolve();
+				});
+			});
+		}
+
+		// Build env with venv activated
+		const env = Object.assign({}, process.env);
+		env.VIRTUAL_ENV = this._venvPath;
+		env.PATH = venvBin + (isWin ? ';' : ':') + (process.env.PATH || '');
+		this._venvEnv = env;
+		this._pythonBinary = venvPython;
+
+		log.debug(`Python venv ready at ${this._venvPath}`);
+	}
+
 	// ── Context Gathering ────────────────────────────────────────────────────
 
 	/**
@@ -248,15 +377,37 @@ class CodeAgent extends BaseGemini {
 			fileTree = `${truncated}\n... (${lines.length - MAX_FILE_TREE_LINES} more files)`;
 		}
 
-		let npmPackages = [];
-		try {
-			const pkgPath = join(this.workingDirectory, 'package.json');
-			const pkg = JSON.parse(await readFile(pkgPath, 'utf-8'));
-			npmPackages = [
-				...Object.keys(pkg.dependencies || {}),
-				...Object.keys(pkg.devDependencies || {})
-			];
-		} catch { /* no package.json */ }
+		let packages = [];
+		if (this.language === 'python') {
+			try {
+				const reqPath = join(this.workingDirectory, 'requirements.txt');
+				const content = await readFile(reqPath, 'utf-8');
+				packages = content.split('\n')
+					.map(l => l.trim())
+					.filter(l => l && !l.startsWith('#') && !l.startsWith('-'))
+					.map(l => l.split(/[>=<!\[;\s]/)[0]);
+			} catch { /* no requirements.txt */ }
+			if (packages.length === 0) {
+				try {
+					const ppPath = join(this.workingDirectory, 'pyproject.toml');
+					const content = await readFile(ppPath, 'utf-8');
+					const depMatch = content.match(/dependencies\s*=\s*\[([\s\S]*?)\]/);
+					if (depMatch) {
+						packages = (depMatch[1].match(/"([^"]+)"/g) || [])
+							.map(s => s.replace(/"/g, '').split(/[>=<!\[;\s]/)[0]);
+					}
+				} catch { /* no pyproject.toml */ }
+			}
+		} else {
+			try {
+				const pkgPath = join(this.workingDirectory, 'package.json');
+				const pkg = JSON.parse(await readFile(pkgPath, 'utf-8'));
+				packages = [
+					...Object.keys(pkg.dependencies || {}),
+					...Object.keys(pkg.devDependencies || {})
+				];
+			} catch { /* no package.json */ }
+		}
 
 		const importantFileContents = [];
 		if (this.importantFiles.length > 0) {
@@ -277,7 +428,7 @@ class CodeAgent extends BaseGemini {
 			}
 		}
 
-		this._codebaseContext = { fileTree, npmPackages, importantFileContents };
+		this._codebaseContext = { fileTree, npmPackages: packages, packages, importantFileContents };
 		this._contextGathered = true;
 	}
 
@@ -343,7 +494,8 @@ class CodeAgent extends BaseGemini {
 	 * @private
 	 */
 	_buildSystemPrompt() {
-		const { fileTree, npmPackages, importantFileContents } = this._codebaseContext || { fileTree: '', npmPackages: [], importantFileContents: [] };
+		const { fileTree, packages, importantFileContents } = this._codebaseContext || { fileTree: '', packages: [], importantFileContents: [] };
+		const lang = LANG_CONFIG[this.language] || LANG_CONFIG.javascript;
 
 		let prompt = `You are a coding agent working in ${this.workingDirectory}.
 
@@ -353,16 +505,16 @@ class CodeAgent extends BaseGemini {
 Output code without executing it. Use when showing, proposing, or presenting code to the user.
 
 ### execute_code
-Run a given piece of JavaScript code. Use when you already have code to run — e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.
+${lang.execToolSummary}
 
 ### write_and_run_code
-Write a fresh solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code.
+${lang.writeRunToolSummary}
 
 ### fix_code
 Fix broken code by providing original and fixed versions. Set execute=true to verify the fix works.
 
 ### run_bash
-Run shell commands directly (e.g., ls, grep, curl, git, npm, cat). Prefer this over execute_code for simple shell operations.`;
+Run shell commands directly (e.g., ${lang.bashExamples}). Prefer this over execute_code for simple shell operations.`;
 
 		if (this._skillRegistry.size > 0) {
 			prompt += `
@@ -376,36 +528,27 @@ Load a skill by name to get detailed instructions and templates. Available skill
 ## Code Execution Rules
 These rules apply when using execute_code, write_and_run_code, or fix_code (with execute=true):
 - Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config")
-- Your code runs in a Node.js child process with access to all built-in modules
-- IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
-  - import fs from 'fs';
-  - import path from 'path';
-  - import { execSync } from 'child_process';
-- Use console.log() to produce output — that's how results are returned to you
-- Write efficient scripts that do multiple things per execution when possible
-- For parallel async operations, use Promise.all()
-- Handle errors in your scripts with try/catch so you get useful error messages
-- Top-level await is supported
+${lang.codeRules}
 - The working directory is: ${this.workingDirectory}`;
 
 		if (this.comments) {
-			prompt += `\n- Add a JSDoc @fileoverview comment at the top of each script explaining what it does\n- Add brief JSDoc @param comments for any functions you define`;
+			prompt += `\n${lang.commentsEnabled}`;
 		} else {
-			prompt += `\n- Do NOT write any comments in your code — save tokens. The code should be self-explanatory.`;
+			prompt += `\n${lang.commentsDisabled}`;
 		}
 
 		if (fileTree) {
 			prompt += `\n\n## File Tree\n\`\`\`\n${fileTree}\n\`\`\``;
 		}
 
-		if (npmPackages.length > 0) {
-			prompt += `\n\n## Available Packages\nThese npm packages are installed and can be imported: ${npmPackages.join(', ')}`;
+		if (packages && packages.length > 0) {
+			prompt += `\n\n## ${lang.packageLabel}\n${lang.packageIntro}: ${packages.join(', ')}`;
 		}
 
 		if (importantFileContents && importantFileContents.length > 0) {
 			prompt += `\n\n## Key Files`;
 			for (const { path: filePath, content } of importantFileContents) {
-				prompt += `\n\n### ${filePath}\n\`\`\`javascript\n${content}\n\`\`\``;
+				prompt += `\n\n### ${filePath}\n\`\`\`${lang.codeBlockLang}\n${content}\n\`\`\``;
 			}
 		}
 
@@ -452,16 +595,20 @@ These rules apply when using execute_code, write_and_run_code, or fix_code (with
 		await mkdir(this.writeDir, { recursive: true });
 
 		const slug = this._slugify(purpose);
-		const tempFile = join(this.writeDir, `agent-${slug}-${Date.now()}.mjs`);
+		const ext = this.language === 'python' ? '.py' : '.mjs';
+		const tempFile = join(this.writeDir, `agent-${slug}-${Date.now()}${ext}`);
 
 		try {
 			await writeFile(tempFile, code, 'utf-8');
 
+			const binary = this.language === 'python' ? this._pythonBinary : 'node';
+			const execEnv = this.language === 'python' && this._venvEnv ? this._venvEnv : process.env;
+
 			const result = await new Promise((resolve) => {
-				const child = execFile('node', [tempFile], {
+				const child = execFile(binary, [tempFile], {
 					cwd: this.workingDirectory,
 					timeout: this.timeout,
-					env: process.env,
+					env: execEnv,
 					maxBuffer: 10 * 1024 * 1024
 				}, (err, stdout, stderr) => {
 					this._activeProcess = null;
@@ -531,11 +678,13 @@ These rules apply when using execute_code, write_and_run_code, or fix_code (with
 			}
 		}
 
+		const execEnv = this.language === 'python' && this._venvEnv ? this._venvEnv : process.env;
+
 		const result = await new Promise((resolve) => {
 			const child = execFile('bash', ['-c', command], {
 				cwd: this.workingDirectory,
 				timeout: this.timeout,
-				env: process.env,
+				env: execEnv,
 				maxBuffer: 10 * 1024 * 1024
 			}, (err, stdout, stderr) => {
 				this._activeProcess = null;
@@ -963,8 +1112,9 @@ These rules apply when using execute_code, write_and_run_code, or fix_code (with
 	 * @returns {Array<{fileName: string, purpose: string|null, script: string, filePath: string|null, tool: string}>}
 	 */
 	dump() {
+		const ext = this.language === 'python' ? '.py' : '.mjs';
 		return this._allExecutions.map((exec, i) => ({
-			fileName: exec.purpose ? `agent-${exec.purpose}.mjs` : `script-${i + 1}.mjs`,
+			fileName: exec.purpose ? `agent-${exec.purpose}${ext}` : `script-${i + 1}${ext}`,
 			purpose: exec.purpose || null,
 			script: exec.code,
 			filePath: exec.filePath || null,

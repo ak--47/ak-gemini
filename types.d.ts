@@ -302,6 +302,10 @@ export interface RagAgentOptions extends BaseGeminiOptions {
 export interface CodeAgentOptions extends BaseGeminiOptions {
   /** Working directory for code execution (default: process.cwd()) */
   workingDirectory?: string;
+  /** Programming language for code execution: 'javascript' (default) or 'python' */
+  language?: 'javascript' | 'python';
+  /** Path to the Python binary (only used when language is 'python'; default: auto-detect python3/python) */
+  pythonPath?: string;
   /** Max code execution loop iterations (default: 10) */
   maxRounds?: number;
   /** Per-execution timeout in milliseconds (default: 30000) */
@@ -633,6 +637,8 @@ export declare class CodeAgent extends BaseGemini {
   constructor(options?: CodeAgentOptions);
 
   workingDirectory: string;
+  language: 'javascript' | 'python';
+  pythonPath: string | null;
   maxRounds: number;
   timeout: number;
   onBeforeExecution: ((content: string, toolName: string) => Promise<boolean> | boolean) | null;
