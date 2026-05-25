@@ -21,6 +21,7 @@ ak-gemini/
   code-agent.js         ← CodeAgent class (agent that writes and executes code)
   rag-agent.js          ← RagAgent class (document Q&A via remote files, local files, and in-memory data)
   embedding.js          ← Embedding class (vector embeddings via gemini-embedding-001)
+  image-generator.js    ← ImageGenerator class (Nano Banana image generation)
   json-helpers.js       ← Pure functions: extractJSON, attemptJSONRecovery, etc.
   logger.js             ← Pino-based logging with configurable levels
   types.d.ts            ← TypeScript definitions for all classes and interfaces
@@ -50,6 +51,7 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 | `CodeAgent` | `chat(message)` / `stream(message)` | Agent that writes and executes JavaScript |
 | `RagAgent` | `chat(message)` / `stream(message)` | Document Q&A via remote files, local files, and in-memory data |
 | `Embedding` | `embed(text)` / `embedBatch(texts)` | Vector embeddings via gemini-embedding-001 |
+| `ImageGenerator` | `generate(prompt)` / `save(result, path)` | Image generation via Gemini 3.x image models (Nano Banana 2) |
 
 ### Key Design Decisions
 
@@ -62,6 +64,11 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **`onBeforeExecution`** callback on both agents for gating/approval before execution
 - **RagAgent** supports three context input types: `remoteFiles` (Files API upload), `localFiles` (read from disk), `localData` (in-memory objects)
 - **Embedding** uses `gemini-embedding-001` by default, supports task types, dimensionality control, and cosine similarity
+- **ImageGenerator** uses `gemini-3.1-flash-image-preview` (Nano Banana 2) by default; supports `aspectRatio`, `imageSize`, `includeText`, and `inputImages` for editing; returns base64 image data
+- **`serviceTier`** (`STANDARD` | `FLEX` | `PRIORITY`) — cost vs latency trade for generateContent (`@google/genai` 1.47+)
+- **`includeServerSideToolInvocations`** — surface server-side tool calls (Google Search) in response when grounding is on (`@google/genai` 1.46+)
+- **`getLastUsage().modelStatus`** — surfaces Google's model lifecycle status (`DEPRECATED`, etc.) so consumers see deprecation warnings (`@google/genai` 1.47+)
+- **Default model**: `gemini-3-flash-preview` (bumped from `gemini-2.5-flash` for the Gemini 3 release). `gemini-3.5-flash` is the stable flagship if you want stability over preview.
 - **Google Search grounding** (`enableGrounding`) is available on all classes via BaseGemini, merges with existing tools
 - **Context caching** (`cachedContent`, `createCache()`, `useCache()`) is available on all classes via BaseGemini
 - **429 rate-limit retry** (`resourceExhaustedRetries: 5`, `resourceExhaustedDelay: 1000`) — automatic exponential backoff on RESOURCE_EXHAUSTED, separate from Transformer's validation retries (`maxRetries`)
@@ -147,6 +154,17 @@ Vector embeddings via Google's text embedding models. Extends BaseGemini (statel
 - Constructor options: `taskType`, `title`, `outputDimensionality`
 - `getHistory()`, `clearHistory()`, `seed()`, `estimate()` are no-ops/throw
 
+### ImageGenerator (`image-generator.js`)
+Image generation via Gemini's Nano Banana models. Extends BaseGemini (stateless, like Embedding).
+- `generate(prompt, opts?)` → `{ images: [{ data, mimeType }], text, usage }`
+- `save(result, path)` → writes base64 images to disk (suffixes `_N` if >1 image)
+- Default model: `gemini-3.1-flash-image-preview` (Nano Banana 2)
+- Constructor options: `aspectRatio`, `imageSize`, `personGeneration`, `includeText`
+- Per-call options: same as constructor, plus `inputImages` for editing/composition
+- `_buildConfig()` does NOT spread `chatConfig` — image models reject safetySettings/temp/topK/topP/thinkingConfig
+- `getHistory()`, `clearHistory()`, `seed()`, `estimate()` are no-ops/throw
+- WARNING: image-output tokens billed at ~$60/M (distinct unit); not modelled by `estimateCost()`
+
 ## Publishing Checklist
 
 - **When adding new `.js` files**, always add them to the `files` array in `package.json`. This controls what gets published to npm — missing entries cause `ERR_MODULE_NOT_FOUND` for consumers.
@@ -183,7 +201,7 @@ new Transformer({ vertexai: true, project: 'my-gcp-project' });
 
 ```javascript
 // Named exports
-import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, BaseGemini, log } from 'ak-gemini';
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
 
 // Default export (namespace object)

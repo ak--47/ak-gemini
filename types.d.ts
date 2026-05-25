@@ -68,12 +68,14 @@ export interface UsageData {
   totalTokens: number;
   /** Number of attempts (1 = first try success, 2+ = retries needed) */
   attempts: number;
-  /** Actual model that responded (e.g., 'gemini-2.5-flash-001') */
+  /** Actual model that responded (e.g., 'gemini-3-flash-preview-001') */
   modelVersion: string | null;
-  /** Model you requested (e.g., 'gemini-2.5-flash') */
+  /** Model you requested (e.g., 'gemini-3-flash-preview') */
   requestedModel: string;
   timestamp: number;
   groundingMetadata?: GroundingMetadata | null;
+  /** Model lifecycle status from Google (e.g., 'DEPRECATED'). Surfaced from @google/genai 1.47+. */
+  modelStatus?: string | null;
 }
 
 export interface TransformationExample {
@@ -130,11 +132,12 @@ export interface CachedContentInfo {
 
 export type AsyncValidatorFunction = (payload: Record<string, unknown>) => Promise<unknown>;
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
+export type ServiceTier = 'STANDARD' | 'FLEX' | 'PRIORITY';
 
 // ── Constructor Options ──────────────────────────────────────────────────────
 
 export interface BaseGeminiOptions {
-  /** Gemini model to use (default: 'gemini-2.5-flash') */
+  /** Gemini model to use (default: 'gemini-3-flash-preview') */
   modelName?: string;
   /** System prompt for the model (null or false to disable) */
   systemPrompt?: string | null | false;
@@ -177,6 +180,12 @@ export interface BaseGeminiOptions {
 
   /** Run models.list() health check during init() (default: false) */
   healthCheck?: boolean;
+
+  /** Service tier for generateContent (STANDARD | FLEX | PRIORITY). @google/genai 1.47+ */
+  serviceTier?: ServiceTier;
+
+  /** Surface server-side tool invocations (e.g. Google Search) in the response. @google/genai 1.46+ */
+  includeServerSideToolInvocations?: boolean;
 }
 
 export interface TransformerOptions extends BaseGeminiOptions {
@@ -252,6 +261,48 @@ export interface EmbeddingResult {
   values?: number[];
   /** Embedding statistics (Vertex AI) */
   statistics?: { tokenCount?: number; truncated?: boolean };
+}
+
+// ── ImageGenerator ───────────────────────────────────────────────────────────
+
+export type ImageAspectRatio = '1:1' | '2:3' | '3:2' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
+export type ImageSize = '1K' | '2K' | '4K';
+export type PersonGeneration = 'ALLOW_ALL' | 'ALLOW_ADULT' | 'ALLOW_NONE';
+
+export interface ImageGeneratorOptions extends BaseGeminiOptions {
+  /** Default aspect ratio for generated images */
+  aspectRatio?: ImageAspectRatio;
+  /** Default output resolution (1K/2K/4K) */
+  imageSize?: ImageSize;
+  /** Default people-generation policy */
+  personGeneration?: PersonGeneration;
+  /** Include text output alongside images (default: false) */
+  includeText?: boolean;
+}
+
+export interface ImageGenerateOptions {
+  aspectRatio?: ImageAspectRatio;
+  imageSize?: ImageSize;
+  personGeneration?: PersonGeneration;
+  includeText?: boolean;
+  /** Reference images for editing / multi-image composition (base64) */
+  inputImages?: Array<{ data: string; mimeType: string }>;
+}
+
+export interface GeneratedImage {
+  /** Base64-encoded image data */
+  data: string;
+  /** MIME type (e.g. "image/png") */
+  mimeType: string;
+}
+
+export interface ImageGenerationResult {
+  /** One or more generated images */
+  images: GeneratedImage[];
+  /** Optional text response (only when includeText: true) */
+  text: string | null;
+  /** Token usage */
+  usage: UsageData | null;
 }
 
 /** Tool declaration in @google/genai FunctionDeclaration format */
@@ -531,6 +582,8 @@ export declare class BaseGemini {
   enableGrounding: boolean;
   groundingConfig: Record<string, any>;
   cachedContent: string | null;
+  serviceTier: ServiceTier | null;
+  includeServerSideToolInvocations: boolean;
 
   init(force?: boolean): Promise<void>;
   seed(examples?: TransformationExample[], opts?: SeedOptions): Promise<any[]>;
@@ -677,6 +730,21 @@ export declare class Embedding extends BaseGemini {
   similarity(a: number[], b: number[]): number;
 }
 
+export declare class ImageGenerator extends BaseGemini {
+  constructor(options?: ImageGeneratorOptions);
+
+  aspectRatio: ImageAspectRatio | null;
+  imageSize: ImageSize | null;
+  personGeneration: PersonGeneration | null;
+  includeText: boolean;
+
+  init(force?: boolean): Promise<void>;
+  /** Generate one or more images from a text prompt. Supports optional reference images for editing. */
+  generate(prompt: string, opts?: ImageGenerateOptions): Promise<ImageGenerationResult>;
+  /** Write generated images to disk (suffixes `_N` before extension if >1 image) */
+  save(result: ImageGenerationResult, filePath: string): string[];
+}
+
 // ── Module Exports ───────────────────────────────────────────────────────────
 
 export declare function extractJSON(text: string): any;
@@ -690,6 +758,7 @@ declare const _default: {
   CodeAgent: typeof CodeAgent;
   RagAgent: typeof RagAgent;
   Embedding: typeof Embedding;
+  ImageGenerator: typeof ImageGenerator;
 };
 
 export default _default;

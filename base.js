@@ -25,26 +25,47 @@ const DEFAULT_THINKING_CONFIG = {
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 50_000;
 
-/** Models that support thinking features */
+/** Models that support thinking features. Image / live / tts variants intentionally excluded. */
 const THINKING_SUPPORTED_MODELS = [
-	/^gemini-3-flash(-preview)?$/,
-	/^gemini-3-pro(-preview|-image-preview)?$/,
+	/^gemini-3(\.\d+)?-pro(-preview)?$/,
+	/^gemini-3(\.\d+)?-flash(-preview)?$/,
+	/^gemini-3(\.\d+)?-flash-lite(-preview)?$/,
 	/^gemini-2\.5-pro/,
 	/^gemini-2\.5-flash(-preview)?$/,
 	/^gemini-2\.5-flash-lite(-preview)?$/,
 	/^gemini-2\.0-flash$/
 ];
 
-/** Model pricing per million tokens (as of Dec 2025) */
+/**
+ * Model pricing per million tokens (Paid Tier Standard, base rate, as of May 2026).
+ * Source: https://ai.google.dev/gemini-api/docs/pricing
+ *
+ * NOTES:
+ * - Pro models use tiered pricing (≤200k vs >200k context). Listed rate is ≤200k base tier.
+ * - Image-output tokens on Nano Banana models bill at $60/M (1.5 Flash Image) or $120/M (3 Pro Image).
+ *   Only text-input/text-output rates are modelled here; image-output cost is NOT included in estimateCost().
+ * - Audio input is more expensive on most models — listed rate covers text/image/video input.
+ */
 const MODEL_PRICING = {
-	'gemini-2.5-flash': { input: 0.15, output: 0.60 },
-	'gemini-2.5-flash-lite': { input: 0.02, output: 0.10 },
-	'gemini-2.5-pro': { input: 2.50, output: 10.00 },
-	'gemini-3-pro': { input: 2.00, output: 12.00 },
-	'gemini-3-pro-preview': { input: 2.00, output: 12.00 },
+	// Gemini 3.x stable
+	'gemini-3.5-flash': { input: 1.50, output: 9.00 },
+	'gemini-3.1-flash-lite': { input: 0.25, output: 1.50 },
+	// Gemini 3.x preview
+	'gemini-3.1-pro-preview': { input: 2.00, output: 12.00 }, // ≤200k tier
+	'gemini-3-flash-preview': { input: 0.50, output: 3.00 },
+	'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50 },
+	'gemini-3.1-flash-image-preview': { input: 0.50, output: 3.00 }, // text-only; image-output is $60/M
+	'gemini-3-pro-image-preview': { input: 2.00, output: 12.00 },   // text-only; image-output is $120/M
+	// Gemini 2.5 stable
+	'gemini-2.5-flash': { input: 0.30, output: 2.50 },
+	'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
+	'gemini-2.5-pro': { input: 1.25, output: 10.00 }, // ≤200k tier
+	'gemini-2.5-flash-image': { input: 0.30, output: 0 }, // image-output is ~$0.039/image (1290 tokens)
+	// Deprecated but kept for back-compat (shut down June 2026)
 	'gemini-2.0-flash': { input: 0.10, output: 0.40 },
 	'gemini-2.0-flash-lite': { input: 0.02, output: 0.10 },
-	'gemini-embedding-001': { input: 0.006, output: 0 }
+	// Embeddings
+	'gemini-embedding-001': { input: 0.15, output: 0 }
 };
 
 export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, DEFAULT_MAX_OUTPUT_TOKENS };
@@ -70,7 +91,7 @@ class BaseGemini {
 	 */
 	constructor(options = {}) {
 		// ── Model ──
-		this.modelName = options.modelName || 'gemini-2.5-flash';
+		this.modelName = options.modelName || 'gemini-3-flash-preview';
 
 		// ── System Prompt ──
 		// Subclasses set their own default if options.systemPrompt is undefined
@@ -114,6 +135,14 @@ class BaseGemini {
 		// ── Caching ──
 		this.cachedContent = options.cachedContent || null;
 
+		// ── Service Tier (Gemini API / Vertex AI 2026+) ──
+		// Allowed values: 'STANDARD' | 'FLEX' | 'PRIORITY' — cost vs latency trade.
+		this.serviceTier = options.serviceTier || null;
+
+		// ── Server-Side Tool Invocation Visibility (1.46.0+) ──
+		// When grounding is on, surface the server's tool calls (e.g. Google Search) in the response.
+		this.includeServerSideToolInvocations = options.includeServerSideToolInvocations ?? false;
+
 		// ── Chat Config ──
 		this.chatConfig = {
 			temperature: 0.7,
@@ -122,6 +151,9 @@ class BaseGemini {
 			safetySettings: DEFAULT_SAFETY_SETTINGS,
 			...options.chatConfig
 		};
+
+		if (this.serviceTier) this.chatConfig['serviceTier'] = this.serviceTier;
+		if (this.includeServerSideToolInvocations) this.chatConfig['includeServerSideToolInvocations'] = true;
 
 		// Apply systemPrompt to chatConfig
 		if (this.systemPrompt) {
@@ -365,6 +397,7 @@ class BaseGemini {
 	 * @protected
 	 */
 	_captureMetadata(response) {
+		const modelStatus = response?.modelStatus || null;
 		this.lastResponseMetadata = {
 			modelVersion: response.modelVersion || null,
 			requestedModel: this.modelName,
@@ -372,8 +405,13 @@ class BaseGemini {
 			responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
 			totalTokens: response.usageMetadata?.totalTokenCount || 0,
 			timestamp: Date.now(),
-			groundingMetadata: response.candidates?.[0]?.groundingMetadata || null
+			groundingMetadata: response.candidates?.[0]?.groundingMetadata || null,
+			modelStatus
 		};
+		if (modelStatus === 'DEPRECATED' && !this._deprecationWarned) {
+			log.warn(`Model "${this.modelName}" is marked DEPRECATED by Google. Plan migration.`);
+			this._deprecationWarned = true;
+		}
 	}
 
 	/**
@@ -396,7 +434,8 @@ class BaseGemini {
 			modelVersion: meta.modelVersion,
 			requestedModel: meta.requestedModel,
 			timestamp: meta.timestamp,
-			groundingMetadata: meta.groundingMetadata || null
+			groundingMetadata: meta.groundingMetadata || null,
+			modelStatus: meta.modelStatus || null
 		};
 	}
 

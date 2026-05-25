@@ -35,6 +35,7 @@ __export(index_exports, {
   Embedding: () => Embedding,
   HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
   HarmCategory: () => import_genai2.HarmCategory,
+  ImageGenerator: () => ImageGenerator,
   Message: () => message_default,
   RagAgent: () => rag_agent_default,
   ThinkingLevel: () => import_genai2.ThinkingLevel,
@@ -322,29 +323,46 @@ var DEFAULT_THINKING_CONFIG = {
 };
 var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
 var THINKING_SUPPORTED_MODELS = [
-  /^gemini-3-flash(-preview)?$/,
-  /^gemini-3-pro(-preview|-image-preview)?$/,
+  /^gemini-3(\.\d+)?-pro(-preview)?$/,
+  /^gemini-3(\.\d+)?-flash(-preview)?$/,
+  /^gemini-3(\.\d+)?-flash-lite(-preview)?$/,
   /^gemini-2\.5-pro/,
   /^gemini-2\.5-flash(-preview)?$/,
   /^gemini-2\.5-flash-lite(-preview)?$/,
   /^gemini-2\.0-flash$/
 ];
 var MODEL_PRICING = {
-  "gemini-2.5-flash": { input: 0.15, output: 0.6 },
-  "gemini-2.5-flash-lite": { input: 0.02, output: 0.1 },
-  "gemini-2.5-pro": { input: 2.5, output: 10 },
-  "gemini-3-pro": { input: 2, output: 12 },
-  "gemini-3-pro-preview": { input: 2, output: 12 },
+  // Gemini 3.x stable
+  "gemini-3.5-flash": { input: 1.5, output: 9 },
+  "gemini-3.1-flash-lite": { input: 0.25, output: 1.5 },
+  // Gemini 3.x preview
+  "gemini-3.1-pro-preview": { input: 2, output: 12 },
+  // ≤200k tier
+  "gemini-3-flash-preview": { input: 0.5, output: 3 },
+  "gemini-3.1-flash-lite-preview": { input: 0.25, output: 1.5 },
+  "gemini-3.1-flash-image-preview": { input: 0.5, output: 3 },
+  // text-only; image-output is $60/M
+  "gemini-3-pro-image-preview": { input: 2, output: 12 },
+  // text-only; image-output is $120/M
+  // Gemini 2.5 stable
+  "gemini-2.5-flash": { input: 0.3, output: 2.5 },
+  "gemini-2.5-flash-lite": { input: 0.1, output: 0.4 },
+  "gemini-2.5-pro": { input: 1.25, output: 10 },
+  // ≤200k tier
+  "gemini-2.5-flash-image": { input: 0.3, output: 0 },
+  // image-output is ~$0.039/image (1290 tokens)
+  // Deprecated but kept for back-compat (shut down June 2026)
   "gemini-2.0-flash": { input: 0.1, output: 0.4 },
   "gemini-2.0-flash-lite": { input: 0.02, output: 0.1 },
-  "gemini-embedding-001": { input: 6e-3, output: 0 }
+  // Embeddings
+  "gemini-embedding-001": { input: 0.15, output: 0 }
 };
 var BaseGemini = class {
   /**
    * @param {BaseGeminiOptions} [options={}]
    */
   constructor(options = {}) {
-    this.modelName = options.modelName || "gemini-2.5-flash";
+    this.modelName = options.modelName || "gemini-3-flash-preview";
     if (options.systemPrompt !== void 0) {
       this.systemPrompt = options.systemPrompt;
     } else {
@@ -369,6 +387,8 @@ var BaseGemini = class {
     this.enableGrounding = options.enableGrounding || false;
     this.groundingConfig = options.groundingConfig || {};
     this.cachedContent = options.cachedContent || null;
+    this.serviceTier = options.serviceTier || null;
+    this.includeServerSideToolInvocations = options.includeServerSideToolInvocations ?? false;
     this.chatConfig = {
       temperature: 0.7,
       topP: 0.95,
@@ -376,6 +396,8 @@ var BaseGemini = class {
       safetySettings: DEFAULT_SAFETY_SETTINGS,
       ...options.chatConfig
     };
+    if (this.serviceTier) this.chatConfig["serviceTier"] = this.serviceTier;
+    if (this.includeServerSideToolInvocations) this.chatConfig["includeServerSideToolInvocations"] = true;
     if (this.systemPrompt) {
       this.chatConfig.systemInstruction = this.systemPrompt;
     } else if (this.systemPrompt === null && options.systemPrompt === void 0) {
@@ -573,6 +595,7 @@ ${contextText}
    * @protected
    */
   _captureMetadata(response) {
+    const modelStatus = response?.modelStatus || null;
     this.lastResponseMetadata = {
       modelVersion: response.modelVersion || null,
       requestedModel: this.modelName,
@@ -580,8 +603,13 @@ ${contextText}
       responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
       totalTokens: response.usageMetadata?.totalTokenCount || 0,
       timestamp: Date.now(),
-      groundingMetadata: response.candidates?.[0]?.groundingMetadata || null
+      groundingMetadata: response.candidates?.[0]?.groundingMetadata || null,
+      modelStatus
     };
+    if (modelStatus === "DEPRECATED" && !this._deprecationWarned) {
+      logger_default.warn(`Model "${this.modelName}" is marked DEPRECATED by Google. Plan migration.`);
+      this._deprecationWarned = true;
+    }
   }
   /**
    * Returns structured usage data from the last API call for billing verification.
@@ -601,7 +629,8 @@ ${contextText}
       modelVersion: meta.modelVersion,
       requestedModel: meta.requestedModel,
       timestamp: meta.timestamp,
-      groundingMetadata: meta.groundingMetadata || null
+      groundingMetadata: meta.groundingMetadata || null,
+      modelStatus: meta.modelStatus || null
     };
   }
   // ── Token Estimation ─────────────────────────────────────────────────────
@@ -3035,9 +3064,155 @@ var Embedding = class extends base_default {
   }
 };
 
+// image-generator.js
+var import_node_fs = require("node:fs");
+var DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview";
+var ImageGenerator = class extends base_default {
+  /**
+   * @param {import('./types.d.ts').ImageGeneratorOptions} [options={}]
+   */
+  constructor(options = {}) {
+    if (options.modelName === void 0) {
+      options = { ...options, modelName: DEFAULT_IMAGE_MODEL };
+    }
+    if (options.systemPrompt === void 0) {
+      options = { ...options, systemPrompt: null };
+    }
+    super(options);
+    this.aspectRatio = options.aspectRatio || null;
+    this.imageSize = options.imageSize || null;
+    this.personGeneration = options.personGeneration || null;
+    this.includeText = options.includeText ?? false;
+    logger_default.debug(`ImageGenerator created with model: ${this.modelName}`);
+  }
+  /**
+   * Validate API connection only; no chat session (stateless).
+   * @param {boolean} [force=false]
+   */
+  async init(force = false) {
+    if (this._initialized && !force) return;
+    logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
+    try {
+      await this.genAIClient.models.list();
+      logger_default.debug(`${this.constructor.name}: API connection successful.`);
+    } catch (e) {
+      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    }
+    this._initialized = true;
+  }
+  /**
+   * Build a FRESH config — Gemini image models reject safetySettings/temp/topK/topP/thinkingConfig.
+   * Do NOT spread this.chatConfig.
+   * @private
+   */
+  _buildConfig(overrides = {}) {
+    const includeText = overrides.includeText ?? this.includeText;
+    const config = { responseModalities: includeText ? ["IMAGE", "TEXT"] : ["IMAGE"] };
+    const imageConfig = {};
+    const aspectRatio = overrides.aspectRatio || this.aspectRatio;
+    const imageSize = overrides.imageSize || this.imageSize;
+    const personGeneration = overrides.personGeneration || this.personGeneration;
+    if (aspectRatio) imageConfig.aspectRatio = aspectRatio;
+    if (imageSize) imageConfig.imageSize = imageSize;
+    if (personGeneration) imageConfig.personGeneration = personGeneration;
+    if (Object.keys(imageConfig).length > 0) config.imageConfig = imageConfig;
+    return config;
+  }
+  /**
+   * Generate one or more images from a text prompt.
+   * Optionally accepts `inputImages` for image editing / multi-image composition.
+   *
+   * @param {string} prompt
+   * @param {import('./types.d.ts').ImageGenerateOptions} [opts={}]
+   * @returns {Promise<import('./types.d.ts').ImageGenerationResult>}
+   */
+  async generate(prompt, opts = {}) {
+    if (!this._initialized) await this.init();
+    const parts = [{ text: prompt }];
+    if (Array.isArray(opts.inputImages)) {
+      for (const img of opts.inputImages) {
+        parts.push({ inlineData: { data: img.data, mimeType: img.mimeType } });
+      }
+    }
+    const result = await this._withRetry(() => this.genAIClient.models.generateContent({
+      model: this.modelName,
+      contents: [{ role: "user", parts }],
+      config: this._buildConfig(opts)
+    }));
+    this._captureMetadata(result);
+    this._cumulativeUsage = {
+      promptTokens: this.lastResponseMetadata.promptTokens,
+      responseTokens: this.lastResponseMetadata.responseTokens,
+      totalTokens: this.lastResponseMetadata.totalTokens,
+      attempts: 1
+    };
+    const images = [];
+    let text = "";
+    const responseParts = result.candidates?.[0]?.content?.parts || [];
+    for (const part of responseParts) {
+      if (part.inlineData?.data) {
+        images.push({
+          data: part.inlineData.data,
+          mimeType: part.inlineData.mimeType || "image/png"
+        });
+      } else if (part.text) {
+        text += part.text;
+      }
+    }
+    if (images.length === 0) {
+      logger_default.warn("ImageGenerator: no images returned. Check prompt or safety filters.");
+    }
+    return { images, text: text || null, usage: this.getLastUsage() };
+  }
+  /**
+   * Convenience: write one or all images to disk.
+   * If multiple images, suffixes with `_N` before extension.
+   * @param {import('./types.d.ts').ImageGenerationResult} result
+   * @param {string} filePath
+   * @returns {string[]} Written file paths
+   */
+  save(result, filePath) {
+    if (!result?.images?.length) {
+      logger_default.warn("ImageGenerator.save(): no images to save.");
+      return [];
+    }
+    const paths = [];
+    const dot = filePath.lastIndexOf(".");
+    const base = dot >= 0 ? filePath.slice(0, dot) : filePath;
+    const ext = dot >= 0 ? filePath.slice(dot) : ".png";
+    result.images.forEach((img, i) => {
+      const out = result.images.length === 1 ? filePath : `${base}_${i}${ext}`;
+      (0, import_node_fs.writeFileSync)(out, Buffer.from(img.data, "base64"));
+      paths.push(out);
+    });
+    return paths;
+  }
+  // ── No-ops (image gen is stateless) ──
+  /** @returns {any[]} Always returns empty array */
+  getHistory() {
+    return [];
+  }
+  /** No-op for ImageGenerator */
+  async clearHistory() {
+  }
+  /** No-op for ImageGenerator */
+  async seed() {
+    logger_default.warn("ImageGenerator.seed() is a no-op \u2014 image generation does not support few-shot.");
+    return [];
+  }
+  /**
+   * @param {any} _nextPayload
+   * @throws {Error} ImageGenerator does not support token estimation
+   * @returns {Promise<{ inputTokens: number }>}
+   */
+  async estimate(_nextPayload) {
+    throw new Error("ImageGenerator does not support token estimation. Use generate() directly.");
+  }
+};
+
 // index.js
 var import_genai2 = require("@google/genai");
-var index_default = { Transformer: transformer_default, Chat: chat_default, Message: message_default, ToolAgent: tool_agent_default, CodeAgent: code_agent_default, RagAgent: rag_agent_default, Embedding };
+var index_default = { Transformer: transformer_default, Chat: chat_default, Message: message_default, ToolAgent: tool_agent_default, CodeAgent: code_agent_default, RagAgent: rag_agent_default, Embedding, ImageGenerator };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   BaseGemini,
@@ -3046,6 +3221,7 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   Embedding,
   HarmBlockThreshold,
   HarmCategory,
+  ImageGenerator,
   Message,
   RagAgent,
   ThinkingLevel,
