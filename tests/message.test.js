@@ -1,15 +1,9 @@
-import dotenv from 'dotenv';
-dotenv.config({ quiet: true });
 import { Message } from '../index.js';
-
-const { GEMINI_API_KEY } = process.env;
-delete process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required to run tests");
+import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
-	modelName: 'gemini-2.0-flash-lite',
-	apiKey: GEMINI_API_KEY,
-	logLevel: 'warn'
+	...AUTH_BASE,
+	modelName: 'gemini-2.0-flash-lite'
 };
 
 

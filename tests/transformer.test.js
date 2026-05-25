@@ -1,19 +1,14 @@
-import dotenv from 'dotenv';
-dotenv.config({ quiet: true });
 import { Transformer, attemptJSONRecovery, log } from '../index.js';
 import path from 'path';
 import fs from 'fs';
-
-const { GEMINI_API_KEY } = process.env;
-delete process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required to run tests");
+import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 /** @typedef {import('../types.d.ts').TransformerOptions} Options */
 
 /** @type {Options} */
 const BASE_OPTIONS = {
+	...AUTH_BASE,
 	modelName: 'gemini-2.0-flash-lite',
-	apiKey: GEMINI_API_KEY,
 	chatConfig: { topK: 21, temperature: 0.1 }
 };
 
@@ -196,26 +191,26 @@ describe('Transformer — CONTEXT and EXPLANATION', () => {
 
 describe('Transformer — System Prompt Handling', () => {
 	it('should use default JSON instructions when systemPrompt not provided', async () => {
-		const t = new Transformer({ apiKey: GEMINI_API_KEY });
+		const t = new Transformer({ ...AUTH_BASE });
 		expect(t.systemPrompt).toContain('JSON transformation engine');
 		expect(t.chatConfig.systemInstruction).toContain('JSON transformation engine');
 	});
 
 	it('should use custom systemPrompt', async () => {
 		const custom = 'You are a pirate.';
-		const t = new Transformer({ apiKey: GEMINI_API_KEY, systemPrompt: custom });
+		const t = new Transformer({ ...AUTH_BASE, systemPrompt: custom });
 		expect(t.systemPrompt).toBe(custom);
 		expect(t.chatConfig.systemInstruction).toBe(custom);
 	});
 
 	it('should remove systemPrompt when set to null', async () => {
-		const t = new Transformer({ apiKey: GEMINI_API_KEY, systemPrompt: null });
+		const t = new Transformer({ ...AUTH_BASE, systemPrompt: null });
 		expect(t.systemPrompt).toBeNull();
 		expect(t.chatConfig.systemInstruction).toBeUndefined();
 	});
 
 	it('should remove systemPrompt when set to false', async () => {
-		const t = new Transformer({ apiKey: GEMINI_API_KEY, systemPrompt: false });
+		const t = new Transformer({ ...AUTH_BASE, systemPrompt: false });
 		expect(t.systemPrompt).toBe(false);
 		expect(t.chatConfig.systemInstruction).toBeUndefined();
 	});
@@ -436,7 +431,7 @@ describe('Transformer — Seeding Edge Cases', () => {
 
 describe('Transformer — System Prompt Override via Examples', () => {
 	it('should override system prompt from SYSTEM key in examples', async () => {
-		const transformer = new Transformer({ apiKey: GEMINI_API_KEY });
+		const transformer = new Transformer({ ...AUTH_BASE });
 		const newPrompt = "You are a poet. Respond with a haiku about the input number.";
 
 		await transformer.seed([
@@ -530,7 +525,7 @@ describe('Transformer — Concurrent Operations', () => {
 describe('Transformer — Cost Estimation', () => {
 	it('should estimate cost', async () => {
 		const transformer = new Transformer({
-			apiKey: GEMINI_API_KEY,
+			...AUTH_BASE,
 			modelName: 'gemini-2.5-flash'
 		});
 		await transformer.init();

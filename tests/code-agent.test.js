@@ -1,18 +1,12 @@
-import dotenv from 'dotenv';
-dotenv.config({ quiet: true });
 import { CodeAgent } from '../index.js';
 import { join } from 'node:path';
 import { mkdtemp, rm, writeFile, readdir, readFile, mkdir, stat, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-
-const { GEMINI_API_KEY } = process.env;
-delete process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required to run tests");
+import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
-	modelName: 'gemini-2.0-flash',
-	apiKey: GEMINI_API_KEY,
-	logLevel: 'warn'
+	...AUTH_BASE,
+	modelName: 'gemini-2.0-flash'
 };
 
 let tmpDir;

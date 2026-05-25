@@ -21,11 +21,20 @@ npm run test:unit
 
 ## Environment Requirements
 
-Create a `.env` file with:
+Tests authenticate via **Vertex AI** using Application Default Credentials.
+
 ```bash
-GEMINI_API_KEY=your_gemini_api_key
+# One-time: log in for ADC
+gcloud auth application-default login
+
+# .env
+GOOGLE_CLOUD_PROJECT=your-gcp-project
+GOOGLE_CLOUD_LOCATION=us-central1   # optional, defaults to us-central1
 NODE_ENV=test
 ```
+
+API-key-specific tests (e.g. "should throw on invalid API key") are skipped
+in this mode. See `tests/auth-helper.js` for the shared auth setup.
 
 ## Test Structure
 
@@ -65,6 +74,7 @@ tests/
 
 **Tests timing out?**
 - Check your internet connection
-- Verify GEMINI_API_KEY is valid
+- Verify ADC is set up: `gcloud auth application-default print-access-token`
+- Confirm `GOOGLE_CLOUD_PROJECT` is set in `.env`
 - Increase timeout in jest.config.js
 
