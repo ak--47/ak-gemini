@@ -6,7 +6,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash-lite'
+	modelName: 'gemini-2.5-flash'
 };
 
 let testDir;
@@ -60,7 +60,7 @@ describe('RagAgent', () => {
 	describe('Constructor', () => {
 		it('should create with default options', () => {
 			const agent = new RagAgent({ ...BASE_OPTIONS });
-			expect(agent.modelName).toBe('gemini-2.0-flash-lite');
+			expect(agent.modelName).toBe('gemini-2.5-flash');
 			expect(agent.remoteFiles).toEqual([]);
 			expect(agent.localFiles).toEqual([]);
 			expect(agent.localData).toEqual([]);

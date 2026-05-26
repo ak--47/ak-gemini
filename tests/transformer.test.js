@@ -8,7 +8,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 /** @type {Options} */
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash-lite',
+	modelName: 'gemini-2.5-flash',
 	chatConfig: { topK: 21, temperature: 0.1 }
 };
 

@@ -3,7 +3,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash-lite'
+	modelName: 'gemini-2.5-flash'
 };
 
 
@@ -58,7 +58,7 @@ describe('Chat', () => {
 			expect(response.usage).toBeTruthy();
 			expect(response.usage.promptTokens).toBeGreaterThan(0);
 			expect(response.usage.totalTokens).toBeGreaterThan(0);
-			expect(response.usage.requestedModel).toBe('gemini-2.0-flash-lite');
+			expect(response.usage.requestedModel).toBe('gemini-2.5-flash');
 		});
 
 		it('should auto-init if not called', async () => {
