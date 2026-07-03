@@ -37,11 +37,13 @@ const THINKING_SUPPORTED_MODELS = [
 ];
 
 /**
- * Model pricing per million tokens (Paid Tier Standard, base rate, as of May 2026).
+ * Model pricing per million tokens (Paid Tier Standard, base rate, as of July 2026).
  * Source: https://ai.google.dev/gemini-api/docs/pricing
  *
  * NOTES:
  * - Pro models use tiered pricing (≤200k vs >200k context). Listed rate is ≤200k base tier.
+ * - Gemma models (e.g. Gemma 4) are intentionally excluded — they are open models with
+ *   no paid per-token tier on the Gemini API (Vertex deployments bill by compute).
  * - Image-output tokens on Nano Banana models bill at $60/M (1.5 Flash Image) or $120/M (3 Pro Image).
  *   Only text-input/text-output rates are modelled here; image-output cost is NOT included in estimateCost().
  * - Audio input is more expensive on most models — listed rate covers text/image/video input.
@@ -52,6 +54,7 @@ const MODEL_PRICING = {
 	'gemini-3.1-flash-lite': { input: 0.25, output: 1.50 },
 	// Gemini 3.x preview
 	'gemini-3.1-pro-preview': { input: 2.00, output: 12.00 }, // ≤200k tier
+	'gemini-3-pro-preview': { input: 2.00, output: 12.00 },   // ≤200k tier; launch rate (superseded by 3.1, off the pricing page)
 	'gemini-3-flash-preview': { input: 0.50, output: 3.00 },
 	'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50 },
 	'gemini-3.1-flash-image-preview': { input: 0.50, output: 3.00 }, // text-only; image-output is $60/M
@@ -154,6 +157,13 @@ class BaseGemini {
 
 		if (this.serviceTier) this.chatConfig['serviceTier'] = this.serviceTier;
 		if (this.includeServerSideToolInvocations) this.chatConfig['includeServerSideToolInvocations'] = true;
+
+		// ── Sampling Shortcuts ──
+		// Top-level sugar for chatConfig sampling knobs; wins over chatConfig
+		// (same precedence as the maxOutputTokens promotion below)
+		for (const key of ['temperature', 'topP', 'topK']) {
+			if (options[key] !== undefined) this.chatConfig[key] = options[key];
+		}
 
 		// Apply systemPrompt to chatConfig
 		if (this.systemPrompt) {
@@ -321,6 +331,7 @@ class BaseGemini {
 	 * @param {string} [opts.contextKey='CONTEXT'] - Key for optional context
 	 * @param {string} [opts.explanationKey='EXPLANATION'] - Key for optional explanations
 	 * @param {string} [opts.systemPromptKey='SYSTEM'] - Key for system prompt overrides in examples
+	 * @param {'json'|'text'} [opts.format='json'] - Model-turn format: 'json' wraps answers in a {data} envelope (Transformer protocol); 'text' stores ANSWER verbatim (prose agents like Chat)
 	 * @returns {Promise<Array>} The updated chat history
 	 */
 	async seed(examples, opts = {}) {
@@ -336,6 +347,7 @@ class BaseGemini {
 		const contextKey = opts.contextKey || 'CONTEXT';
 		const explanationKey = opts.explanationKey || 'EXPLANATION';
 		const systemPromptKey = opts.systemPromptKey || 'SYSTEM';
+		const format = opts.format || 'json';
 
 		// Check for system prompt override in examples
 		const instructionExample = examples.find(ex => ex[systemPromptKey]);
@@ -367,9 +379,15 @@ class BaseGemini {
 				userText += promptText;
 			}
 
-			if (answerValue) modelResponse.data = answerValue;
-			if (explanationValue) modelResponse.explanation = explanationValue;
-			const modelText = JSON.stringify(modelResponse, null, 2);
+			let modelText;
+			if (format === 'text') {
+				modelText = isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : String(answerValue || '');
+				if (explanationValue) log.warn('seed(): EXPLANATION has no representation in text format; ignored.');
+			} else {
+				if (answerValue) modelResponse.data = answerValue;
+				if (explanationValue) modelResponse.explanation = explanationValue;
+				modelText = JSON.stringify(modelResponse, null, 2);
+			}
 
 			if (userText.trim().length && modelText.trim().length > 0) {
 				historyToAdd.push({ role: 'user', parts: [{ text: userText.trim() }] });

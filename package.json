@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... everything",
-	"version": "2.3.0",
+	"version": "2.4.0",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -65,7 +65,7 @@
 	],
 	"license": "ISC",
 	"dependencies": {
-		"@google/genai": "^2.6.0",
+		"@google/genai": "^2.10.0",
 		"dotenv": "^17.3.1",
 		"pino": "^10.3.1",
 		"pino-pretty": "^13.1.3"

@@ -3,7 +3,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash-lite'
+	modelName: 'gemini-2.5-flash'
 };
 
 describe('BaseGemini — Shared Behavior', () => {
@@ -84,7 +84,7 @@ describe('BaseGemini — Shared Behavior', () => {
 			expect(typeof usage.responseTokens).toBe('number');
 			expect(typeof usage.totalTokens).toBe('number');
 			expect(usage.promptTokens).toBeGreaterThan(0);
-			expect(usage.requestedModel).toBe('gemini-2.0-flash-lite');
+			expect(usage.requestedModel).toBe('gemini-2.5-flash');
 			expect(typeof usage.timestamp).toBe('number');
 		});
 	});
@@ -190,6 +190,7 @@ describe('BaseGemini — Shared Behavior', () => {
 		it('should ignore thinkingConfig on unsupported models', () => {
 			const chat = new Chat({
 				...BASE_OPTIONS,
+				// flash-lite 2.0 is not in THINKING_SUPPORTED_MODELS (only 2.0-flash is)
 				modelName: 'gemini-2.0-flash-lite',
 				thinkingConfig: { thinkingBudget: 500 }
 			});
@@ -261,7 +262,7 @@ describe('BaseGemini — Shared Behavior', () => {
 	describe('Constructor', () => {
 		it('should set model name', () => {
 			const chat = new Chat({ ...BASE_OPTIONS });
-			expect(chat.modelName).toBe('gemini-2.0-flash-lite');
+			expect(chat.modelName).toBe('gemini-2.5-flash');
 		});
 
 		it('should have null lastResponseMetadata before any call', () => {

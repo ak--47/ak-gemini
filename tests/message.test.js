@@ -3,7 +3,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash-lite'
+	modelName: 'gemini-2.5-flash'
 };
 
 
@@ -14,7 +14,7 @@ describe('Message', () => {
 	describe('Constructor', () => {
 		it('should create without system prompt', () => {
 			const msg = new Message({ ...BASE_OPTIONS });
-			expect(msg.modelName).toBe('gemini-2.0-flash-lite');
+			expect(msg.modelName).toBe('gemini-2.5-flash');
 		});
 
 		it('should accept custom system prompt', () => {

@@ -3,7 +3,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash-lite'
+	modelName: 'gemini-2.5-flash'
 };
 
 // ── User-Provided Tools for Testing ──────────────────────────────────────────
@@ -96,7 +96,7 @@ describe('ToolAgent', () => {
 	describe('Constructor', () => {
 		it('should create with tools and executor', () => {
 			const agent = makeAgentWithTools();
-			expect(agent.modelName).toBe('gemini-2.0-flash-lite');
+			expect(agent.modelName).toBe('gemini-2.5-flash');
 			expect(agent.tools.length).toBe(2);
 			expect(agent.toolExecutor).toBe(httpToolExecutor);
 			expect(agent.maxToolRounds).toBe(10);
@@ -451,7 +451,7 @@ describe('ToolAgent', () => {
 			const usage = agent.getLastUsage();
 			expect(usage).toBeTruthy();
 			expect(usage.promptTokens).toBeGreaterThan(0);
-			expect(usage.requestedModel).toBe('gemini-2.0-flash-lite');
+			expect(usage.requestedModel).toBe('gemini-2.5-flash');
 		});
 	});
 

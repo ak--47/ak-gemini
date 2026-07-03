@@ -197,7 +197,9 @@ describe('ImageGenerator', () => {
 
 	describe('generate() — real API call', () => {
 		it('should generate at least one image from a text prompt', async () => {
-			const g = new ImageGenerator({ ...BASE_OPTIONS, aspectRatio: '1:1' });
+			// Preview image models only serve generateContent from the `global`
+			// Vertex location — regional endpoints 404.
+			const g = new ImageGenerator({ ...BASE_OPTIONS, location: 'global', aspectRatio: '1:1' });
 			const result = await g.generate('A simple red circle on a white background');
 
 			expect(result).toBeDefined();

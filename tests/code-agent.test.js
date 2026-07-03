@@ -6,7 +6,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash'
+	modelName: 'gemini-2.5-flash'
 };
 
 let tmpDir;
@@ -1178,7 +1178,7 @@ console.log(pkg.name);
 			const usage = agent.getLastUsage();
 			expect(usage).toBeTruthy();
 			expect(usage.promptTokens).toBeGreaterThan(0);
-			expect(usage.requestedModel).toBe('gemini-2.0-flash');
+			expect(usage.requestedModel).toBe('gemini-2.5-flash');
 			expect(typeof usage.timestamp).toBe('number');
 		});
 	});

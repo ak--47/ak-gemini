@@ -6,7 +6,7 @@ import { BASE_OPTIONS as AUTH_BASE } from './auth-helper.js';
 
 const BASE_OPTIONS = {
 	...AUTH_BASE,
-	modelName: 'gemini-2.0-flash-lite'
+	modelName: 'gemini-2.5-flash'
 };
 
 let testDir;
@@ -60,7 +60,7 @@ describe('RagAgent', () => {
 	describe('Constructor', () => {
 		it('should create with default options', () => {
 			const agent = new RagAgent({ ...BASE_OPTIONS });
-			expect(agent.modelName).toBe('gemini-2.0-flash-lite');
+			expect(agent.modelName).toBe('gemini-2.5-flash');
 			expect(agent.remoteFiles).toEqual([]);
 			expect(agent.localFiles).toEqual([]);
 			expect(agent.localData).toEqual([]);
@@ -181,8 +181,11 @@ describe('RagAgent', () => {
 	});
 
 	// ── Remote Files (via Files API) ────────────────────────────────────────
+	// SKIPPED: the Files API does not exist on Vertex AI ("does not support
+	// uploading files — share files through a GCS bucket"), and auth-helper is
+	// Vertex-only. Re-enable if tests ever run in GEMINI_API_KEY mode.
 
-	describe('remoteFiles', () => {
+	describe.skip('remoteFiles', () => {
 		it('should upload remote files and seed chat history', async () => {
 			const agent = new RagAgent({
 				...BASE_OPTIONS,
