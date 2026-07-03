@@ -155,6 +155,13 @@ class BaseGemini {
 		if (this.serviceTier) this.chatConfig['serviceTier'] = this.serviceTier;
 		if (this.includeServerSideToolInvocations) this.chatConfig['includeServerSideToolInvocations'] = true;
 
+		// ── Sampling Shortcuts ──
+		// Top-level sugar for chatConfig sampling knobs; wins over chatConfig
+		// (same precedence as the maxOutputTokens promotion below)
+		for (const key of ['temperature', 'topP', 'topK']) {
+			if (options[key] !== undefined) this.chatConfig[key] = options[key];
+		}
+
 		// Apply systemPrompt to chatConfig
 		if (this.systemPrompt) {
 			this.chatConfig.systemInstruction = this.systemPrompt;
@@ -321,6 +328,7 @@ class BaseGemini {
 	 * @param {string} [opts.contextKey='CONTEXT'] - Key for optional context
 	 * @param {string} [opts.explanationKey='EXPLANATION'] - Key for optional explanations
 	 * @param {string} [opts.systemPromptKey='SYSTEM'] - Key for system prompt overrides in examples
+	 * @param {'json'|'text'} [opts.format='json'] - Model-turn format: 'json' wraps answers in a {data} envelope (Transformer protocol); 'text' stores ANSWER verbatim (prose agents like Chat)
 	 * @returns {Promise<Array>} The updated chat history
 	 */
 	async seed(examples, opts = {}) {
@@ -336,6 +344,7 @@ class BaseGemini {
 		const contextKey = opts.contextKey || 'CONTEXT';
 		const explanationKey = opts.explanationKey || 'EXPLANATION';
 		const systemPromptKey = opts.systemPromptKey || 'SYSTEM';
+		const format = opts.format || 'json';
 
 		// Check for system prompt override in examples
 		const instructionExample = examples.find(ex => ex[systemPromptKey]);
@@ -367,9 +376,15 @@ class BaseGemini {
 				userText += promptText;
 			}
 
-			if (answerValue) modelResponse.data = answerValue;
-			if (explanationValue) modelResponse.explanation = explanationValue;
-			const modelText = JSON.stringify(modelResponse, null, 2);
+			let modelText;
+			if (format === 'text') {
+				modelText = isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : String(answerValue || '');
+				if (explanationValue) log.warn('seed(): EXPLANATION has no representation in text format; ignored.');
+			} else {
+				if (answerValue) modelResponse.data = answerValue;
+				if (explanationValue) modelResponse.explanation = explanationValue;
+				modelText = JSON.stringify(modelResponse, null, 2);
+			}
 
 			if (userText.trim().length && modelText.trim().length > 0) {
 				historyToAdd.push({ role: 'user', parts: [{ text: userText.trim() }] });

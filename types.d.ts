@@ -147,6 +147,12 @@ export interface BaseGeminiOptions {
   thinkingConfig?: ThinkingConfig | null;
   /** Maximum output tokens (default: 50000, null removes limit) */
   maxOutputTokens?: number | null;
+  /** Sampling temperature (shorthand for chatConfig.temperature; wins over chatConfig) */
+  temperature?: number;
+  /** Nucleus sampling (shorthand for chatConfig.topP; wins over chatConfig) */
+  topP?: number;
+  /** Top-k sampling (shorthand for chatConfig.topK; wins over chatConfig) */
+  topK?: number;
   /** Log level (default: based on NODE_ENV) */
   logLevel?: LogLevel;
 
@@ -563,6 +569,8 @@ export interface SeedOptions {
   contextKey?: string;
   explanationKey?: string;
   systemPromptKey?: string;
+  /** Model-turn format: 'json' wraps answers in a {data} envelope (Transformer protocol); 'text' stores ANSWER verbatim (prose agents like Chat). Default: 'json' */
+  format?: 'json' | 'text';
 }
 
 // ── Class Declarations ───────────────────────────────────────────────────────

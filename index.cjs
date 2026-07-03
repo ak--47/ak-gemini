@@ -398,6 +398,9 @@ var BaseGemini = class {
     };
     if (this.serviceTier) this.chatConfig["serviceTier"] = this.serviceTier;
     if (this.includeServerSideToolInvocations) this.chatConfig["includeServerSideToolInvocations"] = true;
+    for (const key of ["temperature", "topP", "topK"]) {
+      if (options[key] !== void 0) this.chatConfig[key] = options[key];
+    }
     if (this.systemPrompt) {
       this.chatConfig.systemInstruction = this.systemPrompt;
     } else if (this.systemPrompt === null && options.systemPrompt === void 0) {
@@ -531,6 +534,7 @@ var BaseGemini = class {
    * @param {string} [opts.contextKey='CONTEXT'] - Key for optional context
    * @param {string} [opts.explanationKey='EXPLANATION'] - Key for optional explanations
    * @param {string} [opts.systemPromptKey='SYSTEM'] - Key for system prompt overrides in examples
+   * @param {'json'|'text'} [opts.format='json'] - Model-turn format: 'json' wraps answers in a {data} envelope (Transformer protocol); 'text' stores ANSWER verbatim (prose agents like Chat)
    * @returns {Promise<Array>} The updated chat history
    */
   async seed(examples, opts = {}) {
@@ -544,6 +548,7 @@ var BaseGemini = class {
     const contextKey = opts.contextKey || "CONTEXT";
     const explanationKey = opts.explanationKey || "EXPLANATION";
     const systemPromptKey = opts.systemPromptKey || "SYSTEM";
+    const format = opts.format || "json";
     const instructionExample = examples.find((ex) => ex[systemPromptKey]);
     if (instructionExample) {
       logger_default.debug(`Found system prompt in examples; reinitializing chat.`);
@@ -572,9 +577,15 @@ ${contextText}
         let promptText = isJSON(promptValue) ? JSON.stringify(promptValue, null, 2) : promptValue;
         userText += promptText;
       }
-      if (answerValue) modelResponse.data = answerValue;
-      if (explanationValue) modelResponse.explanation = explanationValue;
-      const modelText = JSON.stringify(modelResponse, null, 2);
+      let modelText;
+      if (format === "text") {
+        modelText = isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : String(answerValue || "");
+        if (explanationValue) logger_default.warn("seed(): EXPLANATION has no representation in text format; ignored.");
+      } else {
+        if (answerValue) modelResponse.data = answerValue;
+        if (explanationValue) modelResponse.explanation = explanationValue;
+        modelText = JSON.stringify(modelResponse, null, 2);
+      }
       if (userText.trim().length && modelText.trim().length > 0) {
         historyToAdd.push({ role: "user", parts: [{ text: userText.trim() }] });
         historyToAdd.push({ role: "model", parts: [{ text: modelText.trim() }] });
@@ -938,7 +949,8 @@ var Transformer = class extends base_default {
       answerKey: this.answerKey,
       contextKey: this.contextKey,
       explanationKey: this.explanationKey,
-      systemPromptKey: this.systemPromptKey
+      systemPromptKey: this.systemPromptKey,
+      format: "json"
     });
   }
   // ── Primary Send Method ──────────────────────────────────────────────────
@@ -1215,6 +1227,18 @@ var Chat = class extends base_default {
     }
     super(options);
     logger_default.debug(`Chat created with model: ${this.modelName}`);
+  }
+  /**
+   * Seeds the conversation with example pairs stored as plain prose turns.
+   * Chat is a prose agent — model turns are stored verbatim, not wrapped in
+   * Transformer's {data} JSON envelope.
+   *
+   * @param {import('./types').TransformationExample[]} [examples]
+   * @param {import('./types').SeedOptions} [opts={}]
+   * @returns {Promise<Array>} The updated chat history
+   */
+  async seed(examples, opts = {}) {
+    return super.seed(examples, { format: "text", ...opts });
   }
   /**
    * Send a text message and get a response. Adds to conversation history.
