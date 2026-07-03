@@ -181,8 +181,11 @@ describe('RagAgent', () => {
 	});
 
 	// ── Remote Files (via Files API) ────────────────────────────────────────
+	// SKIPPED: the Files API does not exist on Vertex AI ("does not support
+	// uploading files — share files through a GCS bucket"), and auth-helper is
+	// Vertex-only. Re-enable if tests ever run in GEMINI_API_KEY mode.
 
-	describe('remoteFiles', () => {
+	describe.skip('remoteFiles', () => {
 		it('should upload remote files and seed chat history', async () => {
 			const agent = new RagAgent({
 				...BASE_OPTIONS,

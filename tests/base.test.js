@@ -190,7 +190,8 @@ describe('BaseGemini — Shared Behavior', () => {
 		it('should ignore thinkingConfig on unsupported models', () => {
 			const chat = new Chat({
 				...BASE_OPTIONS,
-				modelName: 'gemini-2.5-flash',
+				// flash-lite 2.0 is not in THINKING_SUPPORTED_MODELS (only 2.0-flash is)
+				modelName: 'gemini-2.0-flash-lite',
 				thinkingConfig: { thinkingBudget: 500 }
 			});
 			expect(chat.chatConfig.thinkingConfig).toBeUndefined();
