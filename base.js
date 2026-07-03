@@ -37,11 +37,13 @@ const THINKING_SUPPORTED_MODELS = [
 ];
 
 /**
- * Model pricing per million tokens (Paid Tier Standard, base rate, as of May 2026).
+ * Model pricing per million tokens (Paid Tier Standard, base rate, as of July 2026).
  * Source: https://ai.google.dev/gemini-api/docs/pricing
  *
  * NOTES:
  * - Pro models use tiered pricing (≤200k vs >200k context). Listed rate is ≤200k base tier.
+ * - Gemma models (e.g. Gemma 4) are intentionally excluded — they are open models with
+ *   no paid per-token tier on the Gemini API (Vertex deployments bill by compute).
  * - Image-output tokens on Nano Banana models bill at $60/M (1.5 Flash Image) or $120/M (3 Pro Image).
  *   Only text-input/text-output rates are modelled here; image-output cost is NOT included in estimateCost().
  * - Audio input is more expensive on most models — listed rate covers text/image/video input.
@@ -52,6 +54,7 @@ const MODEL_PRICING = {
 	'gemini-3.1-flash-lite': { input: 0.25, output: 1.50 },
 	// Gemini 3.x preview
 	'gemini-3.1-pro-preview': { input: 2.00, output: 12.00 }, // ≤200k tier
+	'gemini-3-pro-preview': { input: 2.00, output: 12.00 },   // ≤200k tier; launch rate (superseded by 3.1, off the pricing page)
 	'gemini-3-flash-preview': { input: 0.50, output: 3.00 },
 	'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50 },
 	'gemini-3.1-flash-image-preview': { input: 0.50, output: 3.00 }, // text-only; image-output is $60/M

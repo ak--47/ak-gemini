@@ -338,6 +338,8 @@ var MODEL_PRICING = {
   // Gemini 3.x preview
   "gemini-3.1-pro-preview": { input: 2, output: 12 },
   // ≤200k tier
+  "gemini-3-pro-preview": { input: 2, output: 12 },
+  // ≤200k tier; launch rate (superseded by 3.1, off the pricing page)
   "gemini-3-flash-preview": { input: 0.5, output: 3 },
   "gemini-3.1-flash-lite-preview": { input: 0.25, output: 1.5 },
   "gemini-3.1-flash-image-preview": { input: 0.5, output: 3 },
