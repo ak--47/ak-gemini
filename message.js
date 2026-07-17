@@ -53,6 +53,13 @@ class Message extends BaseGemini {
 		}
 		if (options.responseMimeType) {
 			this.chatConfig.responseMimeType = options.responseMimeType;
+		} else if (options.responseSchema) {
+			// Google's @google/genai requires response_mime_type: 'application/json'
+			// whenever a responseSchema is set — it does NOT add it automatically.
+			// Passing a schema without the mime type yields a 400 INVALID_ARGUMENT
+			// (Vertex) or prose output that fails JSON extraction. Auto-pair them.
+			this.chatConfig.responseMimeType = 'application/json';
+			log.debug("responseSchema set without responseMimeType — defaulting responseMimeType to 'application/json'.");
 		}
 
 		this._isStructured = !!(options.responseSchema || options.responseMimeType === 'application/json');
@@ -71,11 +78,17 @@ class Message extends BaseGemini {
 
 		log.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
 
-		try {
-			await this.genAIClient.models.list();
-			log.debug(`${this.constructor.name}: API connection successful.`);
-		} catch (e) {
-			throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+		// Connectivity check is opt-in (healthCheck: true). models.list() is a
+		// different IAM surface than generateContent — a service account allowed to
+		// generate but not list publisher models would fail here misleadingly — and
+		// it adds a round-trip per instance. The first send() is a fine error signal.
+		if (this.healthCheck) {
+			try {
+				await this._withRetry(() => this.genAIClient.models.list());
+				log.debug(`${this.constructor.name}: API connection successful.`);
+			} catch (e) {
+				throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+			}
 		}
 
 		this._initialized = true;
@@ -111,6 +124,11 @@ class Message extends BaseGemini {
 			}
 		}));
 
+		// Compute per-call usage synchronously from THIS response before any other
+		// concurrent send() can mutate instance state. result.usage is safe under
+		// concurrency; getLastUsage() (instance state, updated below) is not.
+		const usage = this._usageFromResponse(result);
+
 		this._captureMetadata(result);
 
 		this._cumulativeUsage = {
@@ -127,7 +145,7 @@ class Message extends BaseGemini {
 		const text = result.text || '';
 		const response = {
 			text,
-			usage: this.getLastUsage()
+			usage
 		};
 
 		// Parse structured data if configured

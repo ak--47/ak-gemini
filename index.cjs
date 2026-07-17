@@ -36,15 +36,20 @@ __export(index_exports, {
   HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
   HarmCategory: () => import_genai2.HarmCategory,
   ImageGenerator: () => ImageGenerator,
+  MODEL_ALIASES: () => MODEL_ALIASES,
+  MODEL_PRICING: () => MODEL_PRICING,
   Message: () => message_default,
   RagAgent: () => rag_agent_default,
   ThinkingLevel: () => import_genai2.ThinkingLevel,
   ToolAgent: () => tool_agent_default,
   Transformer: () => transformer_default,
   attemptJSONRecovery: () => attemptJSONRecovery,
+  computeCost: () => computeCost,
   default: () => index_default,
   extractJSON: () => extractJSON,
-  log: () => logger_default
+  log: () => logger_default,
+  resolvePricing: () => resolvePricing,
+  validateSchema: () => validateSchema
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -255,6 +260,76 @@ function findCompleteJSONStructures(text) {
   }
   return results;
 }
+function validateSchema(data, schema, path2 = "$") {
+  const errors = [];
+  if (!schema || typeof schema !== "object") return errors;
+  if (Array.isArray(schema.enum)) {
+    const ok = schema.enum.some((v) => v === data);
+    if (!ok) errors.push(`${path2}: value ${JSON.stringify(data)} is not one of allowed enum values ${JSON.stringify(schema.enum)}`);
+  }
+  if (schema.type !== void 0) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.some((t) => matchesType(data, t))) {
+      errors.push(`${path2}: expected type ${types.join("|")} but got ${describeType(data)}`);
+      return errors;
+    }
+  }
+  const isObject = data !== null && typeof data === "object" && !Array.isArray(data);
+  if (isObject && (schema.properties || schema.required || schema.additionalProperties === false)) {
+    const props = schema.properties || {};
+    if (Array.isArray(schema.required)) {
+      for (const key of schema.required) {
+        if (!(key in data)) errors.push(`${path2}: missing required property "${key}"`);
+      }
+    }
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(data)) {
+        if (!(key in props)) errors.push(`${path2}: unexpected property "${key}" (additionalProperties is false)`);
+      }
+    }
+    for (const [key, subSchema] of Object.entries(props)) {
+      if (key in data) {
+        errors.push(...validateSchema(
+          data[key],
+          /** @type {any} */
+          subSchema,
+          `${path2}.${key}`
+        ));
+      }
+    }
+  }
+  if (Array.isArray(data) && schema.items && typeof schema.items === "object" && !Array.isArray(schema.items)) {
+    data.forEach((item, i) => {
+      errors.push(...validateSchema(item, schema.items, `${path2}[${i}]`));
+    });
+  }
+  return errors;
+}
+function matchesType(value, type) {
+  switch (type) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && !Number.isNaN(value);
+    case "integer":
+      return typeof value === "number" && Number.isInteger(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "object":
+      return value !== null && typeof value === "object" && !Array.isArray(value);
+    case "array":
+      return Array.isArray(value);
+    case "null":
+      return value === null;
+    default:
+      return true;
+  }
+}
+function describeType(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
 function extractJSON(text) {
   if (!text || typeof text !== "string") {
     throw new Error("No text provided for JSON extraction");
@@ -359,6 +434,23 @@ var MODEL_PRICING = {
   // Embeddings
   "gemini-embedding-001": { input: 0.15, output: 0 }
 };
+var MODEL_ALIASES = {
+  "gemini-flash-latest": "gemini-3.5-flash",
+  "gemini-pro-latest": "gemini-3.1-pro-preview",
+  "gemini-flash-lite-latest": "gemini-3.1-flash-lite"
+};
+function resolvePricing(modelId) {
+  if (!modelId) return null;
+  if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
+  const alias = MODEL_ALIASES[modelId];
+  if (alias && MODEL_PRICING[alias]) return MODEL_PRICING[alias];
+  return null;
+}
+function computeCost(modelId, promptTokens, responseTokens) {
+  const pricing = resolvePricing(modelId);
+  if (!pricing) return null;
+  return promptTokens / 1e6 * pricing.input + responseTokens / 1e6 * pricing.output;
+}
 var BaseGemini = class {
   /**
    * @param {BaseGeminiOptions} [options={}]
@@ -634,16 +726,49 @@ ${contextText}
     const meta = this.lastResponseMetadata;
     const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
     const useCumulative = cumulative.attempts > 0;
+    const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
+    const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
+    const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
     return {
-      promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
-      responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
-      totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
+      promptTokens,
+      responseTokens,
+      totalTokens,
       attempts: useCumulative ? cumulative.attempts : 1,
       modelVersion: meta.modelVersion,
       requestedModel: meta.requestedModel,
       timestamp: meta.timestamp,
       groundingMetadata: meta.groundingMetadata || null,
-      modelStatus: meta.modelStatus || null
+      modelStatus: meta.modelStatus || null,
+      estimatedCost: computeCost(meta.modelVersion || meta.requestedModel, promptTokens, responseTokens)
+    };
+  }
+  /**
+   * Builds a usage object directly from a single API response, WITHOUT reading
+   * mutable instance state (`lastResponseMetadata`/`_cumulativeUsage`). Safe to
+   * call under concurrent send() calls on a shared instance — unlike
+   * getLastUsage(), which reflects whichever call most recently mutated the
+   * instance and can cross-talk between concurrent sends.
+   * @param {Object} response - A single generateContent() response
+   * @param {number} [attempts=1] - Attempts this call consumed
+   * @returns {UsageData}
+   * @protected
+   */
+  _usageFromResponse(response, attempts = 1) {
+    const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
+    const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
+    const totalTokens = response?.usageMetadata?.totalTokenCount || 0;
+    const modelVersion = response?.modelVersion || null;
+    return {
+      promptTokens,
+      responseTokens,
+      totalTokens,
+      attempts,
+      modelVersion,
+      requestedModel: this.modelName,
+      timestamp: Date.now(),
+      groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
+      modelStatus: response?.modelStatus || null,
+      estimatedCost: computeCost(modelVersion || this.modelName, promptTokens, responseTokens)
     };
   }
   // ── Token Estimation ─────────────────────────────────────────────────────
@@ -1310,6 +1435,9 @@ var Message = class extends base_default {
     }
     if (options.responseMimeType) {
       this.chatConfig.responseMimeType = options.responseMimeType;
+    } else if (options.responseSchema) {
+      this.chatConfig.responseMimeType = "application/json";
+      logger_default.debug("responseSchema set without responseMimeType \u2014 defaulting responseMimeType to 'application/json'.");
     }
     this._isStructured = !!(options.responseSchema || options.responseMimeType === "application/json");
     logger_default.debug(`Message created (structured=${this._isStructured})`);
@@ -1323,11 +1451,13 @@ var Message = class extends base_default {
   async init(force = false) {
     if (this._initialized && !force) return;
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    try {
-      await this.genAIClient.models.list();
-      logger_default.debug(`${this.constructor.name}: API connection successful.`);
-    } catch (e) {
-      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    if (this.healthCheck) {
+      try {
+        await this._withRetry(() => this.genAIClient.models.list());
+        logger_default.debug(`${this.constructor.name}: API connection successful.`);
+      } catch (e) {
+        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+      }
     }
     this._initialized = true;
     logger_default.debug(`${this.constructor.name}: Initialized (stateless mode).`);
@@ -1354,6 +1484,7 @@ var Message = class extends base_default {
         ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
       }
     }));
+    const usage = this._usageFromResponse(result);
     this._captureMetadata(result);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -1367,7 +1498,7 @@ var Message = class extends base_default {
     const text = result.text || "";
     const response = {
       text,
-      usage: this.getLastUsage()
+      usage
     };
     if (this._isStructured) {
       try {
@@ -2981,11 +3112,13 @@ var Embedding = class extends base_default {
   async init(force = false) {
     if (this._initialized && !force) return;
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    try {
-      await this.genAIClient.models.list();
-      logger_default.debug(`${this.constructor.name}: API connection successful.`);
-    } catch (e) {
-      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    if (this.healthCheck) {
+      try {
+        await this._withRetry(() => this.genAIClient.models.list());
+        logger_default.debug(`${this.constructor.name}: API connection successful.`);
+      } catch (e) {
+        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+      }
     }
     this._initialized = true;
     logger_default.debug(`${this.constructor.name}: Initialized (stateless mode).`);
@@ -3118,11 +3251,13 @@ var ImageGenerator = class extends base_default {
   async init(force = false) {
     if (this._initialized && !force) return;
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    try {
-      await this.genAIClient.models.list();
-      logger_default.debug(`${this.constructor.name}: API connection successful.`);
-    } catch (e) {
-      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    if (this.healthCheck) {
+      try {
+        await this._withRetry(() => this.genAIClient.models.list());
+        logger_default.debug(`${this.constructor.name}: API connection successful.`);
+      } catch (e) {
+        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+      }
     }
     this._initialized = true;
   }
@@ -3165,6 +3300,7 @@ var ImageGenerator = class extends base_default {
       contents: [{ role: "user", parts }],
       config: this._buildConfig(opts)
     }));
+    const usage = this._usageFromResponse(result);
     this._captureMetadata(result);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -3188,7 +3324,7 @@ var ImageGenerator = class extends base_default {
     if (images.length === 0) {
       logger_default.warn("ImageGenerator: no images returned. Check prompt or safety filters.");
     }
-    return { images, text: text || null, usage: this.getLastUsage() };
+    return { images, text: text || null, usage };
   }
   /**
    * Convenience: write one or all images to disk.
@@ -3248,12 +3384,17 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   HarmBlockThreshold,
   HarmCategory,
   ImageGenerator,
+  MODEL_ALIASES,
+  MODEL_PRICING,
   Message,
   RagAgent,
   ThinkingLevel,
   ToolAgent,
   Transformer,
   attemptJSONRecovery,
+  computeCost,
   extractJSON,
-  log
+  log,
+  resolvePricing,
+  validateSchema
 });

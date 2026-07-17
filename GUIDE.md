@@ -147,6 +147,8 @@ console.log(result.data);
 
 Key difference from `Chat`: `result.data` contains the parsed JSON object. `result.text` contains the raw string.
 
+> **Note:** `responseSchema` requires `responseMimeType: 'application/json'`. If you pass `responseSchema` without a `responseMimeType`, ak-gemini now auto-defaults it to `'application/json'` (logged at debug). Passing an explicit `responseMimeType` is still honored.
+
 ### When to Use Message
 
 - Classification, tagging, or labeling
@@ -1037,9 +1039,12 @@ const usage = instance.getLastUsage();
 //   attempts: 1,             // 1 = first try, 2+ = retries needed
 //   modelVersion: 'gemini-2.5-flash-001',  // actual model that responded
 //   requestedModel: 'gemini-2.5-flash',    // model you requested
-//   timestamp: 1710000000000
+//   timestamp: 1710000000000,
+//   estimatedCost: 0.00123   // USD from MODEL_PRICING; null if model unpriced
 // }
 ```
+
+> **Concurrency:** `getLastUsage()` reflects the **instance's last completed call** and mutates on every `send()`. If you share one instance across concurrent `send()` calls, `getLastUsage()` can report another call's tokens. Use the per-call **`result.usage`** returned by `send()`/`generate()` instead — it is computed synchronously from that call's own response and is safe under concurrency. `result.usage` includes `estimatedCost` too.
 
 ### Cost Estimation
 

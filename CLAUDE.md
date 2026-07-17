@@ -81,7 +81,8 @@ Shared foundation. Not typically instantiated directly.
 - `init(force?)` — Creates chat session; runs `models.list()` health check only if `healthCheck: true`
 - `seed(examples, opts?)` — Add example pairs to chat history
 - `getHistory()` / `clearHistory()` — Manage chat history
-- `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled)
+- `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
+- `resolvePricing(modelId)` / `computeCost(modelId, in, out)` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index)
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
 - `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)
 - `resourceExhaustedRetries` / `resourceExhaustedDelay` — 429 rate-limit retry with exponential backoff (default: 5 retries, 1000ms)
@@ -107,7 +108,8 @@ Multi-turn text conversation. Extends BaseGemini.
 ### Message (`message.js`)
 Stateless one-off messages. Uses `generateContent()`. Extends BaseGemini.
 - `send(payload, opts?)` → `{ text, data?, usage }`
-- Supports structured output via `responseSchema` / `responseMimeType`
+- Supports structured output via `responseSchema` / `responseMimeType`. Passing `responseSchema` alone now auto-defaults `responseMimeType: 'application/json'` (the SDK requires it and won't add it)
+- `init()` runs the `models.list()` connectivity check ONLY when `healthCheck: true` (was unconditional); same gating applied to `Embedding` and `ImageGenerator`
 - `getHistory()`, `clearHistory()`, `seed()` are no-ops
 
 ### ToolAgent (`tool-agent.js`)

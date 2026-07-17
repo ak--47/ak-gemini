@@ -71,7 +71,46 @@ const MODEL_PRICING = {
 	'gemini-embedding-001': { input: 0.15, output: 0 }
 };
 
-export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, DEFAULT_MAX_OUTPUT_TOKENS };
+/**
+ * Alias → canonical model id map for pricing resolution.
+ * Google publishes floating `-latest` aliases that resolve server-side to a
+ * concrete model; they never appear in MODEL_PRICING directly. Map them to the
+ * canonical id whose rate they currently bill at so estimatedCost can resolve.
+ * Revisit when Google rotates what an alias points to.
+ */
+const MODEL_ALIASES = {
+	'gemini-flash-latest': 'gemini-3.5-flash',
+	'gemini-pro-latest': 'gemini-3.1-pro-preview',
+	'gemini-flash-lite-latest': 'gemini-3.1-flash-lite'
+};
+
+/**
+ * Resolves pricing for a model id, following `-latest` aliases.
+ * @param {string|null|undefined} modelId
+ * @returns {{ input: number, output: number }|null} Pricing, or null if unknown.
+ */
+function resolvePricing(modelId) {
+	if (!modelId) return null;
+	if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
+	const alias = MODEL_ALIASES[modelId];
+	if (alias && MODEL_PRICING[alias]) return MODEL_PRICING[alias];
+	return null;
+}
+
+/**
+ * Computes estimated USD cost from token counts using MODEL_PRICING.
+ * @param {string|null|undefined} modelId
+ * @param {number} promptTokens
+ * @param {number} responseTokens
+ * @returns {number|null} Cost in USD, or null when pricing is unknown.
+ */
+function computeCost(modelId, promptTokens, responseTokens) {
+	const pricing = resolvePricing(modelId);
+	if (!pricing) return null;
+	return (promptTokens / 1_000_000) * pricing.input + (responseTokens / 1_000_000) * pricing.output;
+}
+
+export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, MODEL_ALIASES, DEFAULT_MAX_OUTPUT_TOKENS, resolvePricing, computeCost };
 
 // ── BaseGemini Class ─────────────────────────────────────────────────────────
 
@@ -444,16 +483,51 @@ class BaseGemini {
 		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
 		const useCumulative = cumulative.attempts > 0;
 
+		const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
+		const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
+		const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
+
 		return {
-			promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
-			responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
-			totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
+			promptTokens,
+			responseTokens,
+			totalTokens,
 			attempts: useCumulative ? cumulative.attempts : 1,
 			modelVersion: meta.modelVersion,
 			requestedModel: meta.requestedModel,
 			timestamp: meta.timestamp,
 			groundingMetadata: meta.groundingMetadata || null,
-			modelStatus: meta.modelStatus || null
+			modelStatus: meta.modelStatus || null,
+			estimatedCost: computeCost(meta.modelVersion || meta.requestedModel, promptTokens, responseTokens)
+		};
+	}
+
+	/**
+	 * Builds a usage object directly from a single API response, WITHOUT reading
+	 * mutable instance state (`lastResponseMetadata`/`_cumulativeUsage`). Safe to
+	 * call under concurrent send() calls on a shared instance — unlike
+	 * getLastUsage(), which reflects whichever call most recently mutated the
+	 * instance and can cross-talk between concurrent sends.
+	 * @param {Object} response - A single generateContent() response
+	 * @param {number} [attempts=1] - Attempts this call consumed
+	 * @returns {UsageData}
+	 * @protected
+	 */
+	_usageFromResponse(response, attempts = 1) {
+		const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
+		const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
+		const totalTokens = response?.usageMetadata?.totalTokenCount || 0;
+		const modelVersion = response?.modelVersion || null;
+		return {
+			promptTokens,
+			responseTokens,
+			totalTokens,
+			attempts,
+			modelVersion,
+			requestedModel: this.modelName,
+			timestamp: Date.now(),
+			groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
+			modelStatus: response?.modelStatus || null,
+			estimatedCost: computeCost(modelVersion || this.modelName, promptTokens, responseTokens)
 		};
 	}
 
