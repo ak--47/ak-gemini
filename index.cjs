@@ -441,9 +441,22 @@ var MODEL_ALIASES = {
 };
 function resolvePricing(modelId) {
   if (!modelId) return null;
-  if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
-  const alias = MODEL_ALIASES[modelId];
-  if (alias && MODEL_PRICING[alias]) return MODEL_PRICING[alias];
+  const tryKey = (id) => {
+    if (MODEL_PRICING[id]) return MODEL_PRICING[id];
+    const alias = MODEL_ALIASES[id];
+    if (alias && MODEL_PRICING[alias]) return MODEL_PRICING[alias];
+    return null;
+  };
+  let hit = tryKey(modelId);
+  if (hit) return hit;
+  let stripped = modelId;
+  while (true) {
+    const next = stripped.replace(/-\d{2,}$/, "");
+    if (next === stripped) break;
+    stripped = next;
+    hit = tryKey(stripped);
+    if (hit) return hit;
+  }
   return null;
 }
 function computeCost(modelId, promptTokens, responseTokens) {
@@ -739,7 +752,7 @@ ${contextText}
       timestamp: meta.timestamp,
       groundingMetadata: meta.groundingMetadata || null,
       modelStatus: meta.modelStatus || null,
-      estimatedCost: computeCost(meta.modelVersion || meta.requestedModel, promptTokens, responseTokens)
+      estimatedCost: computeCost(meta.modelVersion, promptTokens, responseTokens) ?? computeCost(meta.requestedModel, promptTokens, responseTokens)
     };
   }
   /**
@@ -768,7 +781,7 @@ ${contextText}
       timestamp: Date.now(),
       groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
       modelStatus: response?.modelStatus || null,
-      estimatedCost: computeCost(modelVersion || this.modelName, promptTokens, responseTokens)
+      estimatedCost: computeCost(modelVersion, promptTokens, responseTokens) ?? computeCost(this.modelName, promptTokens, responseTokens)
     };
   }
   // ── Token Estimation ─────────────────────────────────────────────────────

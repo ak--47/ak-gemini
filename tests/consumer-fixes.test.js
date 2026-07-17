@@ -108,17 +108,37 @@ describe('consumer-fixes (ak-gemini)', () => {
 			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 2.50, 5);
 		});
 
-		it('returns null estimatedCost for an unknown model', async () => {
-			const msg = new Message({ ...KEY });
+		it('returns null estimatedCost when neither modelVersion nor requestedModel is priced', async () => {
+			const msg = new Message({ ...KEY, modelName: 'some-unknown-model' });
 			stubGen(msg, jest.fn(async () => fakeResponse('r', 100, 100, 'some-unknown-model')));
 			const r = await msg.send('hi');
 			expect(r.usage.estimatedCost).toBeNull();
+		});
+
+		it('falls back to requestedModel pricing when modelVersion is unknown', async () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-2.5-flash' });
+			stubGen(msg, jest.fn(async () => fakeResponse('r', 1_000_000, 0, 'some-weird-unpriced-build')));
+			const r = await msg.send('hi');
+			expect(r.usage.estimatedCost).toBeCloseTo(0.30, 5);
 		});
 
 		it('resolves -latest aliases for pricing', () => {
 			expect(resolvePricing('gemini-flash-latest')).toEqual(resolvePricing('gemini-3.5-flash'));
 			expect(resolvePricing('gemini-pro-latest')).toEqual(resolvePricing('gemini-3.1-pro-preview'));
 			expect(resolvePricing('totally-made-up')).toBeNull();
+		});
+
+		it('resolves version-suffixed builds the API echoes in modelVersion', () => {
+			// API returns a pinned build (e.g. -001) even when you request the bare id
+			expect(resolvePricing('gemini-2.5-flash-001')).toEqual(resolvePricing('gemini-2.5-flash'));
+			expect(resolvePricing('gemini-3-flash-preview-09-2025')).toEqual(resolvePricing('gemini-3-flash-preview'));
+		});
+
+		it('estimatedCost is non-null when modelVersion carries a build suffix', async () => {
+			const msg = new Message({ ...KEY });
+			stubGen(msg, jest.fn(async () => fakeResponse('r', 1_000_000, 0, 'gemini-2.5-flash-001')));
+			const r = await msg.send('hi');
+			expect(r.usage.estimatedCost).toBeCloseTo(0.30, 5);
 		});
 
 		it('computeCost returns null for unknown model', () => {
