@@ -263,12 +263,15 @@ function findCompleteJSONStructures(text) {
 function validateSchema(data, schema, path2 = "$") {
   const errors = [];
   if (!schema || typeof schema !== "object") return errors;
+  if (data === null && schema.nullable === true) return errors;
   if (Array.isArray(schema.enum)) {
-    const ok = schema.enum.some((v) => v === data);
+    const target = JSON.stringify(data);
+    const ok = schema.enum.some((v) => v === data || JSON.stringify(v) === target);
     if (!ok) errors.push(`${path2}: value ${JSON.stringify(data)} is not one of allowed enum values ${JSON.stringify(schema.enum)}`);
   }
   if (schema.type !== void 0) {
     const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (schema.nullable === true) types.push("null");
     if (!types.some((t) => matchesType(data, t))) {
       errors.push(`${path2}: expected type ${types.join("|")} but got ${describeType(data)}`);
       return errors;
@@ -279,16 +282,16 @@ function validateSchema(data, schema, path2 = "$") {
     const props = schema.properties || {};
     if (Array.isArray(schema.required)) {
       for (const key of schema.required) {
-        if (!(key in data)) errors.push(`${path2}: missing required property "${key}"`);
+        if (!Object.hasOwn(data, key)) errors.push(`${path2}: missing required property "${key}"`);
       }
     }
     if (schema.additionalProperties === false) {
       for (const key of Object.keys(data)) {
-        if (!(key in props)) errors.push(`${path2}: unexpected property "${key}" (additionalProperties is false)`);
+        if (!Object.hasOwn(props, key)) errors.push(`${path2}: unexpected property "${key}" (additionalProperties is false)`);
       }
     }
     for (const [key, subSchema] of Object.entries(props)) {
-      if (key in data) {
+      if (Object.hasOwn(data, key)) {
         errors.push(...validateSchema(
           data[key],
           /** @type {any} */
@@ -459,10 +462,10 @@ function resolvePricing(modelId) {
   }
   return null;
 }
-function computeCost(modelId, promptTokens, responseTokens) {
+function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0) {
   const pricing = resolvePricing(modelId);
   if (!pricing) return null;
-  return promptTokens / 1e6 * pricing.input + responseTokens / 1e6 * pricing.output;
+  return promptTokens / 1e6 * pricing.input + (responseTokens + thoughtsTokens) / 1e6 * pricing.output;
 }
 var BaseGemini = class {
   /**
@@ -558,15 +561,24 @@ var BaseGemini = class {
     logger_default.debug(`Initializing ${this.constructor.name} chat session with model: ${this.modelName}...`);
     const chatOptions = this._getChatCreateOptions();
     this.chatSession = this.genAIClient.chats.create(chatOptions);
-    if (this.healthCheck) {
-      try {
-        await this._withRetry(() => this.genAIClient.models.list());
-        logger_default.debug(`${this.constructor.name}: API connection successful.`);
-      } catch (e) {
-        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-      }
-    }
+    await this._healthCheckPing();
     logger_default.debug(`${this.constructor.name}: Chat session initialized.`);
+  }
+  /**
+   * Opt-in connectivity check via `models.list()` — runs only when
+   * `healthCheck: true`. Fails fast (no exponential backoff): a readiness probe
+   * should surface a bad config immediately, not after ~30s of 429 retries.
+   * @returns {Promise<void>}
+   * @protected
+   */
+  async _healthCheckPing() {
+    if (!this.healthCheck) return;
+    try {
+      await this.genAIClient.models.list();
+      logger_default.debug(`${this.constructor.name}: API connection successful.`);
+    } catch (e) {
+      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    }
   }
   /**
    * Builds the options object for `genAIClient.chats.create()`.
@@ -714,12 +726,17 @@ ${contextText}
    */
   _captureMetadata(response) {
     const modelStatus = response?.modelStatus || null;
+    const promptTokens = response.usageMetadata?.promptTokenCount || 0;
+    const responseTokens = response.usageMetadata?.candidatesTokenCount || 0;
+    const thoughtsTokens = response.usageMetadata?.thoughtsTokenCount || 0;
     this.lastResponseMetadata = {
       modelVersion: response.modelVersion || null,
       requestedModel: this.modelName,
-      promptTokens: response.usageMetadata?.promptTokenCount || 0,
-      responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
-      totalTokens: response.usageMetadata?.totalTokenCount || 0,
+      promptTokens,
+      responseTokens,
+      thoughtsTokens,
+      // totalTokenCount includes thoughts; fall back to summing the parts.
+      totalTokens: response.usageMetadata?.totalTokenCount || promptTokens + responseTokens + thoughtsTokens,
       timestamp: Date.now(),
       groundingMetadata: response.candidates?.[0]?.groundingMetadata || null,
       modelStatus
@@ -737,14 +754,16 @@ ${contextText}
   getLastUsage() {
     if (!this.lastResponseMetadata) return null;
     const meta = this.lastResponseMetadata;
-    const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
+    const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, thoughtsTokens: 0, attempts: 1 };
     const useCumulative = cumulative.attempts > 0;
     const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
     const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
+    const thoughtsTokens = useCumulative ? cumulative.thoughtsTokens || 0 : meta.thoughtsTokens || 0;
     const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
     return {
       promptTokens,
       responseTokens,
+      thoughtsTokens,
       totalTokens,
       attempts: useCumulative ? cumulative.attempts : 1,
       modelVersion: meta.modelVersion,
@@ -752,8 +771,21 @@ ${contextText}
       timestamp: meta.timestamp,
       groundingMetadata: meta.groundingMetadata || null,
       modelStatus: meta.modelStatus || null,
-      estimatedCost: computeCost(meta.modelVersion, promptTokens, responseTokens) ?? computeCost(meta.requestedModel, promptTokens, responseTokens)
+      estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens)
     };
+  }
+  /**
+   * Estimated USD cost, preferring the model id the API echoed (`modelVersion`)
+   * and falling back to the requested model when that build isn't priced.
+   * @param {string|null|undefined} modelVersion
+   * @param {number} promptTokens
+   * @param {number} responseTokens
+   * @param {number} [thoughtsTokens=0]
+   * @returns {number|null}
+   * @protected
+   */
+  _estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0) {
+    return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens) ?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens);
   }
   /**
    * Builds a usage object directly from a single API response, WITHOUT reading
@@ -769,11 +801,13 @@ ${contextText}
   _usageFromResponse(response, attempts = 1) {
     const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
     const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
-    const totalTokens = response?.usageMetadata?.totalTokenCount || 0;
+    const thoughtsTokens = response?.usageMetadata?.thoughtsTokenCount || 0;
+    const totalTokens = response?.usageMetadata?.totalTokenCount || promptTokens + responseTokens + thoughtsTokens;
     const modelVersion = response?.modelVersion || null;
     return {
       promptTokens,
       responseTokens,
+      thoughtsTokens,
       totalTokens,
       attempts,
       modelVersion,
@@ -781,7 +815,7 @@ ${contextText}
       timestamp: Date.now(),
       groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
       modelStatus: response?.modelStatus || null,
-      estimatedCost: computeCost(modelVersion, promptTokens, responseTokens) ?? computeCost(this.modelName, promptTokens, responseTokens)
+      estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens)
     };
   }
   // ── Token Estimation ─────────────────────────────────────────────────────
@@ -817,13 +851,13 @@ ${contextText}
    */
   async estimateCost(nextPayload) {
     const tokenInfo = await this.estimate(nextPayload);
-    const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+    const pricing = resolvePricing(this.modelName);
     return {
       inputTokens: tokenInfo.inputTokens,
       model: this.modelName,
       pricing,
-      estimatedInputCost: tokenInfo.inputTokens / 1e6 * pricing.input,
-      note: "Cost is for input tokens only; output cost depends on response length"
+      estimatedInputCost: pricing ? tokenInfo.inputTokens / 1e6 * pricing.input : null,
+      note: pricing ? "Cost is for input tokens only; output cost depends on response length" : `No pricing known for model "${this.modelName}"; estimatedInputCost is null`
     };
   }
   // ── Context Caching ─────────────────────────────────────────────────────
@@ -1464,14 +1498,7 @@ var Message = class extends base_default {
   async init(force = false) {
     if (this._initialized && !force) return;
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    if (this.healthCheck) {
-      try {
-        await this._withRetry(() => this.genAIClient.models.list());
-        logger_default.debug(`${this.constructor.name}: API connection successful.`);
-      } catch (e) {
-        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-      }
-    }
+    await this._healthCheckPing();
     this._initialized = true;
     logger_default.debug(`${this.constructor.name}: Initialized (stateless mode).`);
   }
@@ -1502,6 +1529,7 @@ var Message = class extends base_default {
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -3125,14 +3153,7 @@ var Embedding = class extends base_default {
   async init(force = false) {
     if (this._initialized && !force) return;
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    if (this.healthCheck) {
-      try {
-        await this._withRetry(() => this.genAIClient.models.list());
-        logger_default.debug(`${this.constructor.name}: API connection successful.`);
-      } catch (e) {
-        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-      }
-    }
+    await this._healthCheckPing();
     this._initialized = true;
     logger_default.debug(`${this.constructor.name}: Initialized (stateless mode).`);
   }
@@ -3264,14 +3285,7 @@ var ImageGenerator = class extends base_default {
   async init(force = false) {
     if (this._initialized && !force) return;
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    if (this.healthCheck) {
-      try {
-        await this._withRetry(() => this.genAIClient.models.list());
-        logger_default.debug(`${this.constructor.name}: API connection successful.`);
-      } catch (e) {
-        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-      }
-    }
+    await this._healthCheckPing();
     this._initialized = true;
   }
   /**
@@ -3318,6 +3332,7 @@ var ImageGenerator = class extends base_default {
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };

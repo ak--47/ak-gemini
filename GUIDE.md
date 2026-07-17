@@ -1040,11 +1040,16 @@ const usage = instance.getLastUsage();
 //   modelVersion: 'gemini-2.5-flash-001',  // actual model that responded
 //   requestedModel: 'gemini-2.5-flash',    // model you requested
 //   timestamp: 1710000000000,
+//   thoughtsTokens: 0,       // thinking tokens, billed at output rate (in totalTokens + cost)
 //   estimatedCost: 0.00123   // USD from MODEL_PRICING; null if model unpriced
 // }
 ```
 
-> **Concurrency:** `getLastUsage()` reflects the **instance's last completed call** and mutates on every `send()`. If you share one instance across concurrent `send()` calls, `getLastUsage()` can report another call's tokens. Use the per-call **`result.usage`** returned by `send()`/`generate()` instead — it is computed synchronously from that call's own response and is safe under concurrency. `result.usage` includes `estimatedCost` too.
+> **Thinking tokens:** for thinking-enabled models, `thoughtsTokens` are billed at the output rate and are included in both `totalTokens` and `estimatedCost`. `responseTokens` is candidate (visible) output only.
+
+> **Concurrency:** `getLastUsage()` reflects the **instance's last completed call** and mutates on every `send()` — it is **not** safe to read across concurrent sends on a shared instance. The **stateless** classes (`Message`, `ImageGenerator`) return a per-call **`result.usage`** computed synchronously from that call's own response, which *is* concurrency-safe — use it when sharing one instance across concurrent calls. The stateful classes (`Chat`, `Transformer`, `RagAgent`, `ToolAgent`, `CodeAgent`) maintain history/rounds and are not designed to be shared across concurrent calls; their `result.usage` is derived from instance state.
+
+> **`estimatedCost` / `MODEL_ALIASES` caveat:** `estimatedCost` resolves `-latest` aliases and version-suffixed builds via `MODEL_PRICING`/`MODEL_ALIASES`. Alias→price mappings are pinned as of 2026-07 (e.g. `gemini-flash-latest` → `gemini-3.5-flash`); when Google rotates what a `-latest` alias points to, `estimatedCost` for that alias may be wrong until the table is updated. Pin explicit model ids for billing-grade accuracy.
 
 ### Cost Estimation
 

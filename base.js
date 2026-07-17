@@ -115,15 +115,18 @@ function resolvePricing(modelId) {
 
 /**
  * Computes estimated USD cost from token counts using MODEL_PRICING.
+ * Thinking ("thoughts") tokens are billed at the output rate.
  * @param {string|null|undefined} modelId
  * @param {number} promptTokens
  * @param {number} responseTokens
+ * @param {number} [thoughtsTokens=0] - Thinking tokens (billed at output rate)
  * @returns {number|null} Cost in USD, or null when pricing is unknown.
  */
-function computeCost(modelId, promptTokens, responseTokens) {
+function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0) {
 	const pricing = resolvePricing(modelId);
 	if (!pricing) return null;
-	return (promptTokens / 1_000_000) * pricing.input + (responseTokens / 1_000_000) * pricing.output;
+	return (promptTokens / 1_000_000) * pricing.input
+		+ ((responseTokens + thoughtsTokens) / 1_000_000) * pricing.output;
 }
 
 export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, MODEL_ALIASES, DEFAULT_MAX_OUTPUT_TOKENS, resolvePricing, computeCost };
@@ -292,16 +295,26 @@ class BaseGemini {
 		const chatOptions = this._getChatCreateOptions();
 		this.chatSession = this.genAIClient.chats.create(chatOptions);
 
-		if (this.healthCheck) {
-			try {
-				await this._withRetry(() => this.genAIClient.models.list());
-				log.debug(`${this.constructor.name}: API connection successful.`);
-			} catch (e) {
-				throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-			}
-		}
+		await this._healthCheckPing();
 
 		log.debug(`${this.constructor.name}: Chat session initialized.`);
+	}
+
+	/**
+	 * Opt-in connectivity check via `models.list()` — runs only when
+	 * `healthCheck: true`. Fails fast (no exponential backoff): a readiness probe
+	 * should surface a bad config immediately, not after ~30s of 429 retries.
+	 * @returns {Promise<void>}
+	 * @protected
+	 */
+	async _healthCheckPing() {
+		if (!this.healthCheck) return;
+		try {
+			await this.genAIClient.models.list();
+			log.debug(`${this.constructor.name}: API connection successful.`);
+		} catch (e) {
+			throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+		}
 	}
 
 	/**
@@ -471,12 +484,17 @@ class BaseGemini {
 	 */
 	_captureMetadata(response) {
 		const modelStatus = response?.modelStatus || null;
+		const promptTokens = response.usageMetadata?.promptTokenCount || 0;
+		const responseTokens = response.usageMetadata?.candidatesTokenCount || 0;
+		const thoughtsTokens = response.usageMetadata?.thoughtsTokenCount || 0;
 		this.lastResponseMetadata = {
 			modelVersion: response.modelVersion || null,
 			requestedModel: this.modelName,
-			promptTokens: response.usageMetadata?.promptTokenCount || 0,
-			responseTokens: response.usageMetadata?.candidatesTokenCount || 0,
-			totalTokens: response.usageMetadata?.totalTokenCount || 0,
+			promptTokens,
+			responseTokens,
+			thoughtsTokens,
+			// totalTokenCount includes thoughts; fall back to summing the parts.
+			totalTokens: response.usageMetadata?.totalTokenCount || (promptTokens + responseTokens + thoughtsTokens),
 			timestamp: Date.now(),
 			groundingMetadata: response.candidates?.[0]?.groundingMetadata || null,
 			modelStatus
@@ -496,16 +514,18 @@ class BaseGemini {
 		if (!this.lastResponseMetadata) return null;
 
 		const meta = this.lastResponseMetadata;
-		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
+		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, thoughtsTokens: 0, attempts: 1 };
 		const useCumulative = cumulative.attempts > 0;
 
 		const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
 		const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
+		const thoughtsTokens = useCumulative ? (cumulative.thoughtsTokens || 0) : (meta.thoughtsTokens || 0);
 		const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
 
 		return {
 			promptTokens,
 			responseTokens,
+			thoughtsTokens,
 			totalTokens,
 			attempts: useCumulative ? cumulative.attempts : 1,
 			modelVersion: meta.modelVersion,
@@ -513,9 +533,23 @@ class BaseGemini {
 			timestamp: meta.timestamp,
 			groundingMetadata: meta.groundingMetadata || null,
 			modelStatus: meta.modelStatus || null,
-			estimatedCost: computeCost(meta.modelVersion, promptTokens, responseTokens)
-				?? computeCost(meta.requestedModel, promptTokens, responseTokens)
+			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens)
 		};
+	}
+
+	/**
+	 * Estimated USD cost, preferring the model id the API echoed (`modelVersion`)
+	 * and falling back to the requested model when that build isn't priced.
+	 * @param {string|null|undefined} modelVersion
+	 * @param {number} promptTokens
+	 * @param {number} responseTokens
+	 * @param {number} [thoughtsTokens=0]
+	 * @returns {number|null}
+	 * @protected
+	 */
+	_estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0) {
+		return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens)
+			?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens);
 	}
 
 	/**
@@ -532,11 +566,13 @@ class BaseGemini {
 	_usageFromResponse(response, attempts = 1) {
 		const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
 		const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
-		const totalTokens = response?.usageMetadata?.totalTokenCount || 0;
+		const thoughtsTokens = response?.usageMetadata?.thoughtsTokenCount || 0;
+		const totalTokens = response?.usageMetadata?.totalTokenCount || (promptTokens + responseTokens + thoughtsTokens);
 		const modelVersion = response?.modelVersion || null;
 		return {
 			promptTokens,
 			responseTokens,
+			thoughtsTokens,
 			totalTokens,
 			attempts,
 			modelVersion,
@@ -544,8 +580,7 @@ class BaseGemini {
 			timestamp: Date.now(),
 			groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
 			modelStatus: response?.modelStatus || null,
-			estimatedCost: computeCost(modelVersion, promptTokens, responseTokens)
-				?? computeCost(this.modelName, promptTokens, responseTokens)
+			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens)
 		};
 	}
 
@@ -592,14 +627,16 @@ class BaseGemini {
 	 */
 	async estimateCost(nextPayload) {
 		const tokenInfo = await this.estimate(nextPayload);
-		const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+		const pricing = resolvePricing(this.modelName);
 
 		return {
 			inputTokens: tokenInfo.inputTokens,
 			model: this.modelName,
 			pricing: pricing,
-			estimatedInputCost: (tokenInfo.inputTokens / 1_000_000) * pricing.input,
-			note: 'Cost is for input tokens only; output cost depends on response length'
+			estimatedInputCost: pricing ? (tokenInfo.inputTokens / 1_000_000) * pricing.input : null,
+			note: pricing
+				? 'Cost is for input tokens only; output cost depends on response length'
+				: `No pricing known for model "${this.modelName}"; estimatedInputCost is null`
 		};
 	}
 

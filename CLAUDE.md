@@ -204,7 +204,8 @@ new Transformer({ vertexai: true, project: 'my-gcp-project' });
 ```javascript
 // Named exports
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, BaseGemini, log } from 'ak-gemini';
-import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
+import { extractJSON, attemptJSONRecovery, validateSchema } from 'ak-gemini';
+import { MODEL_PRICING, MODEL_ALIASES, resolvePricing, computeCost } from 'ak-gemini';
 
 // Default export (namespace object)
 import AI from 'ak-gemini';
@@ -216,11 +217,11 @@ const { Transformer, Chat } = require('ak-gemini');
 
 ## Testing Strategy
 
-- "No mocks" approach — all tests use real Gemini API calls
+- **Two test tiers:** (1) live-API suites (`*.test.js`) use real Gemini API calls — no mocks; (2) `consumer-fixes.test.js` is offline/mocked (stubs the SDK client on the instance) and safe to run anytime for the 2.5.0 fix logic
 - **Do NOT run tests during development** — they are slow (real API calls) and expensive. Use `npm run typecheck` and `npm run build:cjs` to verify changes.
 - Test timeout: 30 seconds (AI calls take 5-15 seconds)
 - Rate limiting (429 errors) can cause flaky failures — retry after waiting
-- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `embedding.test.js`, `json-helpers.test.js`
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `embedding.test.js`, `json-helpers.test.js`, `consumer-fixes.test.js` (offline/mocked)
 
 ## Key Design Patterns
 

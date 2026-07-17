@@ -6,7 +6,7 @@
  */
 
 import { jest } from '@jest/globals';
-import { Message } from '../index.js';
+import { Message, Chat } from '../index.js';
 import { validateSchema, resolvePricing, computeCost } from '../index.js';
 
 const KEY = { apiKey: 'test-key', logLevel: 'silent' };
@@ -187,6 +187,72 @@ describe('consumer-fixes (ak-gemini)', () => {
 		it('flags a bad array item type', () => {
 			const errs = validateSchema({ source: 'web', count: 1, tags: ['a', 5] }, schema);
 			expect(errs.some(e => e.includes('tags[1]'))).toBe(true);
+		});
+
+		// S1: nullable, deep-equal enum, prototype-chain keys
+		it('allows null on a nullable field', () => {
+			const s = { type: 'object', properties: { note: { type: 'string', nullable: true } } };
+			expect(validateSchema({ note: null }, s)).toEqual([]);
+			expect(validateSchema({ note: 'hi' }, s)).toEqual([]);
+		});
+
+		it('deep-equals object/array enum members', () => {
+			const s = { enum: [{ a: 1 }, [1, 2]] };
+			expect(validateSchema({ a: 1 }, s)).toEqual([]);
+			expect(validateSchema([1, 2], s)).toEqual([]);
+			expect(validateSchema({ a: 2 }, s).length).toBeGreaterThan(0);
+		});
+
+		it('does not treat prototype keys as present (Object.hasOwn)', () => {
+			const s = { type: 'object', additionalProperties: false, properties: { x: { type: 'number' } } };
+			// 'toString' is on the prototype but NOT an own key — must be allowed absent
+			expect(validateSchema({ x: 1 }, s)).toEqual([]);
+			// required 'toString' must report missing even though 'toString' in {} is true
+			const s2 = { type: 'object', required: ['toString'] };
+			expect(validateSchema({}, s2).some(e => e.includes('toString'))).toBe(true);
+		});
+	});
+
+	// ── #3 thinking tokens in usage + cost ──
+	describe('#3 thoughtsTokens billed at output rate', () => {
+		it('includes thoughts in totalTokens and estimatedCost', async () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-2.5-flash' });
+			msg.genAIClient = {
+				models: {
+					generateContent: jest.fn(async () => ({
+						text: 'r',
+						modelVersion: 'gemini-2.5-flash',
+						usageMetadata: { promptTokenCount: 1_000_000, candidatesTokenCount: 1_000_000, thoughtsTokenCount: 1_000_000, totalTokenCount: 3_000_000 }
+					})),
+					list: jest.fn()
+				}
+			};
+			const r = await msg.send('hi');
+			expect(r.usage.thoughtsTokens).toBe(1_000_000);
+			expect(r.usage.totalTokens).toBe(3_000_000);
+			// input 0.30 + (candidates 1M + thoughts 1M) * output 2.50 = 0.30 + 5.00
+			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 5.00, 5);
+		});
+	});
+
+	// ── #1 estimateCost() uses resolvePricing (via Chat — Message.estimate is a no-op) ──
+	describe('#1 estimateCost resolves aliases and nulls unknown', () => {
+		function stubCount(inst, tokens) {
+			inst.genAIClient = { models: { countTokens: jest.fn(async () => ({ totalTokens: tokens })), list: jest.fn() } };
+		}
+		it('resolves a -latest alias (non-null cost)', async () => {
+			const chat = new Chat({ ...KEY, modelName: 'gemini-flash-latest' });
+			stubCount(chat, 1_000_000);
+			const c = await chat.estimateCost('hi');
+			expect(c.estimatedInputCost).not.toBeNull();
+			expect(c.pricing).not.toBeNull();
+		});
+		it('returns null for an unknown model', async () => {
+			const chat = new Chat({ ...KEY, modelName: 'totally-made-up' });
+			stubCount(chat, 1000);
+			const c = await chat.estimateCost('hi');
+			expect(c.estimatedInputCost).toBeNull();
+			expect(c.pricing).toBeNull();
 		});
 	});
 });

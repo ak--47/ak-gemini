@@ -82,14 +82,7 @@ class Message extends BaseGemini {
 		// different IAM surface than generateContent — a service account allowed to
 		// generate but not list publisher models would fail here misleadingly — and
 		// it adds a round-trip per instance. The first send() is a fine error signal.
-		if (this.healthCheck) {
-			try {
-				await this._withRetry(() => this.genAIClient.models.list());
-				log.debug(`${this.constructor.name}: API connection successful.`);
-			} catch (e) {
-				throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-			}
-		}
+		await this._healthCheckPing();
 
 		this._initialized = true;
 		log.debug(`${this.constructor.name}: Initialized (stateless mode).`);
@@ -134,6 +127,7 @@ class Message extends BaseGemini {
 		this._cumulativeUsage = {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
+			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};

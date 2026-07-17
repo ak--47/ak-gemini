@@ -64,7 +64,9 @@ export interface UsageData {
   promptTokens: number;
   /** CUMULATIVE output tokens across all retry attempts */
   responseTokens: number;
-  /** CUMULATIVE total tokens across all retry attempts */
+  /** CUMULATIVE thinking ("thoughts") tokens; billed at the output rate. Included in totalTokens and estimatedCost. */
+  thoughtsTokens?: number;
+  /** CUMULATIVE total tokens across all retry attempts (includes thoughtsTokens) */
   totalTokens: number;
   /** Number of attempts (1 = first try success, 2+ = retries needed) */
   attempts: number;
@@ -604,8 +606,8 @@ export declare class BaseGemini {
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
     inputTokens: number;
     model: string;
-    pricing: { input: number; output: number };
-    estimatedInputCost: number;
+    pricing: { input: number; output: number } | null;
+    estimatedInputCost: number | null;
     note: string;
   }>;
 
