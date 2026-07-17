@@ -29,9 +29,10 @@ export { default as RagAgent } from './rag-agent.js';
 export { default as Embedding } from './embedding.js';
 export { default as ImageGenerator } from './image-generator.js';
 export { default as BaseGemini } from './base.js';
+export { MODEL_PRICING, MODEL_ALIASES, resolvePricing, computeCost } from './base.js';
 export { default as log } from './logger.js';
 export { ThinkingLevel, HarmCategory, HarmBlockThreshold } from '@google/genai';
-export { extractJSON, attemptJSONRecovery } from './json-helpers.js';
+export { extractJSON, attemptJSONRecovery, validateSchema } from './json-helpers.js';
 
 // ── Default Export (namespace object) ──
 

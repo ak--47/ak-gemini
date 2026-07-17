@@ -52,12 +52,10 @@ export default class ImageGenerator extends BaseGemini {
 
 		log.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
 
-		try {
-			await this.genAIClient.models.list();
-			log.debug(`${this.constructor.name}: API connection successful.`);
-		} catch (e) {
-			throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-		}
+		// Connectivity check is opt-in (healthCheck: true) — avoids an extra
+		// round-trip and the models.list() IAM surface. First generate() is a fine
+		// error signal on its own.
+		await this._healthCheckPing();
 
 		this._initialized = true;
 	}
@@ -108,10 +106,14 @@ export default class ImageGenerator extends BaseGemini {
 			config: this._buildConfig(opts)
 		}));
 
+		// Per-call usage computed synchronously from THIS response (concurrency-safe).
+		const usage = this._usageFromResponse(result);
+
 		this._captureMetadata(result);
 		this._cumulativeUsage = {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
+			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};
@@ -134,7 +136,7 @@ export default class ImageGenerator extends BaseGemini {
 			log.warn('ImageGenerator: no images returned. Check prompt or safety filters.');
 		}
 
-		return { images, text: text || null, usage: this.getLastUsage() };
+		return { images, text: text || null, usage };
 	}
 
 	/**

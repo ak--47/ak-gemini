@@ -86,7 +86,14 @@ const msg = new Message({
 
 const result = await msg.send('Alice works at Acme in New York.');
 // result.data → { entities: ['Alice', 'Acme', 'New York'] }
+// result.usage → { promptTokens, responseTokens, thoughtsTokens, totalTokens, estimatedCost, ... }
 ```
+
+> **`responseSchema` requires `responseMimeType: 'application/json'`.** As of 2.5.0, passing `responseSchema` without a `responseMimeType` auto-defaults it to `'application/json'` — you can omit the line above. An explicit `responseMimeType` is still honored.
+
+> **Connectivity check is opt-in.** `Message`, `Embedding`, and `ImageGenerator` do **not** ping the API during `init()` unless you pass `healthCheck: true` (default `false`, as of 2.5.0). The first `send()`/`embed()`/`generate()` surfaces auth/connectivity errors on its own.
+
+> **Per-call usage under concurrency.** Read `result.usage` (computed from that call's own response) rather than `getLastUsage()` when sharing a `Message`/`ImageGenerator` instance across concurrent `send()`s — `getLastUsage()` reflects only the instance's last completed call.
 
 ### ToolAgent — Agent with User-Provided Tools
 

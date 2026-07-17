@@ -81,7 +81,8 @@ Shared foundation. Not typically instantiated directly.
 - `init(force?)` — Creates chat session; runs `models.list()` health check only if `healthCheck: true`
 - `seed(examples, opts?)` — Add example pairs to chat history
 - `getHistory()` / `clearHistory()` — Manage chat history
-- `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled)
+- `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
+- `resolvePricing(modelId)` / `computeCost(modelId, in, out)` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index)
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
 - `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)
 - `resourceExhaustedRetries` / `resourceExhaustedDelay` — 429 rate-limit retry with exponential backoff (default: 5 retries, 1000ms)
@@ -107,7 +108,8 @@ Multi-turn text conversation. Extends BaseGemini.
 ### Message (`message.js`)
 Stateless one-off messages. Uses `generateContent()`. Extends BaseGemini.
 - `send(payload, opts?)` → `{ text, data?, usage }`
-- Supports structured output via `responseSchema` / `responseMimeType`
+- Supports structured output via `responseSchema` / `responseMimeType`. Passing `responseSchema` alone now auto-defaults `responseMimeType: 'application/json'` (the SDK requires it and won't add it)
+- `init()` runs the `models.list()` connectivity check ONLY when `healthCheck: true` (was unconditional); same gating applied to `Embedding` and `ImageGenerator`
 - `getHistory()`, `clearHistory()`, `seed()` are no-ops
 
 ### ToolAgent (`tool-agent.js`)
@@ -202,7 +204,8 @@ new Transformer({ vertexai: true, project: 'my-gcp-project' });
 ```javascript
 // Named exports
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, BaseGemini, log } from 'ak-gemini';
-import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
+import { extractJSON, attemptJSONRecovery, validateSchema } from 'ak-gemini';
+import { MODEL_PRICING, MODEL_ALIASES, resolvePricing, computeCost } from 'ak-gemini';
 
 // Default export (namespace object)
 import AI from 'ak-gemini';
@@ -214,11 +217,11 @@ const { Transformer, Chat } = require('ak-gemini');
 
 ## Testing Strategy
 
-- "No mocks" approach — all tests use real Gemini API calls
+- **Two test tiers:** (1) live-API suites (`*.test.js`) use real Gemini API calls — no mocks; (2) `consumer-fixes.test.js` is offline/mocked (stubs the SDK client on the instance) and safe to run anytime for the 2.5.0 fix logic
 - **Do NOT run tests during development** — they are slow (real API calls) and expensive. Use `npm run typecheck` and `npm run build:cjs` to verify changes.
 - Test timeout: 30 seconds (AI calls take 5-15 seconds)
 - Rate limiting (429 errors) can cause flaky failures — retry after waiting
-- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `embedding.test.js`, `json-helpers.test.js`
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `embedding.test.js`, `json-helpers.test.js`, `consumer-fixes.test.js` (offline/mocked)
 
 ## Key Design Patterns
 

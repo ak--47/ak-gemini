@@ -64,7 +64,9 @@ export interface UsageData {
   promptTokens: number;
   /** CUMULATIVE output tokens across all retry attempts */
   responseTokens: number;
-  /** CUMULATIVE total tokens across all retry attempts */
+  /** CUMULATIVE thinking ("thoughts") tokens; billed at the output rate. Included in totalTokens and estimatedCost. */
+  thoughtsTokens?: number;
+  /** CUMULATIVE total tokens across all retry attempts (includes thoughtsTokens) */
   totalTokens: number;
   /** Number of attempts (1 = first try success, 2+ = retries needed) */
   attempts: number;
@@ -76,6 +78,8 @@ export interface UsageData {
   groundingMetadata?: GroundingMetadata | null;
   /** Model lifecycle status from Google (e.g., 'DEPRECATED'). Surfaced from @google/genai 1.47+. */
   modelStatus?: string | null;
+  /** Estimated USD cost from MODEL_PRICING (input+output). null when the model's pricing is unknown. */
+  estimatedCost?: number | null;
 }
 
 export interface TransformationExample {
@@ -602,8 +606,8 @@ export declare class BaseGemini {
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
     inputTokens: number;
     model: string;
-    pricing: { input: number; output: number };
-    estimatedInputCost: number;
+    pricing: { input: number; output: number } | null;
+    estimatedInputCost: number | null;
     note: string;
   }>;
 
@@ -757,6 +761,17 @@ export declare class ImageGenerator extends BaseGemini {
 
 export declare function extractJSON(text: string): any;
 export declare function attemptJSONRecovery(text: string, maxAttempts?: number): any | null;
+/** Validates a parsed value against a subset of JSON Schema. Returns error strings ([] means valid). */
+export declare function validateSchema(data: any, schema: Record<string, any>, path?: string): string[];
+
+/** Per-million-token pricing keyed by model id. */
+export declare const MODEL_PRICING: Record<string, { input: number; output: number }>;
+/** Floating `-latest` alias → canonical model id, for pricing resolution. */
+export declare const MODEL_ALIASES: Record<string, string>;
+/** Resolves pricing for a model id (follows -latest aliases). null when unknown. */
+export declare function resolvePricing(modelId: string | null | undefined): { input: number; output: number } | null;
+/** Estimated USD cost from token counts. null when the model's pricing is unknown. */
+export declare function computeCost(modelId: string | null | undefined, promptTokens: number, responseTokens: number): number | null;
 
 declare const _default: {
   Transformer: typeof Transformer;
