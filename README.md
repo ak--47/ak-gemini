@@ -285,8 +285,28 @@ const cost = await instance.estimateCost({ some: 'payload' });
 
 ```javascript
 const usage = instance.getLastUsage();
-// { promptTokens, responseTokens, totalTokens, attempts, modelVersion, requestedModel, timestamp }
+// { promptTokens, responseTokens, thoughtsTokens, cachedTokens, totalTokens,
+//   attempts, modelVersion, requestedModel, timestamp, estimatedCost }
 ```
+
+`estimatedCost` is USD from `MODEL_PRICING`. **`null` means the model's pricing is
+unknown — not that the call was free.**
+
+**`cachedTokens` is a subset of `promptTokens`, not an addition.** Gemini includes
+`cachedContentTokenCount` inside `promptTokenCount`, so `computeCost()` subtracts
+them and re-bills at the discounted `cachedInput` rate. (`ak-claude` is the
+opposite — Anthropic excludes cache tokens from `input_tokens` and they are added
+on top.) Models with no published cached rate bill cached tokens at the full input
+rate: an overestimate, never an underestimate.
+
+Two things are deliberately **not** modelled: cache **storage** (time-based,
+$1.00/1M tokens/hour on Flash tiers and $4.50 on Pro) and image-output tokens on
+the Nano Banana models ($60/M or $120/M).
+
+Pro models are tiered — `gemini-2.5-pro` and `gemini-3.1-pro-preview` switch to a
+higher rate above 200,000 prompt tokens. `resolvePricing()` returns `tierThreshold`
+and `asOf` (the date the table was last verified against Google's pricing page,
+also exported as `MODEL_PRICING_AS_OF`).
 
 ### Few-Shot Seeding
 
@@ -298,12 +318,29 @@ await instance.seed([
 
 ### Thinking Configuration
 
+Use `effort` — it is the same option name in `ak-claude`, so one config object
+works against both packages:
+
 ```javascript
 new Chat({
-  modelName: 'gemini-2.5-flash',
-  thinkingConfig: { thinkingBudget: 1024 }
+  modelName: 'gemini-3.5-flash',
+  effort: 'high'          // 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 });
+// wire: thinkingConfig: { thinkingLevel: 'high' }
 ```
+
+`xhigh` and `max` are ak-claude-only levels and clamp to `high` here. An
+unrecognized level throws at construction.
+
+The raw SDK shape still works:
+
+```javascript
+new Chat({ modelName: 'gemini-2.5-flash', thinkingConfig: { thinkingBudget: 1024 } });
+```
+
+`thinkingLevel` and `thinkingBudget` are mutually exclusive on the wire — when
+`effort` is set (or you pass `thinkingLevel` yourself), `thinkingBudget` is
+dropped. `effort` wins over both.
 
 ### Google Search Grounding
 
@@ -390,7 +427,8 @@ All classes accept `BaseGeminiOptions`:
 | `project` | string | env var | GCP project ID |
 | `location` | string | `'global'` | GCP region |
 | `chatConfig` | object | — | Gemini chat config overrides |
-| `thinkingConfig` | object | — | Thinking features config |
+| `thinkingConfig` | object | — | Thinking features config (`thinkingBudget` or `thinkingLevel`) |
+| `effort` | string | — | `'minimal'`\|`'low'`\|`'medium'`\|`'high'`\|`'xhigh'`\|`'max'`. Maps to `thinkingConfig.thinkingLevel`; wins over it |
 | `maxOutputTokens` | number | `50000` | Max tokens in response (`null` removes limit) |
 | `logLevel` | string | based on NODE_ENV | `'trace'`\|`'debug'`\|`'info'`\|`'warn'`\|`'error'`\|`'none'` |
 | `labels` | object | — | Billing labels (Vertex AI) |

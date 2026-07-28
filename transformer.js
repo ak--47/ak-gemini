@@ -201,7 +201,7 @@ class Transformer extends BaseGemini {
 		if (opts.labels) messageOptions.labels = opts.labels;
 
 		// Reset cumulative usage tracking
-		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
 
 		let lastError = null;
 
@@ -215,6 +215,8 @@ class Transformer extends BaseGemini {
 				if (this.lastResponseMetadata) {
 					this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
 					this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
+					this._cumulativeUsage.thoughtsTokens += this.lastResponseMetadata.thoughtsTokens || 0;
+					this._cumulativeUsage.cachedTokens += this.lastResponseMetadata.cachedTokens || 0;
 					this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
 					this._cumulativeUsage.attempts = attempt + 1;
 				}
@@ -389,6 +391,8 @@ Respond with JSON only – no comments or explanations.
 		this._cumulativeUsage = {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
+			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+			cachedTokens: this.lastResponseMetadata.cachedTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};
@@ -422,7 +426,7 @@ Respond with JSON only – no comments or explanations.
 		this.chatSession = this._createChatSession(exampleHistory);
 
 		this.lastResponseMetadata = null;
-		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
 
 		log.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
 	}

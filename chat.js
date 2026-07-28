@@ -87,6 +87,8 @@ class Chat extends BaseGemini {
 		this._cumulativeUsage = {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
+			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+			cachedTokens: this.lastResponseMetadata.cachedTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};

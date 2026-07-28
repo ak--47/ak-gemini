@@ -1,5 +1,67 @@
 # Changelog
 
+## 2.6.0
+
+Feature request from a downstream consumer (`smarterchild/agent`, Vertex AI),
+paired with ak-claude 0.2.0. **Minor** bump — cached-token billing changes
+reported cost (see "Behavior changes" below).
+
+### Behavior changes (read before upgrading)
+- **Cached tokens are now billed at the discounted cached rate.**
+  `usageMetadata.cachedContentTokenCount` is surfaced as `usage.cachedTokens` and
+  factored into `estimatedCost`. **Gemini INCLUDES cached tokens in
+  `promptTokenCount`**, so they are *subtracted* from the prompt count and
+  re-billed at `cachedInput` — they are a subset, not an addition. (ak-claude is
+  the opposite: Anthropic excludes cache tokens from `input_tokens` and they are
+  added on top. The asymmetry is intentional; do not "unify" it.) Reported cost
+  for cache-heavy calls drops by up to ~10×. Models with no published cached rate
+  bill cached tokens at the full input rate — an overestimate, never an
+  underestimate.
+- **Pro models switch to their >200k-context tier above 200,000 prompt tokens.**
+  `gemini-2.5-pro` and `gemini-3.1-pro-preview` previously billed every call at
+  the ≤200k rate. Long-context calls now report roughly 2× the input cost they
+  did before, which is what Google actually charges.
+- **`gemini-2.5-flash` output pricing corrected from $2.50 to $3.00 per M.**
+  Reported cost for that model rises accordingly.
+- **`gemini-flash-latest` now resolves to `gemini-3.6-flash`** (was
+  `gemini-3.5-flash`) and **`gemini-flash-lite-latest` to `gemini-3.5-flash-lite`**
+  for pricing. Alias resolution is logged at debug — prefer the model id the API
+  echoes in `modelVersion`, which `_estimatedCost` already does.
+- **`getLastUsage()` now reports non-zero `thoughtsTokens` on `Chat`,
+  `ToolAgent`, `CodeAgent`, `RagAgent`, and `Transformer`.** These classes seeded
+  `_cumulativeUsage` without the thinking-token count, so `getLastUsage()`
+  reported `0` (and undercounted cost) even when the response carried thoughts.
+  `result.usage` was already correct.
+
+### Added
+- **`effort: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'`** on every
+  class — the cross-package option name (identical to ak-claude). Maps to
+  `thinkingConfig.thinkingLevel` and wins over an explicit `thinkingLevel` /
+  `thinkingBudget` (the two are mutually exclusive on the wire). `xhigh` and
+  `max` are ak-claude-only levels and clamp to `high`. An unrecognized level
+  throws at construction.
+- **`usage.cachedTokens`** on every `send()`/`chat()`/`generate()` result and on
+  `getLastUsage()`.
+- **Pricing for new models:** `gemini-3.6-flash` ($1.50/$7.50, cached $0.15) and
+  `gemini-3.5-flash-lite` ($0.30/$2.50, cached $0.03).
+- **`cachedInput` rates** on every model where Google publishes one, plus
+  `inputAbove200k` / `outputAbove200k` / `cachedInputAbove200k` on the tiered Pro
+  models.
+- **New exports:** `MODEL_PRICING_AS_OF` (the date the table was last verified
+  against Google's pricing page) and `EFFORT_LEVELS`. `resolvePricing()` now
+  returns `asOf` and `tierThreshold`.
+- `computeCost()` takes two new optional trailing args:
+  `computeCost(modelId, prompt, response, thoughtsTokens?, cachedTokens?)`.
+
+### Notes
+- `null` from `resolvePricing()` / `usage.estimatedCost` means the model's
+  pricing is **unknown** — it does not mean the call was free.
+- Cache **storage** ($1.00/1M tokens/hour on Flash tiers, $4.50 on Pro) is
+  time-based and is **not** modelled by `estimatedCost` — only per-token charges
+  are.
+- Image-output tokens on Nano Banana models ($60/M or $120/M) are still not
+  modelled.
+
 ## 2.5.0
 
 Fixes from a downstream consumer's adversarial review. This is a **minor** bump —

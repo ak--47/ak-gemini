@@ -6,9 +6,36 @@ export { ThinkingLevel, HarmCategory, HarmBlockThreshold };
 
 export interface ThinkingConfig {
   includeThoughts?: boolean;
-  /** Token budget for thinking. 0 = disabled, -1 = automatic. */
+  /** Token budget for thinking. 0 = disabled, -1 = automatic. Mutually exclusive with thinkingLevel. */
   thinkingBudget?: number;
   thinkingLevel?: ThinkingLevel;
+}
+
+/**
+ * Cross-package reasoning-effort levels (same option name in ak-claude).
+ * Gemini's wire field is `thinkingConfig.thinkingLevel`; `xhigh` and `max` are
+ * ak-claude-only levels and clamp to `high` here.
+ */
+export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** Per-million-token rates for a single model. */
+export interface ModelPricing {
+  input: number;
+  output: number;
+  /** Rate for tokens served from a context cache. Absent when Google publishes none — cost then falls back to `input` (overestimate). */
+  cachedInput?: number;
+  /** >200k-context tier rates, present only on tiered (Pro) models. */
+  inputAbove200k?: number;
+  outputAbove200k?: number;
+  cachedInputAbove200k?: number;
+}
+
+/** ModelPricing decorated with the tier threshold and the table's verification date. */
+export interface ResolvedPricing extends ModelPricing {
+  /** Prompt-token count above which the *Above200k rates apply. */
+  tierThreshold: number;
+  /** ISO date the pricing table was last verified against Google's pricing page. */
+  asOf: string;
 }
 
 export interface SafetySetting {
@@ -54,6 +81,9 @@ export interface ResponseMetadata {
   requestedModel: string;
   promptTokens: number;
   responseTokens: number;
+  thoughtsTokens?: number;
+  /** Cached-content tokens. A SUBSET of promptTokens, not an addition to it. */
+  cachedTokens?: number;
   totalTokens: number;
   timestamp: number;
   groundingMetadata?: GroundingMetadata | null;
@@ -66,6 +96,14 @@ export interface UsageData {
   responseTokens: number;
   /** CUMULATIVE thinking ("thoughts") tokens; billed at the output rate. Included in totalTokens and estimatedCost. */
   thoughtsTokens?: number;
+  /**
+   * CUMULATIVE cached-content tokens (`usageMetadata.cachedContentTokenCount`).
+   * NOTE: Gemini INCLUDES these in promptTokens — they are a subset, not an
+   * addition. `estimatedCost` subtracts them from promptTokens and re-bills them
+   * at the discounted cached rate. (ak-claude is the opposite: Anthropic's cache
+   * tokens are excluded from input_tokens and added on top.)
+   */
+  cachedTokens?: number;
   /** CUMULATIVE total tokens across all retry attempts (includes thoughtsTokens) */
   totalTokens: number;
   /** Number of attempts (1 = first try success, 2+ = retries needed) */
@@ -78,7 +116,11 @@ export interface UsageData {
   groundingMetadata?: GroundingMetadata | null;
   /** Model lifecycle status from Google (e.g., 'DEPRECATED'). Surfaced from @google/genai 1.47+. */
   modelStatus?: string | null;
-  /** Estimated USD cost from MODEL_PRICING (input+output). null when the model's pricing is unknown. */
+  /**
+   * Estimated USD cost from MODEL_PRICING (input + cached input + output + thoughts).
+   * `null` means the model's pricing is UNKNOWN — it does NOT mean the call was free.
+   * Cache STORAGE (per token-hour) and image-output tokens are not modelled.
+   */
   estimatedCost?: number | null;
 }
 
@@ -149,6 +191,12 @@ export interface BaseGeminiOptions {
   chatConfig?: Partial<ChatConfig>;
   /** Thinking features configuration */
   thinkingConfig?: ThinkingConfig | null;
+  /**
+   * Reasoning effort (cross-package option; same name in ak-claude). Maps to
+   * `thinkingConfig.thinkingLevel` and wins over an explicit thinkingLevel /
+   * thinkingBudget. Throws on an unrecognized level.
+   */
+  effort?: EffortLevel | null;
   /** Maximum output tokens (default: 50000, null removes limit) */
   maxOutputTokens?: number | null;
   /** Sampling temperature (shorthand for chatConfig.temperature; wins over chatConfig) */
@@ -596,6 +644,8 @@ export declare class BaseGemini {
   cachedContent: string | null;
   serviceTier: ServiceTier | null;
   includeServerSideToolInvocations: boolean;
+  /** Normalized `effort` option; null when unset. */
+  effort: EffortLevel | null;
 
   init(force?: boolean): Promise<void>;
   seed(examples?: TransformationExample[], opts?: SeedOptions): Promise<any[]>;
@@ -606,10 +656,13 @@ export declare class BaseGemini {
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
     inputTokens: number;
     model: string;
-    pricing: { input: number; output: number } | null;
+    pricing: ResolvedPricing | null;
     estimatedInputCost: number | null;
     note: string;
   }>;
+
+  /** @internal Validates the `effort` option; throws on an unknown level. */
+  protected _normalizeEffort(effort?: string | null): EffortLevel | null;
 
   // Context Caching
   createCache(config?: CacheConfig): Promise<CachedContentInfo>;
@@ -765,13 +818,28 @@ export declare function attemptJSONRecovery(text: string, maxAttempts?: number):
 export declare function validateSchema(data: any, schema: Record<string, any>, path?: string): string[];
 
 /** Per-million-token pricing keyed by model id. */
-export declare const MODEL_PRICING: Record<string, { input: number; output: number }>;
+export declare const MODEL_PRICING: Record<string, ModelPricing>;
+/** ISO date the pricing table was last verified against Google's published rates. */
+export declare const MODEL_PRICING_AS_OF: string;
 /** Floating `-latest` alias → canonical model id, for pricing resolution. */
 export declare const MODEL_ALIASES: Record<string, string>;
-/** Resolves pricing for a model id (follows -latest aliases). null when unknown. */
-export declare function resolvePricing(modelId: string | null | undefined): { input: number; output: number } | null;
-/** Estimated USD cost from token counts. null when the model's pricing is unknown. */
-export declare function computeCost(modelId: string | null | undefined, promptTokens: number, responseTokens: number): number | null;
+/** Valid values for the `effort` option. */
+export declare const EFFORT_LEVELS: readonly EffortLevel[];
+/** Resolves pricing for a model id (follows -latest aliases). `null` means UNKNOWN, not free. */
+export declare function resolvePricing(modelId: string | null | undefined): ResolvedPricing | null;
+/**
+ * Estimated USD cost from token counts. `null` means UNKNOWN, not free.
+ * `cachedTokens` is a SUBSET of `promptTokens` (Gemini includes them) and is
+ * subtracted before billing at the cached rate. Thinking tokens bill at the
+ * output rate. Tier is selected from `promptTokens` vs 200k.
+ */
+export declare function computeCost(
+  modelId: string | null | undefined,
+  promptTokens: number,
+  responseTokens: number,
+  thoughtsTokens?: number,
+  cachedTokens?: number
+): number | null;
 
 declare const _default: {
   Transformer: typeof Transformer;

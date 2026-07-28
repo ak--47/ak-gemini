@@ -128,6 +128,7 @@ class Message extends BaseGemini {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
 			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+			cachedTokens: this.lastResponseMetadata.cachedTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};
