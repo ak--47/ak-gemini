@@ -7,7 +7,7 @@
 
 import { jest } from '@jest/globals';
 import { Message, Chat } from '../index.js';
-import { validateSchema, resolvePricing, computeCost } from '../index.js';
+import { validateSchema, resolvePricing, computeCost, MODEL_PRICING, MODEL_ALIASES, MODEL_PRICING_AS_OF, EFFORT_LEVELS } from '../index.js';
 
 const KEY = { apiKey: 'test-key', logLevel: 'silent' };
 
@@ -104,8 +104,8 @@ describe('consumer-fixes (ak-gemini)', () => {
 			const msg = new Message({ ...KEY });
 			stubGen(msg, jest.fn(async () => fakeResponse('r', 1_000_000, 1_000_000, 'gemini-2.5-flash')));
 			const r = await msg.send('hi');
-			// gemini-2.5-flash: input 0.30, output 2.50 per M
-			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 2.50, 5);
+			// gemini-2.5-flash: input 0.30, output 3.00 per M
+			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 3.00, 5);
 		});
 
 		it('returns null estimatedCost when neither modelVersion nor requestedModel is priced', async () => {
@@ -123,7 +123,8 @@ describe('consumer-fixes (ak-gemini)', () => {
 		});
 
 		it('resolves -latest aliases for pricing', () => {
-			expect(resolvePricing('gemini-flash-latest')).toEqual(resolvePricing('gemini-3.5-flash'));
+			expect(resolvePricing('gemini-flash-latest')).toEqual(resolvePricing('gemini-3.6-flash'));
+			expect(resolvePricing('gemini-flash-lite-latest')).toEqual(resolvePricing('gemini-3.5-flash-lite'));
 			expect(resolvePricing('gemini-pro-latest')).toEqual(resolvePricing('gemini-3.1-pro-preview'));
 			expect(resolvePricing('totally-made-up')).toBeNull();
 		});
@@ -230,8 +231,8 @@ describe('consumer-fixes (ak-gemini)', () => {
 			const r = await msg.send('hi');
 			expect(r.usage.thoughtsTokens).toBe(1_000_000);
 			expect(r.usage.totalTokens).toBe(3_000_000);
-			// input 0.30 + (candidates 1M + thoughts 1M) * output 2.50 = 0.30 + 5.00
-			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 5.00, 5);
+			// input 0.30 + (candidates 1M + thoughts 1M) * output 3.00 = 0.30 + 6.00
+			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 6.00, 5);
 		});
 	});
 
@@ -253,6 +254,138 @@ describe('consumer-fixes (ak-gemini)', () => {
 			const c = await chat.estimateCost('hi');
 			expect(c.estimatedInputCost).toBeNull();
 			expect(c.pricing).toBeNull();
+		});
+	});
+
+	// ── 2.6.0: cached-token billing (B3) ──
+	describe('B3 cached tokens are a SUBSET of promptTokens', () => {
+		function cachedResponse(prompt, cached, candidates, modelVersion = 'gemini-2.5-flash') {
+			return {
+				text: 'r',
+				modelVersion,
+				usageMetadata: {
+					promptTokenCount: prompt,
+					cachedContentTokenCount: cached,
+					candidatesTokenCount: candidates,
+					totalTokenCount: prompt + candidates
+				}
+			};
+		}
+
+		it('surfaces cachedTokens on the per-call usage', async () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-2.5-flash' });
+			stubGen(msg, jest.fn(async () => cachedResponse(10_000, 8_000, 0)));
+			const r = await msg.send('hi');
+			expect(r.usage.cachedTokens).toBe(8_000);
+			expect(r.usage.promptTokens).toBe(10_000);   // still the full count, cache included
+		});
+
+		it('bills 2000 at the input rate and 8000 at the cached rate', async () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-2.5-flash' });
+			stubGen(msg, jest.fn(async () => cachedResponse(10_000, 8_000, 0)));
+			const r = await msg.send('hi');
+			// gemini-2.5-flash: input 0.30, cachedInput 0.05
+			const expected = (2_000 / 1e6) * 0.30 + (8_000 / 1e6) * 0.05;
+			expect(r.usage.estimatedCost).toBeCloseTo(expected, 10);
+		});
+
+		it('getLastUsage() reports the same cachedTokens as result.usage', async () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-2.5-flash' });
+			stubGen(msg, jest.fn(async () => cachedResponse(10_000, 8_000, 0)));
+			const r = await msg.send('hi');
+			expect(msg.getLastUsage().cachedTokens).toBe(r.usage.cachedTokens);
+			expect(msg.getLastUsage().estimatedCost).toBeCloseTo(r.usage.estimatedCost, 10);
+		});
+
+		it('computeCost never double-charges when cached >= prompt', () => {
+			// Defensive: a malformed response must not produce a negative billable count.
+			expect(computeCost('gemini-2.5-flash', 1_000, 0, 0, 5_000)).toBeCloseTo((1_000 / 1e6) * 0.05, 10);
+		});
+
+		it('falls back to the full input rate when no cachedInput is published', () => {
+			// gemini-2.0-flash has no cachedInput → cached tokens bill at input (overestimate)
+			expect(computeCost('gemini-2.0-flash', 1_000_000, 0, 0, 1_000_000)).toBeCloseTo(0.10, 10);
+		});
+	});
+
+	// ── 2.6.0: tiered pricing (B4) ──
+	describe('B4 >200k context tier', () => {
+		it('uses the base rate at or below 200k and the tier rate above', () => {
+			expect(computeCost('gemini-2.5-pro', 200_000, 0)).toBeCloseTo((200_000 / 1e6) * 1.25, 10);
+			expect(computeCost('gemini-2.5-pro', 200_001, 0)).toBeCloseTo((200_001 / 1e6) * 2.50, 10);
+		});
+
+		it('switches the output and cached rates with the tier', () => {
+			expect(computeCost('gemini-2.5-pro', 300_000, 1_000_000)).toBeCloseTo((300_000 / 1e6) * 2.50 + 15.00, 10);
+			// 300k prompt, 100k of it cached → cachedInputAbove200k 0.25
+			const expected = (200_000 / 1e6) * 2.50 + (100_000 / 1e6) * 0.25;
+			expect(computeCost('gemini-2.5-pro', 300_000, 0, 0, 100_000)).toBeCloseTo(expected, 10);
+		});
+
+		it('leaves untiered models on a single rate', () => {
+			expect(computeCost('gemini-3.6-flash', 1_000_000, 0)).toBeCloseTo(1.50, 10);
+		});
+	});
+
+	// ── 2.6.0: pricing table coverage + freshness (B1/B5) ──
+	describe('B1/B5 pricing table', () => {
+		it('prices every table key and stamps asOf', () => {
+			for (const id of Object.keys(MODEL_PRICING)) {
+				const p = resolvePricing(id);
+				expect(p).not.toBeNull();
+				expect(typeof p.input).toBe('number');
+				expect(typeof p.output).toBe('number');
+				expect(p.asOf).toBe(MODEL_PRICING_AS_OF);
+				expect(p.tierThreshold).toBe(200_000);
+			}
+		});
+
+		it('resolves every alias to a priced model', () => {
+			for (const [alias, canonical] of Object.entries(MODEL_ALIASES)) {
+				expect(MODEL_PRICING[canonical]).toBeDefined();
+				expect(resolvePricing(alias)).toEqual(resolvePricing(canonical));
+			}
+		});
+
+		it('includes the newly added models', () => {
+			expect(resolvePricing('gemini-3.6-flash')).toMatchObject({ input: 1.50, output: 7.50, cachedInput: 0.15 });
+			expect(resolvePricing('gemini-3.5-flash-lite')).toMatchObject({ input: 0.30, output: 2.50, cachedInput: 0.03 });
+		});
+	});
+
+	// ── 2.6.0: effort → thinkingLevel (B6) ──
+	describe('B6 effort maps to thinkingLevel', () => {
+		it('sets thinkingLevel and drops thinkingBudget', () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-3.5-flash', effort: 'low' });
+			expect(msg.chatConfig.thinkingConfig).toEqual({ thinkingLevel: 'low' });
+		});
+
+		it('clamps ak-claude-only levels to high', () => {
+			for (const level of ['xhigh', 'max']) {
+				const msg = new Message({ ...KEY, modelName: 'gemini-3.5-flash', effort: level });
+				expect(msg.chatConfig.thinkingConfig.thinkingLevel).toBe('high');
+			}
+		});
+
+		it('wins over an explicit thinkingBudget', () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-3.5-flash', effort: 'medium', thinkingConfig: { thinkingBudget: 4096 } });
+			expect(msg.chatConfig.thinkingConfig.thinkingLevel).toBe('medium');
+			expect(msg.chatConfig.thinkingConfig.thinkingBudget).toBeUndefined();
+		});
+
+		it('leaves thinkingConfig alone when effort is unset', () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-3.5-flash' });
+			expect(msg.chatConfig.thinkingConfig).toBeUndefined();
+		});
+
+		it('is ignored on a model with no thinking support', () => {
+			const msg = new Message({ ...KEY, modelName: 'gemini-3.1-flash-image-preview', effort: 'high' });
+			expect(msg.chatConfig.thinkingConfig).toBeUndefined();
+		});
+
+		it('rejects an unknown effort level at construction', () => {
+			expect(() => new Message({ ...KEY, effort: 'turbo' })).toThrow(/Invalid effort/);
+			expect(EFFORT_LEVELS).toContain('minimal');
 		});
 	});
 });

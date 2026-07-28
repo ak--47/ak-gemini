@@ -32,12 +32,14 @@ __export(index_exports, {
   BaseGemini: () => base_default,
   Chat: () => chat_default,
   CodeAgent: () => code_agent_default,
+  EFFORT_LEVELS: () => EFFORT_LEVELS,
   Embedding: () => Embedding,
   HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
   HarmCategory: () => import_genai2.HarmCategory,
   ImageGenerator: () => ImageGenerator,
   MODEL_ALIASES: () => MODEL_ALIASES,
   MODEL_PRICING: () => MODEL_PRICING,
+  MODEL_PRICING_AS_OF: () => MODEL_PRICING_AS_OF,
   Message: () => message_default,
   RagAgent: () => rag_agent_default,
   ThinkingLevel: () => import_genai2.ThinkingLevel,
@@ -400,6 +402,15 @@ var DEFAULT_THINKING_CONFIG = {
   thinkingBudget: 0
 };
 var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
+var EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+var EFFORT_TO_THINKING_LEVEL = {
+  minimal: "minimal",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "high",
+  max: "high"
+};
 var THINKING_SUPPORTED_MODELS = [
   /^gemini-3(\.\d+)?-pro(-preview)?$/,
   /^gemini-3(\.\d+)?-flash(-preview)?$/,
@@ -409,26 +420,42 @@ var THINKING_SUPPORTED_MODELS = [
   /^gemini-2\.5-flash-lite(-preview)?$/,
   /^gemini-2\.0-flash$/
 ];
+var MODEL_PRICING_AS_OF = "2026-07-28";
+var TIER_THRESHOLD = 2e5;
 var MODEL_PRICING = {
   // Gemini 3.x stable
-  "gemini-3.5-flash": { input: 1.5, output: 9 },
-  "gemini-3.1-flash-lite": { input: 0.25, output: 1.5 },
+  "gemini-3.6-flash": { input: 1.5, output: 7.5, cachedInput: 0.15 },
+  "gemini-3.5-flash": { input: 1.5, output: 9, cachedInput: 0.15 },
+  "gemini-3.5-flash-lite": { input: 0.3, output: 2.5, cachedInput: 0.03 },
+  "gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cachedInput: 0.025 },
   // Gemini 3.x preview
-  "gemini-3.1-pro-preview": { input: 2, output: 12 },
-  // ≤200k tier
+  "gemini-3.1-pro-preview": {
+    input: 2,
+    output: 12,
+    cachedInput: 0.2,
+    inputAbove200k: 4,
+    outputAbove200k: 18,
+    cachedInputAbove200k: 0.4
+  },
   "gemini-3-pro-preview": { input: 2, output: 12 },
   // ≤200k tier; launch rate (superseded by 3.1, off the pricing page)
   "gemini-3-flash-preview": { input: 0.5, output: 3 },
-  "gemini-3.1-flash-lite-preview": { input: 0.25, output: 1.5 },
+  "gemini-3.1-flash-lite-preview": { input: 0.25, output: 1.5, cachedInput: 0.025 },
   "gemini-3.1-flash-image-preview": { input: 0.5, output: 3 },
   // text-only; image-output is $60/M
   "gemini-3-pro-image-preview": { input: 2, output: 12 },
   // text-only; image-output is $120/M
   // Gemini 2.5 stable
-  "gemini-2.5-flash": { input: 0.3, output: 2.5 },
-  "gemini-2.5-flash-lite": { input: 0.1, output: 0.4 },
-  "gemini-2.5-pro": { input: 1.25, output: 10 },
-  // ≤200k tier
+  "gemini-2.5-flash": { input: 0.3, output: 3, cachedInput: 0.05 },
+  "gemini-2.5-flash-lite": { input: 0.1, output: 0.4, cachedInput: 0.01 },
+  "gemini-2.5-pro": {
+    input: 1.25,
+    output: 10,
+    cachedInput: 0.125,
+    inputAbove200k: 2.5,
+    outputAbove200k: 15,
+    cachedInputAbove200k: 0.25
+  },
   "gemini-2.5-flash-image": { input: 0.3, output: 0 },
   // image-output is ~$0.039/image (1290 tokens)
   // Deprecated but kept for back-compat (shut down June 2026)
@@ -438,16 +465,24 @@ var MODEL_PRICING = {
   "gemini-embedding-001": { input: 0.15, output: 0 }
 };
 var MODEL_ALIASES = {
-  "gemini-flash-latest": "gemini-3.5-flash",
+  "gemini-flash-latest": "gemini-3.6-flash",
   "gemini-pro-latest": "gemini-3.1-pro-preview",
-  "gemini-flash-lite-latest": "gemini-3.1-flash-lite"
+  "gemini-flash-lite-latest": "gemini-3.5-flash-lite"
 };
 function resolvePricing(modelId) {
+  const entry = _lookupPricing(modelId);
+  if (!entry) return null;
+  return { ...entry, tierThreshold: TIER_THRESHOLD, asOf: MODEL_PRICING_AS_OF };
+}
+function _lookupPricing(modelId) {
   if (!modelId) return null;
   const tryKey = (id) => {
     if (MODEL_PRICING[id]) return MODEL_PRICING[id];
     const alias = MODEL_ALIASES[id];
-    if (alias && MODEL_PRICING[alias]) return MODEL_PRICING[alias];
+    if (alias && MODEL_PRICING[alias]) {
+      logger_default.debug(`Pricing: alias "${id}" resolved to "${alias}". If Google has rotated this alias the rate may be wrong \u2014 prefer the echoed modelVersion.`);
+      return MODEL_PRICING[alias];
+    }
     return null;
   };
   let hit = tryKey(modelId);
@@ -462,10 +497,16 @@ function resolvePricing(modelId) {
   }
   return null;
 }
-function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0) {
+function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
   const pricing = resolvePricing(modelId);
   if (!pricing) return null;
-  return promptTokens / 1e6 * pricing.input + (responseTokens + thoughtsTokens) / 1e6 * pricing.output;
+  const above = (promptTokens || 0) > TIER_THRESHOLD;
+  const inputRate = above && pricing.inputAbove200k || pricing.input;
+  const outputRate = above && pricing.outputAbove200k || pricing.output;
+  const cachedRate = above ? pricing.cachedInputAbove200k ?? pricing.cachedInput ?? inputRate : pricing.cachedInput ?? inputRate;
+  const cached = Math.max(0, Math.min(cachedTokens || 0, promptTokens || 0));
+  const billablePrompt = Math.max(0, (promptTokens || 0) - cached);
+  return billablePrompt / 1e6 * inputRate + cached / 1e6 * cachedRate + ((responseTokens || 0) + (thoughtsTokens || 0)) / 1e6 * outputRate;
 }
 var BaseGemini = class {
   /**
@@ -530,6 +571,7 @@ var BaseGemini = class {
     } else {
       this.chatConfig.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
     }
+    this.effort = this._normalizeEffort(options.effort);
     this._configureThinking(options.thinkingConfig);
     const clientOptions = this.vertexai ? {
       vertexai: true,
@@ -544,6 +586,8 @@ var BaseGemini = class {
     this._cumulativeUsage = {
       promptTokens: 0,
       responseTokens: 0,
+      thoughtsTokens: 0,
+      cachedTokens: 0,
       totalTokens: 0,
       attempts: 0
     };
@@ -640,7 +684,7 @@ var BaseGemini = class {
     }
     this.chatSession = this._createChatSession([]);
     this.lastResponseMetadata = null;
-    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
     logger_default.debug(`${this.constructor.name}: Conversation history cleared.`);
   }
   // ── Few-Shot Seeding ─────────────────────────────────────────────────────
@@ -729,12 +773,14 @@ ${contextText}
     const promptTokens = response.usageMetadata?.promptTokenCount || 0;
     const responseTokens = response.usageMetadata?.candidatesTokenCount || 0;
     const thoughtsTokens = response.usageMetadata?.thoughtsTokenCount || 0;
+    const cachedTokens = response.usageMetadata?.cachedContentTokenCount || 0;
     this.lastResponseMetadata = {
       modelVersion: response.modelVersion || null,
       requestedModel: this.modelName,
       promptTokens,
       responseTokens,
       thoughtsTokens,
+      cachedTokens,
       // totalTokenCount includes thoughts; fall back to summing the parts.
       totalTokens: response.usageMetadata?.totalTokenCount || promptTokens + responseTokens + thoughtsTokens,
       timestamp: Date.now(),
@@ -754,16 +800,18 @@ ${contextText}
   getLastUsage() {
     if (!this.lastResponseMetadata) return null;
     const meta = this.lastResponseMetadata;
-    const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, thoughtsTokens: 0, attempts: 1 };
+    const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, thoughtsTokens: 0, cachedTokens: 0, attempts: 1 };
     const useCumulative = cumulative.attempts > 0;
     const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
     const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
     const thoughtsTokens = useCumulative ? cumulative.thoughtsTokens || 0 : meta.thoughtsTokens || 0;
     const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
+    const cachedTokens = useCumulative && cumulative.cachedTokens !== void 0 ? cumulative.cachedTokens : meta.cachedTokens || 0;
     return {
       promptTokens,
       responseTokens,
       thoughtsTokens,
+      cachedTokens,
       totalTokens,
       attempts: useCumulative ? cumulative.attempts : 1,
       modelVersion: meta.modelVersion,
@@ -771,7 +819,7 @@ ${contextText}
       timestamp: meta.timestamp,
       groundingMetadata: meta.groundingMetadata || null,
       modelStatus: meta.modelStatus || null,
-      estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens)
+      estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
     };
   }
   /**
@@ -781,11 +829,12 @@ ${contextText}
    * @param {number} promptTokens
    * @param {number} responseTokens
    * @param {number} [thoughtsTokens=0]
+   * @param {number} [cachedTokens=0] - Cached-content tokens (a SUBSET of promptTokens)
    * @returns {number|null}
    * @protected
    */
-  _estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0) {
-    return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens) ?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens);
+  _estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
+    return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens) ?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens, cachedTokens);
   }
   /**
    * Builds a usage object directly from a single API response, WITHOUT reading
@@ -802,12 +851,14 @@ ${contextText}
     const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
     const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
     const thoughtsTokens = response?.usageMetadata?.thoughtsTokenCount || 0;
+    const cachedTokens = response?.usageMetadata?.cachedContentTokenCount || 0;
     const totalTokens = response?.usageMetadata?.totalTokenCount || promptTokens + responseTokens + thoughtsTokens;
     const modelVersion = response?.modelVersion || null;
     return {
       promptTokens,
       responseTokens,
       thoughtsTokens,
+      cachedTokens,
       totalTokens,
       attempts,
       modelVersion,
@@ -815,7 +866,7 @@ ${contextText}
       timestamp: Date.now(),
       groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
       modelStatus: response?.modelStatus || null,
-      estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens)
+      estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
     };
   }
   // ── Token Estimation ─────────────────────────────────────────────────────
@@ -1020,22 +1071,48 @@ ${contextText}
    */
   _configureThinking(thinkingConfig) {
     const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some((p) => p.test(this.modelName));
-    if (thinkingConfig === void 0) return;
+    if (thinkingConfig === void 0 && this.effort === null) return;
     if (thinkingConfig === null) {
       delete this.chatConfig.thinkingConfig;
       logger_default.debug(`thinkingConfig set to null - removed from configuration`);
       return;
     }
     if (!modelSupportsThinking) {
-      logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+      logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig/effort.`);
       return;
     }
-    const config = { ...DEFAULT_THINKING_CONFIG, ...thinkingConfig };
-    if (thinkingConfig.thinkingLevel !== void 0) {
+    const config = { ...DEFAULT_THINKING_CONFIG, ...thinkingConfig || {} };
+    if (this.effort !== null) {
+      const level = EFFORT_TO_THINKING_LEVEL[this.effort];
+      if (level !== this.effort) {
+        logger_default.debug(`Effort '${this.effort}' has no Gemini equivalent; using thinkingLevel '${level}'.`);
+      }
+      config.thinkingLevel = level;
+    }
+    if (config.thinkingLevel !== void 0) {
       delete config.thinkingBudget;
     }
     this.chatConfig.thinkingConfig = config;
     logger_default.debug(`Thinking config applied: ${JSON.stringify(config)}`);
+  }
+  /**
+   * Validates the cross-package `effort` option.
+   * Throws rather than warns: this runs in the constructor before log levels are
+   * finalized, so a warning could be swallowed.
+   * @param {string|null|undefined} effort
+   * @returns {'minimal'|'low'|'medium'|'high'|'xhigh'|'max'|null}
+   * @protected
+   */
+  _normalizeEffort(effort) {
+    if (effort === void 0 || effort === null) return null;
+    const level = String(effort).toLowerCase();
+    if (!EFFORT_LEVELS.includes(level)) {
+      throw new Error(`Invalid effort "${effort}". Expected one of: ${EFFORT_LEVELS.join(", ")}.`);
+    }
+    return (
+      /** @type {any} */
+      level
+    );
   }
 };
 var base_default = BaseGemini;
@@ -1168,7 +1245,7 @@ var Transformer = class extends base_default {
     let lastPayload = this._preparePayload(payload);
     const messageOptions = {};
     if (opts.labels) messageOptions.labels = opts.labels;
-    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
     let lastError = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -1176,6 +1253,8 @@ var Transformer = class extends base_default {
         if (this.lastResponseMetadata) {
           this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
           this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
+          this._cumulativeUsage.thoughtsTokens += this.lastResponseMetadata.thoughtsTokens || 0;
+          this._cumulativeUsage.cachedTokens += this.lastResponseMetadata.cachedTokens || 0;
           this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
           this._cumulativeUsage.attempts = attempt + 1;
         }
@@ -1311,6 +1390,8 @@ Respond with JSON only \u2013 no comments or explanations.
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+      cachedTokens: this.lastResponseMetadata.cachedTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -1336,7 +1417,7 @@ Respond with JSON only \u2013 no comments or explanations.
     const exampleHistory = history.slice(0, this.exampleCount || 0);
     this.chatSession = this._createChatSession(exampleHistory);
     this.lastResponseMetadata = null;
-    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
     logger_default.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
   }
   /**
@@ -1435,6 +1516,8 @@ var Chat = class extends base_default {
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+      cachedTokens: this.lastResponseMetadata.cachedTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -1530,6 +1613,7 @@ var Message = class extends base_default {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
       thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+      cachedTokens: this.lastResponseMetadata.cachedTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -1687,6 +1771,8 @@ var ToolAgent = class extends base_default {
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+      cachedTokens: this.lastResponseMetadata.cachedTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -2698,6 +2784,8 @@ ${this.envOverview}`;
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+      cachedTokens: this.lastResponseMetadata.cachedTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -3016,6 +3104,8 @@ ${serialized}` });
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+      cachedTokens: this.lastResponseMetadata.cachedTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -3333,6 +3423,7 @@ var ImageGenerator = class extends base_default {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
       thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
+      cachedTokens: this.lastResponseMetadata.cachedTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -3408,12 +3499,14 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   BaseGemini,
   Chat,
   CodeAgent,
+  EFFORT_LEVELS,
   Embedding,
   HarmBlockThreshold,
   HarmCategory,
   ImageGenerator,
   MODEL_ALIASES,
   MODEL_PRICING,
+  MODEL_PRICING_AS_OF,
   Message,
   RagAgent,
   ThinkingLevel,

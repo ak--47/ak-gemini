@@ -199,8 +199,37 @@ describe('ImageGenerator', () => {
 		it('should generate at least one image from a text prompt', async () => {
 			// Preview image models only serve generateContent from the `global`
 			// Vertex location — regional endpoints 404.
-			const g = new ImageGenerator({ ...BASE_OPTIONS, location: 'global', aspectRatio: '1:1' });
-			const result = await g.generate('A simple red circle on a white background');
+			//
+			// The 3.x image previews are also access-gated per GCP project: a project
+			// without an entitlement gets a 404 on the publisher model regardless of
+			// location. Fall back to the GA model so this still exercises generate()
+			// end-to-end instead of failing on a billing/entitlement condition.
+			// Override the first choice with GEMINI_IMAGE_TEST_MODEL.
+			const candidates = [
+				process.env.GEMINI_IMAGE_TEST_MODEL,
+				undefined,                 // package default (gemini-3.1-flash-image-preview)
+				'gemini-2.5-flash-image'   // GA fallback
+			].filter((m, i, a) => a.indexOf(m) === i);
+
+			let result, lastError;
+			for (const modelName of candidates) {
+				const g = new ImageGenerator({
+					...BASE_OPTIONS,
+					location: 'global',
+					aspectRatio: '1:1',
+					...(modelName && { modelName })
+				});
+				try {
+					result = await g.generate('A simple red circle on a white background');
+					break;
+				} catch (err) {
+					// Only swallow "model not available to this project" — real failures rethrow.
+					if (!/NOT_FOUND|404/.test(String(err?.message))) throw err;
+					lastError = err;
+					console.warn(`ImageGenerator: ${g.modelName} unavailable on this project, trying next candidate.`);
+				}
+			}
+			if (!result) throw lastError;
 
 			expect(result).toBeDefined();
 			expect(Array.isArray(result.images)).toBe(true);
@@ -214,6 +243,6 @@ describe('ImageGenerator', () => {
 
 			expect(result.usage).toBeDefined();
 			expect(typeof result.usage.totalTokens).toBe('number');
-		}, 60_000);
+		}, 120_000);
 	});
 });

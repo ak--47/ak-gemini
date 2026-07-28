@@ -25,6 +25,22 @@ const DEFAULT_THINKING_CONFIG = {
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 50_000;
 
+/**
+ * Effort levels accepted by the cross-package `effort` option.
+ * Gemini's wire field is `thinkingConfig.thinkingLevel`, which accepts
+ * minimal/low/medium/high. `xhigh` and `max` exist on ak-claude only and are
+ * clamped to `high` so the same config object works against both packages.
+ */
+const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_TO_THINKING_LEVEL = {
+	minimal: 'minimal',
+	low: 'low',
+	medium: 'medium',
+	high: 'high',
+	xhigh: 'high',
+	max: 'high'
+};
+
 /** Models that support thinking features. Image / live / tts variants intentionally excluded. */
 const THINKING_SUPPORTED_MODELS = [
 	/^gemini-3(\.\d+)?-pro(-preview)?$/,
@@ -36,33 +52,56 @@ const THINKING_SUPPORTED_MODELS = [
 	/^gemini-2\.0-flash$/
 ];
 
+/** Date the pricing table below was last verified against Google's pricing page. */
+const MODEL_PRICING_AS_OF = '2026-07-28';
+
+/** Context-window size at which tiered models switch to their higher rate. */
+const TIER_THRESHOLD = 200_000;
+
 /**
- * Model pricing per million tokens (Paid Tier Standard, base rate, as of July 2026).
+ * Model pricing per million tokens (Paid Tier Standard, base rate, as of MODEL_PRICING_AS_OF).
  * Source: https://ai.google.dev/gemini-api/docs/pricing
  *
+ * Fields:
+ * - `input` / `output` — standard per-1M rates (≤200k tier where a model is tiered).
+ * - `cachedInput` — per-1M rate for tokens served from a context cache. Omitted when
+ *   Google does not publish one; computeCost() then falls back to the full `input`
+ *   rate, which OVERSTATES rather than understates cost.
+ * - `inputAbove200k` / `outputAbove200k` / `cachedInputAbove200k` — >200k context tier.
+ *
  * NOTES:
- * - Pro models use tiered pricing (≤200k vs >200k context). Listed rate is ≤200k base tier.
  * - Gemma models (e.g. Gemma 4) are intentionally excluded — they are open models with
  *   no paid per-token tier on the Gemini API (Vertex deployments bill by compute).
  * - Image-output tokens on Nano Banana models bill at $60/M (1.5 Flash Image) or $120/M (3 Pro Image).
  *   Only text-input/text-output rates are modelled here; image-output cost is NOT included in estimateCost().
  * - Audio input is more expensive on most models — listed rate covers text/image/video input.
+ * - Cache STORAGE ($1.00/1M tokens/hour on Flash tiers, $4.50 on Pro) is time-based and
+ *   NOT modelled here — estimatedCost only covers per-token charges.
+ * - A null result from resolvePricing()/computeCost() means UNKNOWN, not free.
  */
 const MODEL_PRICING = {
 	// Gemini 3.x stable
-	'gemini-3.5-flash': { input: 1.50, output: 9.00 },
-	'gemini-3.1-flash-lite': { input: 0.25, output: 1.50 },
+	'gemini-3.6-flash': { input: 1.50, output: 7.50, cachedInput: 0.15 },
+	'gemini-3.5-flash': { input: 1.50, output: 9.00, cachedInput: 0.15 },
+	'gemini-3.5-flash-lite': { input: 0.30, output: 2.50, cachedInput: 0.03 },
+	'gemini-3.1-flash-lite': { input: 0.25, output: 1.50, cachedInput: 0.025 },
 	// Gemini 3.x preview
-	'gemini-3.1-pro-preview': { input: 2.00, output: 12.00 }, // ≤200k tier
+	'gemini-3.1-pro-preview': {
+		input: 2.00, output: 12.00, cachedInput: 0.20,
+		inputAbove200k: 4.00, outputAbove200k: 18.00, cachedInputAbove200k: 0.40
+	},
 	'gemini-3-pro-preview': { input: 2.00, output: 12.00 },   // ≤200k tier; launch rate (superseded by 3.1, off the pricing page)
 	'gemini-3-flash-preview': { input: 0.50, output: 3.00 },
-	'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50 },
+	'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50, cachedInput: 0.025 },
 	'gemini-3.1-flash-image-preview': { input: 0.50, output: 3.00 }, // text-only; image-output is $60/M
 	'gemini-3-pro-image-preview': { input: 2.00, output: 12.00 },   // text-only; image-output is $120/M
 	// Gemini 2.5 stable
-	'gemini-2.5-flash': { input: 0.30, output: 2.50 },
-	'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
-	'gemini-2.5-pro': { input: 1.25, output: 10.00 }, // ≤200k tier
+	'gemini-2.5-flash': { input: 0.30, output: 3.00, cachedInput: 0.05 },
+	'gemini-2.5-flash-lite': { input: 0.10, output: 0.40, cachedInput: 0.01 },
+	'gemini-2.5-pro': {
+		input: 1.25, output: 10.00, cachedInput: 0.125,
+		inputAbove200k: 2.50, outputAbove200k: 15.00, cachedInputAbove200k: 0.25
+	},
 	'gemini-2.5-flash-image': { input: 0.30, output: 0 }, // image-output is ~$0.039/image (1290 tokens)
 	// Deprecated but kept for back-compat (shut down June 2026)
 	'gemini-2.0-flash': { input: 0.10, output: 0.40 },
@@ -76,25 +115,44 @@ const MODEL_PRICING = {
  * Google publishes floating `-latest` aliases that resolve server-side to a
  * concrete model; they never appear in MODEL_PRICING directly. Map them to the
  * canonical id whose rate they currently bill at so estimatedCost can resolve.
- * Revisit when Google rotates what an alias points to.
+ *
+ * These go stale whenever Google rotates an alias. Prefer the model id the API
+ * ECHOES (`response.modelVersion`) over the alias you requested — `_estimatedCost`
+ * already does this, and alias resolution is logged at debug level.
  */
 const MODEL_ALIASES = {
-	'gemini-flash-latest': 'gemini-3.5-flash',
+	'gemini-flash-latest': 'gemini-3.6-flash',
 	'gemini-pro-latest': 'gemini-3.1-pro-preview',
-	'gemini-flash-lite-latest': 'gemini-3.1-flash-lite'
+	'gemini-flash-lite-latest': 'gemini-3.5-flash-lite'
 };
 
 /**
  * Resolves pricing for a model id, following `-latest` aliases.
+ * A null result means pricing is UNKNOWN, not free.
  * @param {string|null|undefined} modelId
- * @returns {{ input: number, output: number }|null} Pricing, or null if unknown.
+ * @returns {{ input: number, output: number, cachedInput?: number, inputAbove200k?: number, outputAbove200k?: number, cachedInputAbove200k?: number, tierThreshold: number, asOf: string }|null}
  */
 function resolvePricing(modelId) {
+	const entry = _lookupPricing(modelId);
+	if (!entry) return null;
+	return { ...entry, tierThreshold: TIER_THRESHOLD, asOf: MODEL_PRICING_AS_OF };
+}
+
+/**
+ * Raw table lookup with alias + pinned-build fallback. No asOf/tier decoration.
+ * @param {string|null|undefined} modelId
+ * @returns {any|null}
+ * @private
+ */
+function _lookupPricing(modelId) {
 	if (!modelId) return null;
 	const tryKey = (id) => {
 		if (MODEL_PRICING[id]) return MODEL_PRICING[id];
 		const alias = MODEL_ALIASES[id];
-		if (alias && MODEL_PRICING[alias]) return MODEL_PRICING[alias];
+		if (alias && MODEL_PRICING[alias]) {
+			log.debug(`Pricing: alias "${id}" resolved to "${alias}". If Google has rotated this alias the rate may be wrong — prefer the echoed modelVersion.`);
+			return MODEL_PRICING[alias];
+		}
 		return null;
 	};
 	let hit = tryKey(modelId);
@@ -116,20 +174,44 @@ function resolvePricing(modelId) {
 /**
  * Computes estimated USD cost from token counts using MODEL_PRICING.
  * Thinking ("thoughts") tokens are billed at the output rate.
+ *
+ * IMPORTANT: Gemini's `promptTokenCount` INCLUDES `cachedContentTokenCount`, so
+ * cached tokens are SUBTRACTED from promptTokens and re-billed at the discounted
+ * cached rate. (ak-claude is the opposite — Anthropic's `input_tokens` excludes
+ * cache tokens and they are added on top. Do not "unify" these.)
+ *
+ * When a model has no published `cachedInput` rate, cached tokens bill at the full
+ * input rate — an overestimate, never an underestimate.
+ *
+ * Cache STORAGE (per token-hour) is not modelled.
+ *
  * @param {string|null|undefined} modelId
- * @param {number} promptTokens
+ * @param {number} promptTokens - Total prompt tokens as reported by the API (INCLUDES cached tokens)
  * @param {number} responseTokens
  * @param {number} [thoughtsTokens=0] - Thinking tokens (billed at output rate)
- * @returns {number|null} Cost in USD, or null when pricing is unknown.
+ * @param {number} [cachedTokens=0] - Tokens served from a context cache (subset of promptTokens)
+ * @returns {number|null} Cost in USD, or null when pricing is UNKNOWN (not free).
  */
-function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0) {
+function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
 	const pricing = resolvePricing(modelId);
 	if (!pricing) return null;
-	return (promptTokens / 1_000_000) * pricing.input
-		+ ((responseTokens + thoughtsTokens) / 1_000_000) * pricing.output;
+
+	const above = (promptTokens || 0) > TIER_THRESHOLD;
+	const inputRate = (above && pricing.inputAbove200k) || pricing.input;
+	const outputRate = (above && pricing.outputAbove200k) || pricing.output;
+	const cachedRate = above
+		? (pricing.cachedInputAbove200k ?? pricing.cachedInput ?? inputRate)
+		: (pricing.cachedInput ?? inputRate);
+
+	const cached = Math.max(0, Math.min(cachedTokens || 0, promptTokens || 0));
+	const billablePrompt = Math.max(0, (promptTokens || 0) - cached);
+
+	return (billablePrompt / 1_000_000) * inputRate
+		+ (cached / 1_000_000) * cachedRate
+		+ (((responseTokens || 0) + (thoughtsTokens || 0)) / 1_000_000) * outputRate;
 }
 
-export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, MODEL_ALIASES, DEFAULT_MAX_OUTPUT_TOKENS, resolvePricing, computeCost };
+export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, MODEL_PRICING_AS_OF, MODEL_ALIASES, DEFAULT_MAX_OUTPUT_TOKENS, EFFORT_LEVELS, resolvePricing, computeCost };
 
 // ── BaseGemini Class ─────────────────────────────────────────────────────────
 
@@ -251,6 +333,9 @@ class BaseGemini {
 		}
 
 		// ── Thinking Config ──
+		// `effort` is the cross-package option (same name in ak-claude); it maps to
+		// Gemini's `thinkingConfig.thinkingLevel`.
+		this.effort = this._normalizeEffort(options.effort);
 		this._configureThinking(options.thinkingConfig);
 
 		// ── GenAI Client ──
@@ -272,6 +357,8 @@ class BaseGemini {
 		this._cumulativeUsage = {
 			promptTokens: 0,
 			responseTokens: 0,
+			thoughtsTokens: 0,
+			cachedTokens: 0,
 			totalTokens: 0,
 			attempts: 0
 		};
@@ -384,7 +471,7 @@ class BaseGemini {
 		}
 		this.chatSession = this._createChatSession([]);
 		this.lastResponseMetadata = null;
-		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
 		log.debug(`${this.constructor.name}: Conversation history cleared.`);
 	}
 
@@ -487,12 +574,15 @@ class BaseGemini {
 		const promptTokens = response.usageMetadata?.promptTokenCount || 0;
 		const responseTokens = response.usageMetadata?.candidatesTokenCount || 0;
 		const thoughtsTokens = response.usageMetadata?.thoughtsTokenCount || 0;
+		// NB: promptTokenCount INCLUDES cachedContentTokenCount — see computeCost().
+		const cachedTokens = response.usageMetadata?.cachedContentTokenCount || 0;
 		this.lastResponseMetadata = {
 			modelVersion: response.modelVersion || null,
 			requestedModel: this.modelName,
 			promptTokens,
 			responseTokens,
 			thoughtsTokens,
+			cachedTokens,
 			// totalTokenCount includes thoughts; fall back to summing the parts.
 			totalTokens: response.usageMetadata?.totalTokenCount || (promptTokens + responseTokens + thoughtsTokens),
 			timestamp: Date.now(),
@@ -514,18 +604,24 @@ class BaseGemini {
 		if (!this.lastResponseMetadata) return null;
 
 		const meta = this.lastResponseMetadata;
-		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, thoughtsTokens: 0, attempts: 1 };
+		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, thoughtsTokens: 0, cachedTokens: 0, attempts: 1 };
 		const useCumulative = cumulative.attempts > 0;
 
 		const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
 		const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
 		const thoughtsTokens = useCumulative ? (cumulative.thoughtsTokens || 0) : (meta.thoughtsTokens || 0);
 		const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
+		// Cached tokens accumulate across retries when tracked; otherwise fall back
+		// to the last response's value (single-call classes).
+		const cachedTokens = useCumulative && cumulative.cachedTokens !== undefined
+			? cumulative.cachedTokens
+			: (meta.cachedTokens || 0);
 
 		return {
 			promptTokens,
 			responseTokens,
 			thoughtsTokens,
+			cachedTokens,
 			totalTokens,
 			attempts: useCumulative ? cumulative.attempts : 1,
 			modelVersion: meta.modelVersion,
@@ -533,7 +629,7 @@ class BaseGemini {
 			timestamp: meta.timestamp,
 			groundingMetadata: meta.groundingMetadata || null,
 			modelStatus: meta.modelStatus || null,
-			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens)
+			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
 		};
 	}
 
@@ -544,12 +640,13 @@ class BaseGemini {
 	 * @param {number} promptTokens
 	 * @param {number} responseTokens
 	 * @param {number} [thoughtsTokens=0]
+	 * @param {number} [cachedTokens=0] - Cached-content tokens (a SUBSET of promptTokens)
 	 * @returns {number|null}
 	 * @protected
 	 */
-	_estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0) {
-		return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens)
-			?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens);
+	_estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
+		return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
+			?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens, cachedTokens);
 	}
 
 	/**
@@ -567,12 +664,14 @@ class BaseGemini {
 		const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
 		const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
 		const thoughtsTokens = response?.usageMetadata?.thoughtsTokenCount || 0;
+		const cachedTokens = response?.usageMetadata?.cachedContentTokenCount || 0;
 		const totalTokens = response?.usageMetadata?.totalTokenCount || (promptTokens + responseTokens + thoughtsTokens);
 		const modelVersion = response?.modelVersion || null;
 		return {
 			promptTokens,
 			responseTokens,
 			thoughtsTokens,
+			cachedTokens,
 			totalTokens,
 			attempts,
 			modelVersion,
@@ -580,7 +679,7 @@ class BaseGemini {
 			timestamp: Date.now(),
 			groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
 			modelStatus: response?.modelStatus || null,
-			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens)
+			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
 		};
 	}
 
@@ -819,7 +918,7 @@ class BaseGemini {
 	_configureThinking(thinkingConfig) {
 		const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some(p => p.test(this.modelName));
 
-		if (thinkingConfig === undefined) return;
+		if (thinkingConfig === undefined && this.effort === null) return;
 
 		if (thinkingConfig === null) {
 			delete this.chatConfig.thinkingConfig;
@@ -828,16 +927,46 @@ class BaseGemini {
 		}
 
 		if (!modelSupportsThinking) {
-			log.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig.`);
+			log.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig/effort.`);
 			return;
 		}
 
-		const config = { ...DEFAULT_THINKING_CONFIG, ...thinkingConfig };
-		if (thinkingConfig.thinkingLevel !== undefined) {
+		const config = { ...DEFAULT_THINKING_CONFIG, ...(thinkingConfig || {}) };
+
+		// `effort` wins over an explicit thinkingLevel/thinkingBudget — it is the
+		// cross-package knob and is set deliberately.
+		if (this.effort !== null) {
+			const level = EFFORT_TO_THINKING_LEVEL[this.effort];
+			if (level !== this.effort) {
+				log.debug(`Effort '${this.effort}' has no Gemini equivalent; using thinkingLevel '${level}'.`);
+			}
+			config.thinkingLevel = level;
+		}
+
+		// thinkingLevel and thinkingBudget are mutually exclusive on the wire.
+		if (config.thinkingLevel !== undefined) {
 			delete config.thinkingBudget;
 		}
+
 		this.chatConfig.thinkingConfig = config;
 		log.debug(`Thinking config applied: ${JSON.stringify(config)}`);
+	}
+
+	/**
+	 * Validates the cross-package `effort` option.
+	 * Throws rather than warns: this runs in the constructor before log levels are
+	 * finalized, so a warning could be swallowed.
+	 * @param {string|null|undefined} effort
+	 * @returns {'minimal'|'low'|'medium'|'high'|'xhigh'|'max'|null}
+	 * @protected
+	 */
+	_normalizeEffort(effort) {
+		if (effort === undefined || effort === null) return null;
+		const level = String(effort).toLowerCase();
+		if (!EFFORT_LEVELS.includes(level)) {
+			throw new Error(`Invalid effort "${effort}". Expected one of: ${EFFORT_LEVELS.join(', ')}.`);
+		}
+		return /** @type {any} */ (level);
 	}
 }
 

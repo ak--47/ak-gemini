@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v2.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v2.6) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -82,7 +82,8 @@ Shared foundation. Not typically instantiated directly.
 - `seed(examples, opts?)` — Add example pairs to chat history
 - `getHistory()` / `clearHistory()` — Manage chat history
 - `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
-- `resolvePricing(modelId)` / `computeCost(modelId, in, out)` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index)
+- `resolvePricing(modelId)` / `computeCost(modelId, in, out, thoughts?, cached?)` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index). `null` means UNKNOWN, not free
+- `effort` — cross-package reasoning-effort option (identical name in ak-claude); maps to `thinkingConfig.thinkingLevel` and wins over an explicit `thinkingLevel`/`thinkingBudget`. `xhigh`/`max` are ak-claude-only levels and clamp to `high`
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
 - `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)
 - `resourceExhaustedRetries` / `resourceExhaustedDelay` — 429 rate-limit retry with exponential backoff (default: 5 retries, 1000ms)
@@ -205,7 +206,7 @@ new Transformer({ vertexai: true, project: 'my-gcp-project' });
 // Named exports
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery, validateSchema } from 'ak-gemini';
-import { MODEL_PRICING, MODEL_ALIASES, resolvePricing, computeCost } from 'ak-gemini';
+import { MODEL_PRICING, MODEL_PRICING_AS_OF, MODEL_ALIASES, EFFORT_LEVELS, resolvePricing, computeCost } from 'ak-gemini';
 
 // Default export (namespace object)
 import AI from 'ak-gemini';
@@ -267,8 +268,13 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 
 ### Token Management
 - `estimate()` — INPUT token counts before sending
-- `getLastUsage()` — actual consumption AFTER the call
+- `getLastUsage()` — actual consumption AFTER the call (includes `thoughtsTokens` and `cachedTokens`)
 - `estimateCost()` — cost estimate using MODEL_PRICING table
+- **Gemini INCLUDES `cachedContentTokenCount` in `promptTokenCount`.** `computeCost()` subtracts cached tokens from the prompt count and re-bills them at `cachedInput`. **ak-claude is the opposite** — Anthropic excludes cache tokens from `input_tokens` and they are added on top. Both `computeCost()` implementations carry a comment saying so; do not "unify" them
+- Pro models are tiered: rates switch above 200,000 prompt tokens (`inputAbove200k` / `outputAbove200k` / `cachedInputAbove200k`, threshold exported as `tierThreshold`)
+- Models with no published `cachedInput` rate bill cached tokens at the full input rate — an overestimate, never an underestimate
+- **Not modelled:** cache STORAGE (time-based, $1.00/1M tokens/hour Flash, $4.50 Pro) and image-output tokens ($60/M or $120/M)
+- `MODEL_PRICING_AS_OF` records when the table was last verified against Google's pricing page
 
 ### Google Search Grounding (BaseGemini)
 - `enableGrounding: true` + `groundingConfig: {}` on any class constructor
