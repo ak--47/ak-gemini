@@ -308,7 +308,8 @@ describe('Transformer — Validation & Retry', () => {
 
 		const duration = Date.now() - startTime;
 		expect(duration).toBeGreaterThan(250); // 100ms + 200ms
-	});
+		// 3 sequential live sends at 5-15s each blow past the 30s global testTimeout.
+	}, 120_000);
 });
 
 

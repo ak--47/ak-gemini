@@ -516,6 +516,13 @@ All tests use real Gemini API calls (no mocks). Rate limiting (429 errors) can c
 
 ---
 
+## Upgrading
+
+**Upgrading from 2.5.0 to 2.6.0?** See [UPGRADING.md](./UPGRADING.md). 2.6.0 adds the
+`effort` option and corrects cost reporting — cached tokens now bill at the discounted
+rate, Pro models are tiered above 200k, and `thoughtsTokens` is no longer dropped from
+`getLastUsage()`. Full detail in [CHANGELOG.md](./CHANGELOG.md).
+
 ## Migration from v1.x
 
 See [MIGRATION.md](./MIGRATION.md) for a detailed guide on upgrading from v1.x to v2.0.

@@ -2,6 +2,9 @@
 
 ## 2.6.0
 
+> **Upgrading from 2.5.0?** [UPGRADING.md](./UPGRADING.md) walks through only what you
+> need to change, with before/after examples.
+
 Feature request from a downstream consumer (`smarterchild/agent`, Vertex AI),
 paired with ak-claude 0.2.0. **Minor** bump — cached-token billing changes
 reported cost (see "Behavior changes" below).
