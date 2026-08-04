@@ -108,9 +108,9 @@ export interface UsageData {
   totalTokens: number;
   /** Number of attempts (1 = first try success, 2+ = retries needed) */
   attempts: number;
-  /** Actual model that responded (e.g., 'gemini-3-flash-preview-001') */
+  /** Actual model that responded (e.g., 'gemini-3.6-flash-001') */
   modelVersion: string | null;
-  /** Model you requested (e.g., 'gemini-3-flash-preview') */
+  /** Model you requested (e.g., 'gemini-3.6-flash') */
   requestedModel: string;
   timestamp: number;
   groundingMetadata?: GroundingMetadata | null;
@@ -183,7 +183,7 @@ export type ServiceTier = 'STANDARD' | 'FLEX' | 'PRIORITY';
 // ── Constructor Options ──────────────────────────────────────────────────────
 
 export interface BaseGeminiOptions {
-  /** Gemini model to use (default: 'gemini-3-flash-preview') */
+  /** Gemini model to use (default: 'gemini-3.6-flash') */
   modelName?: string;
   /** System prompt for the model (null or false to disable) */
   systemPrompt?: string | null | false;

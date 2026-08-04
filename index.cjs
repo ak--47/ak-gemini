@@ -513,7 +513,7 @@ var BaseGemini = class {
    * @param {BaseGeminiOptions} [options={}]
    */
   constructor(options = {}) {
-    this.modelName = options.modelName || "gemini-3-flash-preview";
+    this.modelName = options.modelName || "gemini-3.6-flash";
     if (options.systemPrompt !== void 0) {
       this.systemPrompt = options.systemPrompt;
     } else {
