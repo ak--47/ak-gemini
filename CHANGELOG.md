@@ -1,9 +1,9 @@
 # Changelog
 
-## 2.7.0
+## 2.6.1
 
-**Minor** bump — the default model changes when you don't pass `modelName`
-(see below). No API-surface changes. Paired with ak-claude 0.3.0.
+**Patch** bump — the default model changes when you don't pass `modelName`
+(see below). No API-surface changes. Paired with ak-claude 0.2.1.
 
 ### Behavior changes (read before upgrading)
 - **Default model is now `gemini-3.6-flash`** (was `gemini-3-flash-preview`) on

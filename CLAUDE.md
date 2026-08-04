@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v2.7) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v2.6.1) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -68,7 +68,7 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **`serviceTier`** (`STANDARD` | `FLEX` | `PRIORITY`) — cost vs latency trade for generateContent (`@google/genai` 1.47+)
 - **`includeServerSideToolInvocations`** — surface server-side tool calls (Google Search) in response when grounding is on (`@google/genai` 1.46+)
 - **`getLastUsage().modelStatus`** — surfaces Google's model lifecycle status (`DEPRECATED`, etc.) so consumers see deprecation warnings (`@google/genai` 1.47+)
-- **Default model**: `gemini-3.6-flash` (bumped from `gemini-3-flash-preview` in 2.7.0 — stable flagship, cheaper output than 3.5-flash). Already in `MODEL_PRICING`; `gemini-flash-latest` aliases to it.
+- **Default model**: `gemini-3.6-flash` (bumped from `gemini-3-flash-preview` in 2.6.1 — stable flagship, cheaper output than 3.5-flash). Already in `MODEL_PRICING`; `gemini-flash-latest` aliases to it.
 - **Google Search grounding** (`enableGrounding`) is available on all classes via BaseGemini, merges with existing tools
 - **Context caching** (`cachedContent`, `createCache()`, `useCache()`) is available on all classes via BaseGemini
 - **429 rate-limit retry** (`resourceExhaustedRetries: 5`, `resourceExhaustedDelay: 1000`) — automatic exponential backoff on RESOURCE_EXHAUSTED, separate from Transformer's validation retries (`maxRetries`)
