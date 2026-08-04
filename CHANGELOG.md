@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.7.0
+
+**Minor** bump — the default model changes when you don't pass `modelName`
+(see below). No API-surface changes. Paired with ak-claude 0.3.0.
+
+### Behavior changes (read before upgrading)
+- **Default model is now `gemini-3.6-flash`** (was `gemini-3-flash-preview`) on
+  every generative class. It's the stable flagship with cheaper output than
+  3.5-flash ($1.50/$7.50 per M, cached $0.15 — priced in `MODEL_PRICING` since
+  2.6.0; `gemini-flash-latest` already resolves to it). Pass
+  `modelName: 'gemini-3-flash-preview'` to keep the old default. `Embedding`
+  (`gemini-embedding-001`) and `ImageGenerator`
+  (`gemini-3.1-flash-image-preview`) defaults are unchanged. Verified live on
+  Vertex AI.
+
+### Changed
+- **`@google/genai` `^2.12.0` → `^2.15.0`.** Changelog-audited: additive only;
+  the 2.14 Imagen deprecations don't affect `ImageGenerator`, which uses Gemini
+  image models.
+
 ## 2.6.0
 
 > **Upgrading from 2.5.0?** [UPGRADING.md](./UPGRADING.md) walks through only what you

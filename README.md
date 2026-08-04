@@ -420,7 +420,7 @@ All classes accept `BaseGeminiOptions`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `modelName` | string | `'gemini-2.5-flash'` | Gemini model to use |
+| `modelName` | string | `'gemini-3.6-flash'` | Gemini model to use |
 | `systemPrompt` | string | varies by class | System prompt |
 | `apiKey` | string | env var | Gemini API key |
 | `vertexai` | boolean | `false` | Use Vertex AI |

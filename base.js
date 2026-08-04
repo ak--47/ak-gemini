@@ -234,7 +234,7 @@ class BaseGemini {
 	 */
 	constructor(options = {}) {
 		// ── Model ──
-		this.modelName = options.modelName || 'gemini-3-flash-preview';
+		this.modelName = options.modelName || 'gemini-3.6-flash';
 
 		// ── System Prompt ──
 		// Subclasses set their own default if options.systemPrompt is undefined
