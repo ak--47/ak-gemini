@@ -53,7 +53,7 @@ const THINKING_SUPPORTED_MODELS = [
 ];
 
 /** Date the pricing table below was last verified against Google's pricing page. */
-const MODEL_PRICING_AS_OF = '2026-07-28';
+const MODEL_PRICING_AS_OF = '2026-08-24';
 
 /** Context-window size at which tiered models switch to their higher rate. */
 const TIER_THRESHOLD = 200_000;
@@ -68,6 +68,9 @@ const TIER_THRESHOLD = 200_000;
  *   Google does not publish one; computeCost() then falls back to the full `input`
  *   rate, which OVERSTATES rather than understates cost.
  * - `inputAbove200k` / `outputAbove200k` / `cachedInputAbove200k` — >200k context tier.
+ * - `intro: { input, output, cachedInput?, until }` — a promotional rate that applies
+ *   up to and including `until` (end of day UTC), after which the base rate takes over.
+ *   resolvePricing()/computeCost() accept an `at` option to price a past or future call.
  *
  * NOTES:
  * - Gemma models (e.g. Gemma 4) are intentionally excluded — they are open models with
@@ -81,22 +84,34 @@ const TIER_THRESHOLD = 200_000;
  */
 const MODEL_PRICING = {
 	// Gemini 3.x stable
-	'gemini-3.6-flash': { input: 1.50, output: 7.50, cachedInput: 0.15 },
+	// 3.7 and 3.6 Flash share a rate card, including the promo window that runs
+	// through 2026-12-31 before doubling on 2027-01-01.
+	'gemini-3.7-flash': {
+		input: 1.50, output: 7.50, cachedInput: 0.15,
+		intro: { input: 0.75, output: 3.75, cachedInput: 0.075, until: '2026-12-31' }
+	},
+	'gemini-3.6-flash': {
+		input: 1.50, output: 7.50, cachedInput: 0.15,
+		intro: { input: 0.75, output: 3.75, cachedInput: 0.075, until: '2026-12-31' }
+	},
 	'gemini-3.5-flash': { input: 1.50, output: 9.00, cachedInput: 0.15 },
 	'gemini-3.5-flash-lite': { input: 0.30, output: 2.50, cachedInput: 0.03 },
 	'gemini-3.1-flash-lite': { input: 0.25, output: 1.50, cachedInput: 0.025 },
+	'gemini-3.1-flash-image': { input: 0.50, output: 3.00 },        // text-only; image-output is $60/M
+	'gemini-3.1-flash-lite-image': { input: 0.25, output: 1.50 },   // text-only; image-output billed separately
+	'gemini-3-pro-image': { input: 2.00, output: 12.00 },           // text-only; image-output is $120/M
 	// Gemini 3.x preview
 	'gemini-3.1-pro-preview': {
 		input: 2.00, output: 12.00, cachedInput: 0.20,
 		inputAbove200k: 4.00, outputAbove200k: 18.00, cachedInputAbove200k: 0.40
 	},
 	'gemini-3-pro-preview': { input: 2.00, output: 12.00 },   // ≤200k tier; launch rate (superseded by 3.1, off the pricing page)
-	'gemini-3-flash-preview': { input: 0.50, output: 3.00 },
+	'gemini-3-flash-preview': { input: 0.50, output: 3.00, cachedInput: 0.05 },
 	'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50, cachedInput: 0.025 },
 	'gemini-3.1-flash-image-preview': { input: 0.50, output: 3.00 }, // text-only; image-output is $60/M
 	'gemini-3-pro-image-preview': { input: 2.00, output: 12.00 },   // text-only; image-output is $120/M
 	// Gemini 2.5 stable
-	'gemini-2.5-flash': { input: 0.30, output: 3.00, cachedInput: 0.05 },
+	'gemini-2.5-flash': { input: 0.30, output: 2.50, cachedInput: 0.03 },
 	'gemini-2.5-flash-lite': { input: 0.10, output: 0.40, cachedInput: 0.01 },
 	'gemini-2.5-pro': {
 		input: 1.25, output: 10.00, cachedInput: 0.125,
@@ -107,7 +122,8 @@ const MODEL_PRICING = {
 	'gemini-2.0-flash': { input: 0.10, output: 0.40 },
 	'gemini-2.0-flash-lite': { input: 0.02, output: 0.10 },
 	// Embeddings
-	'gemini-embedding-001': { input: 0.15, output: 0 }
+	'gemini-embedding-001': { input: 0.15, output: 0 },
+	'gemini-embedding-2-preview': { input: 0.20, output: 0 } // text input; image $0.45, audio $6.50, video $12.00 not modelled
 };
 
 /**
@@ -121,21 +137,47 @@ const MODEL_PRICING = {
  * already does this, and alias resolution is logged at debug level.
  */
 const MODEL_ALIASES = {
-	'gemini-flash-latest': 'gemini-3.6-flash',
+	'gemini-flash-latest': 'gemini-3.7-flash',
 	'gemini-pro-latest': 'gemini-3.1-pro-preview',
 	'gemini-flash-lite-latest': 'gemini-3.5-flash-lite'
 };
 
 /**
+ * Applies an active `intro` promotional window to a pricing entry.
+ * The window is inclusive of `until`, compared at end-of-day UTC.
+ * Mirrors ak-claude's `_applyIntroPricing`, plus `cachedInput` — Google discounts
+ * the cached rate alongside input/output during a promo.
+ * @param {any} entry
+ * @param {Date|string|number} [at]
+ * @returns {any}
+ * @private
+ */
+function _applyIntroPricing(entry, at) {
+	if (!entry?.intro) return entry;
+	const now = at === undefined ? new Date() : new Date(at);
+	const until = new Date(`${entry.intro.until}T23:59:59.999Z`);
+	if (Number.isNaN(now.getTime()) || now > until) return entry;
+	return {
+		...entry,
+		input: entry.intro.input,
+		output: entry.intro.output,
+		...(entry.intro.cachedInput !== undefined && { cachedInput: entry.intro.cachedInput }),
+		introUntil: entry.intro.until
+	};
+}
+
+/**
  * Resolves pricing for a model id, following `-latest` aliases.
  * A null result means pricing is UNKNOWN, not free.
  * @param {string|null|undefined} modelId
- * @returns {{ input: number, output: number, cachedInput?: number, inputAbove200k?: number, outputAbove200k?: number, cachedInputAbove200k?: number, tierThreshold: number, asOf: string }|null}
+ * @param {Object} [opts={}]
+ * @param {Date|string|number} [opts.at] - Point in time for promotional pricing. Defaults to now.
+ * @returns {{ input: number, output: number, cachedInput?: number, inputAbove200k?: number, outputAbove200k?: number, cachedInputAbove200k?: number, intro?: Object, introUntil?: string, tierThreshold: number, asOf: string }|null}
  */
-function resolvePricing(modelId) {
+function resolvePricing(modelId, opts = {}) {
 	const entry = _lookupPricing(modelId);
 	if (!entry) return null;
-	return { ...entry, tierThreshold: TIER_THRESHOLD, asOf: MODEL_PRICING_AS_OF };
+	return { ..._applyIntroPricing(entry, opts.at), tierThreshold: TIER_THRESHOLD, asOf: MODEL_PRICING_AS_OF };
 }
 
 /**
@@ -190,10 +232,12 @@ function _lookupPricing(modelId) {
  * @param {number} responseTokens
  * @param {number} [thoughtsTokens=0] - Thinking tokens (billed at output rate)
  * @param {number} [cachedTokens=0] - Tokens served from a context cache (subset of promptTokens)
+ * @param {Object} [opts={}]
+ * @param {Date|string|number} [opts.at] - Point in time for promotional pricing. Defaults to now.
  * @returns {number|null} Cost in USD, or null when pricing is UNKNOWN (not free).
  */
-function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
-	const pricing = resolvePricing(modelId);
+function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0, opts = {}) {
+	const pricing = resolvePricing(modelId, { at: opts.at });
 	if (!pricing) return null;
 
 	const above = (promptTokens || 0) > TIER_THRESHOLD;
@@ -234,7 +278,7 @@ class BaseGemini {
 	 */
 	constructor(options = {}) {
 		// ── Model ──
-		this.modelName = options.modelName || 'gemini-3.6-flash';
+		this.modelName = options.modelName || 'gemini-3.7-flash';
 
 		// ── System Prompt ──
 		// Subclasses set their own default if options.systemPrompt is undefined
@@ -420,6 +464,13 @@ class BaseGemini {
 			},
 			history: []
 		};
+
+		// A cache already carries its own systemInstruction and the API rejects a
+		// duplicate. Strip it at request-build time rather than mutating chatConfig:
+		// useCache() used to `delete this.chatConfig.systemInstruction`, which was
+		// one-way, so detaching the cache (deleteCache, or cachedContent = null)
+		// left the instance with no cache AND no system prompt.
+		if (this.cachedContent) delete opts.config.systemInstruction;
 
 		// Merge grounding into tools (preserving existing tools like functionDeclarations)
 		if (this.enableGrounding) {
@@ -621,6 +672,99 @@ class BaseGemini {
 			log.warn(`Model "${this.modelName}" is marked DEPRECATED by Google. Plan migration.`);
 			this._deprecationWarned = true;
 		}
+	}
+
+	/**
+	 * Zeroes the cumulative usage counters. Call once at the start of any method
+	 * that makes one or more API round-trips, before the first `_accumulateUsage()`.
+	 * @protected
+	 */
+	_resetUsage() {
+		this._cumulativeUsage = {
+			promptTokens: 0, responseTokens: 0, thoughtsTokens: 0,
+			cachedTokens: 0, totalTokens: 0, attempts: 0
+		};
+	}
+
+	/**
+	 * Captures metadata from `response` and ADDS its token counts to the running
+	 * cumulative total. Call once per API round-trip.
+	 *
+	 * Multi-round methods (agent tool loops, Transformer retries) make several
+	 * calls per turn; assigning from the final response only — as the tool loops
+	 * used to — reports the last round and undercounts the turn several-fold,
+	 * because `promptTokens` grows with the accumulated history so the final
+	 * round looks plausibly large on its own.
+	 *
+	 * `attempts` becomes the number of API round-trips in the turn.
+	 *
+	 * @param {Object} response - A single API response (or a stream's final chunk)
+	 * @protected
+	 */
+	_accumulateUsage(response) {
+		this._captureMetadata(response);
+		if (!this._cumulativeUsage) this._resetUsage();
+
+		const meta = this.lastResponseMetadata;
+		const cumulative = this._cumulativeUsage;
+		cumulative.promptTokens += meta.promptTokens || 0;
+		cumulative.responseTokens += meta.responseTokens || 0;
+		cumulative.thoughtsTokens += meta.thoughtsTokens || 0;
+		cumulative.cachedTokens += meta.cachedTokens || 0;
+		cumulative.totalTokens += meta.totalTokens || 0;
+		cumulative.attempts += 1;
+	}
+
+	/**
+	 * Creates a per-round usage accumulator for a streamed response.
+	 *
+	 * `stream()` used to yield `usage: this.getLastUsage()` without ever reading
+	 * `usageMetadata` off the stream — so the `done` event carried `null` on a
+	 * fresh instance, or stale numbers from an unrelated earlier call on a reused
+	 * one. `@google/genai` emits `usageMetadata` on stream chunks holding the
+	 * running totals for that round, so the LAST chunk carrying it has the round's
+	 * final counts. Grounding metadata can arrive on any chunk.
+	 *
+	 * Call `track(chunk)` for every chunk, then `commit()` once the round's stream
+	 * is exhausted.
+	 *
+	 * @returns {{ track: (chunk: any) => void, commit: () => void }}
+	 * @protected
+	 */
+	_streamUsage() {
+		let usageChunk = null;
+		let groundingMetadata = null;
+		return {
+			track: (chunk) => {
+				if (chunk?.usageMetadata) usageChunk = chunk;
+				const grounding = chunk?.candidates?.[0]?.groundingMetadata;
+				if (grounding) groundingMetadata = grounding;
+			},
+			commit: () => {
+				if (!usageChunk) return;
+				this._accumulateUsage(groundingMetadata
+					? { ...usageChunk, candidates: [{ groundingMetadata }] }
+					: usageChunk);
+			}
+		};
+	}
+
+	/**
+	 * Extracts the user-visible text parts of a stream chunk.
+	 *
+	 * Reads EVERY part, not just `parts[0]` — a chunk can split text across parts,
+	 * or carry a thought summary followed by answer text, and indexing `[0]`
+	 * silently truncates the rest. `thought` parts are skipped: thought summaries
+	 * must not be concatenated into the answer.
+	 *
+	 * @param {any} chunk
+	 * @returns {string[]}
+	 * @protected
+	 */
+	_chunkTextParts(chunk) {
+		const parts = chunk?.candidates?.[0]?.content?.parts;
+		if (!Array.isArray(parts)) return [];
+		return parts.filter(p => p?.text && !p.thought).map(p => p.text);
 	}
 
 	/**
@@ -864,9 +1008,9 @@ class BaseGemini {
 	 */
 	async useCache(cacheName) {
 		this.cachedContent = cacheName;
-		// When using cached content, remove systemInstruction from chatConfig
-		// since it's already baked into the cache — the API rejects duplicates
-		delete this.chatConfig.systemInstruction;
+		// systemInstruction is stripped at request-build time by
+		// _getChatCreateOptions() while a cache is attached — NOT deleted from
+		// chatConfig, so detaching the cache restores the system prompt.
 		if (this.chatSession) {
 			await this.init(true);
 		}

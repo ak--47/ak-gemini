@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v2.6.2) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v2.7.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -68,7 +68,7 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **`serviceTier`** (`STANDARD` | `FLEX` | `PRIORITY`) — cost vs latency trade for generateContent (`@google/genai` 1.47+)
 - **`includeServerSideToolInvocations`** — surface server-side tool calls (Google Search) in response when grounding is on (`@google/genai` 1.46+)
 - **`getLastUsage().modelStatus`** — surfaces Google's model lifecycle status (`DEPRECATED`, etc.) so consumers see deprecation warnings (`@google/genai` 1.47+)
-- **Default model**: `gemini-3.6-flash` (bumped from `gemini-3-flash-preview` in 2.6.1 — stable flagship, cheaper output than 3.5-flash). Already in `MODEL_PRICING`; `gemini-flash-latest` aliases to it.
+- **Default model**: `gemini-3.7-flash` (bumped from `gemini-3.6-flash` in 2.7.0 — stable, same rate card as 3.6-flash, Google's flagship Flash for coding/agentic work). `gemini-flash-latest` aliases to it. NOT yet verified live on Vertex.
 - **Google Search grounding** (`enableGrounding`) is available on all classes via BaseGemini, merges with existing tools
 - **Context caching** (`cachedContent`, `createCache()`, `useCache()`) is available on all classes via BaseGemini
 - **429 rate-limit retry** (`resourceExhaustedRetries: 5`, `resourceExhaustedDelay: 1000`) — automatic exponential backoff on RESOURCE_EXHAUSTED, separate from Transformer's validation retries (`maxRetries`)
@@ -82,7 +82,10 @@ Shared foundation. Not typically instantiated directly.
 - `seed(examples, opts?)` — Add example pairs to chat history
 - `getHistory()` / `clearHistory()` — Manage chat history
 - `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
-- `resolvePricing(modelId)` / `computeCost(modelId, in, out, thoughts?, cached?)` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index). `null` means UNKNOWN, not free
+- `resolvePricing(modelId, { at? })` / `computeCost(modelId, in, out, thoughts?, cached?, { at? })` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index). `null` means UNKNOWN, not free. `at` prices a call against a date-windowed `intro` promo (3.6/3.7-flash run at half rate through 2026-12-31)
+- `_resetUsage()` / `_accumulateUsage(response)` — **the only correct way to record usage.** Call `_resetUsage()` once at the top of any method making API calls, then `_accumulateUsage()` after EVERY round-trip. Assigning `_cumulativeUsage` from the final response reports one round of a multi-round agent turn
+- `_streamUsage()` — per-round accumulator for streamed responses. `track(chunk)` every chunk, `commit()` when the round's stream is exhausted. A `stream()` that skips this yields `usage: null` or stale numbers
+- `_chunkTextParts(chunk)` — reads EVERY text part of a chunk and skips `thought` parts. Never index `parts[0]` directly, and never make text and `functionCalls` mutually exclusive with `else if` — Gemini emits both in one chunk
 - `effort` — cross-package reasoning-effort option (identical name in ak-claude); maps to `thinkingConfig.thinkingLevel` and wins over an explicit `thinkingLevel`/`thinkingBudget`. `xhigh`/`max` are ak-claude-only levels and clamp to `high`
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
 - `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)

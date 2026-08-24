@@ -865,10 +865,12 @@ ${lang.codeRules}
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
 
+		this._resetUsage();
 		let response = await this._withRetry(() => this.chatSession.sendMessage({
 			message,
 			...(sendConfig && { config: sendConfig })
 		}));
+		this._accumulateUsage(response);
 
 		for (let round = 0; round < this.maxRounds; round++) {
 			if (this._stopped) break;
@@ -919,20 +921,10 @@ ${lang.codeRules}
 				})),
 				...(sendConfig && { config: sendConfig })
 			}));
+			this._accumulateUsage(response);
 
 			if (consecutiveFailures >= this.maxRetries) break;
 		}
-
-		this._captureMetadata(response);
-
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-			cachedTokens: this.lastResponseMetadata.cachedTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
 
 		// Build backward-compat codeExecutions (only execute_code + write_and_run_code + fix_code with execute)
 		const codeExecutions = toolCalls
@@ -982,6 +974,7 @@ ${lang.codeRules}
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
 
+		this._resetUsage();
 		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
 			message,
 			...(sendConfig && { config: sendConfig })
@@ -991,17 +984,21 @@ ${lang.codeRules}
 			if (this._stopped) break;
 
 			const functionCalls = [];
+			const usage = this._streamUsage();
 
-			// Consume the stream
+			// Consume the stream. Text and function calls are NOT mutually exclusive
+			// per chunk — Gemini routinely emits a preamble in the same chunk as the
+			// functionCall part — so these are independent ifs, not an else-if.
 			for await (const chunk of streamResponse) {
-				if (chunk.functionCalls) {
-					functionCalls.push(...chunk.functionCalls);
-				} else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-					const text = chunk.candidates[0].content.parts[0].text;
+				usage.track(chunk);
+				if (chunk.functionCalls) functionCalls.push(...chunk.functionCalls);
+				for (const text of this._chunkTextParts(chunk)) {
 					fullText += text;
 					yield { type: 'text', text };
 				}
 			}
+
+			usage.commit();
 
 			// No function calls — we're done
 			if (functionCalls.length === 0) {

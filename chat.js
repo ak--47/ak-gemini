@@ -77,19 +77,9 @@ class Chat extends BaseGemini {
 		const config = this._getSendConfig(opts.labels);
 		if (config) sendParams.config = config;
 
+		this._resetUsage();
 		const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
-
-		this._captureMetadata(result);
-
-		// Set cumulative usage (single attempt for Chat)
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-			cachedTokens: this.lastResponseMetadata.cachedTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
+		this._accumulateUsage(result);
 
 		return {
 			text: result.text || '',
@@ -112,15 +102,19 @@ class Chat extends BaseGemini {
 		const config = this._getSendConfig(opts.labels);
 		if (config) sendParams.config = config;
 
+		this._resetUsage();
+		const usage = this._streamUsage();
 		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream(sendParams));
 
 		for await (const chunk of streamResponse) {
-			if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-				const text = chunk.candidates[0].content.parts[0].text;
+			usage.track(chunk);
+			for (const text of this._chunkTextParts(chunk)) {
 				fullText += text;
 				yield { type: 'text', text };
 			}
 		}
+
+		usage.commit();
 
 		yield {
 			type: 'done',

@@ -142,10 +142,12 @@ class ToolAgent extends BaseGemini {
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
 
+		this._resetUsage();
 		let response = await this._withRetry(() => this.chatSession.sendMessage({
 			message,
 			...(sendConfig && { config: sendConfig })
 		}));
+		this._accumulateUsage(response);
 
 		for (let round = 0; round < this.maxToolRounds; round++) {
 			if (this._stopped) break;
@@ -198,19 +200,8 @@ class ToolAgent extends BaseGemini {
 				})),
 				...(sendConfig && { config: sendConfig })
 			}));
+			this._accumulateUsage(response);
 		}
-
-		this._captureMetadata(response);
-
-		// Set cumulative usage
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-			cachedTokens: this.lastResponseMetadata.cachedTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
 
 		return {
 			text: response.text || '',
@@ -244,6 +235,7 @@ class ToolAgent extends BaseGemini {
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
 
+		this._resetUsage();
 		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
 			message,
 			...(sendConfig && { config: sendConfig })
@@ -252,20 +244,22 @@ class ToolAgent extends BaseGemini {
 		for (let round = 0; round < this.maxToolRounds; round++) {
 			if (this._stopped) break;
 
-			let roundText = '';
 			const functionCalls = [];
+			const usage = this._streamUsage();
 
-			// Consume the stream
+			// Consume the stream. Text and function calls are NOT mutually exclusive
+			// per chunk — Gemini routinely emits a preamble in the same chunk as the
+			// functionCall part — so these are independent ifs, not an else-if.
 			for await (const chunk of streamResponse) {
-				if (chunk.functionCalls) {
-					functionCalls.push(...chunk.functionCalls);
-				} else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-					const text = chunk.candidates[0].content.parts[0].text;
-					roundText += text;
+				usage.track(chunk);
+				if (chunk.functionCalls) functionCalls.push(...chunk.functionCalls);
+				for (const text of this._chunkTextParts(chunk)) {
 					fullText += text;
 					yield { type: 'text', text };
 				}
 			}
+
+			usage.commit();
 
 			// No tool calls — we're done
 			if (functionCalls.length === 0) {
@@ -362,6 +356,12 @@ class ToolAgent extends BaseGemini {
 					toolResults.push({ id: r.id, name: r.name, result: r.result });
 				}
 			}
+
+			// Gemini requires exactly one functionResponse per functionCall in the
+			// preceding turn. A stop() partway through the sequential branch above
+			// leaves toolResults short, and sending a partial set is a 400 — bail
+			// out of the round before the send instead.
+			if (this._stopped && toolResults.length < functionCalls.length) break;
 
 			// Send function responses back and get next stream
 			streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
