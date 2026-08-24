@@ -1,5 +1,112 @@
 # Changelog
 
+## 2.7.0
+
+Follow-on sweep to 2.6.2, from a full read of the package by a downstream
+consumer (mixpanel-power-tools: 7 streaming agents + ~22 Transformer macros).
+Same theme as the `labels` bug: config and metadata the non-streaming path
+handles correctly were being dropped on a parallel path. Paired with
+ak-claude 0.3.0.
+
+**Minor** bump — reported token counts and `estimatedCost` change (upward, to
+the truth) and `Transformer.send()` retry behavior changes. No signatures
+removed.
+
+### Behavior changes (read before upgrading)
+
+- **`estimatedCost` for `gemini-3.6-flash` drops ~2×.** Google's published rate
+  is $0.75/$3.75 per M through 2026-12-31, rising to $1.50/$7.50 on 2027-01-01.
+  The table had only the post-2027 rate, so every 3.6-flash cost estimate was
+  double. Now modelled as a date-windowed `intro` block —
+  `resolvePricing(id, { at })` / `computeCost(..., { at })` price a call at a
+  given point in time (ported from ak-claude).
+- **`gemini-2.5-flash` output was $3.00, actual is $2.50; its cached rate was
+  $0.05, actual is $0.03.** Corrected.
+- **Multi-round and streaming usage numbers go UP, because they were wrong.**
+  See "Fixed" below. Anything asserting exact token counts from a `ToolAgent` /
+  `CodeAgent` turn will need updating — the old numbers covered one round.
+- **`usage.attempts` on the agent classes** is now the number of API
+  round-trips in the turn (was hardcoded `1`).
+- **Default model is now `gemini-3.7-flash`** (was `gemini-3.6-flash`). Stable,
+  same rate card as 3.6-flash, and Google describes it as the flagship Flash for
+  coding and agentic work. Pass `modelName: 'gemini-3.6-flash'` to keep the old
+  default. `gemini-flash-latest` now resolves to 3.7-flash for pricing.
+  Verified live on Vertex AI (echoed back as `gemini-3.7-flash`).
+
+### Fixed
+
+- **`stream()` never reported usage.** Every `stream()` yielded
+  `usage: this.getLastUsage()` without ever reading `usageMetadata` off the
+  stream, so the `done` event carried `null` on a fresh instance or stale
+  numbers from an unrelated earlier call on a reused one. All agent cost
+  telemetry built on streaming was dead. Fixed in `Chat`, `RagAgent`,
+  `ToolAgent` and `CodeAgent` via the new protected `_streamUsage()` helper.
+- **Multi-round tool turns reported one round.** `ToolAgent.chat()` /
+  `CodeAgent.chat()` assigned usage from the FINAL response after the loop. A
+  6-round conversation makes 7 calls; the report covered one. Because
+  `promptTokens` grows with accumulated history, the final round is the largest
+  single call — so the number looked plausible while undercounting several-fold.
+  Now accumulated per round via `_accumulateUsage()`.
+- **Text emitted alongside a `functionCall` was dropped.** The chunk loop used
+  `if (chunk.functionCalls) … else if (text)`, but Gemini routinely emits a
+  preamble in the SAME chunk as the call. That text was never yielded and never
+  reached `fullText` — the agent appeared to go silent, then jump to a tool call.
+- **Chunks with multiple parts were truncated.** The loops read
+  `content.parts[0].text` only, silently losing parts 1..n. Now every part is
+  read, and `thought` parts are skipped so thought summaries never leak into
+  user-visible text.
+- **`Transformer.rebuild()` diverged from `rawSend()`.** It called bare
+  `JSON.parse` (throwing on the markdown fences a conversational repair prompt
+  usually produces) and skipped the `{data: …}` unwrap that seeded Transformers
+  need — so attempt 0 returned `payload` and attempt ≥1 returned
+  `{data: payload}`. With a validator that was a guaranteed retry-exhaustion
+  loop. Both now share `_parseModelResponse()`. `rebuild()` also threads
+  per-message labels through, so billing attribution survives a repair.
+- **`send()` retried against the original input.** `lastPayload` only advanced
+  on success, so when attempt 0 failed to PARSE, attempt 1 called
+  `rebuild(ORIGINAL_INPUT, …)` — telling the model its own input was the bad
+  output, double-encoded because `_preparePayload` had already stringified it.
+  Extraction and validation failures are now distinguished: extraction failures
+  re-send the task with a format nudge; validation failures still repair the
+  payload the model actually produced.
+- **Stateless paths ignored grounding and caching.** `Transformer._statelessSend`
+  and `Message.send` built their config from raw `chatConfig`, but
+  `enableGrounding` tools and `cachedContent` live in `_getChatCreateOptions()`.
+  Both were silent no-ops on those paths. Both now build from the same place.
+- **`stop()` mid-round produced a malformed turn.** A `stop()` landing partway
+  through `ToolAgent.stream()`'s sequential branch left `toolResults` short, and
+  the partial set was still sent — Gemini requires exactly one `functionResponse`
+  per `functionCall`, so that was a 400. It now bails out before the send.
+- **`useCache()` permanently deleted the system instruction.** It did
+  `delete this.chatConfig.systemInstruction`, which is correct for the cached
+  call but one-way: a later `deleteCache()` left the instance with no cache AND
+  no system prompt. `systemInstruction` is now stripped at request-build time
+  while a cache is attached, so detaching restores it.
+
+### Added
+
+- `gemini-3.7-flash` (new default), plus the newly-stable `gemini-3.1-flash-image`,
+  `gemini-3.1-flash-lite-image`, `gemini-3-pro-image` and `gemini-embedding-2-preview`
+  in `MODEL_PRICING`. `gemini-3-flash-preview` gained its published `cachedInput`
+  rate ($0.05), which it was missing.
+- Date-windowed promotional pricing: `resolvePricing(id, { at })` and
+  `computeCost(..., { at })`. Matches ak-claude's API, plus `cachedInput` in the
+  `intro` block (Google discounts the cached rate during a promo).
+- Protected `BaseGemini` helpers: `_resetUsage()`, `_accumulateUsage()`,
+  `_streamUsage()`, `_chunkTextParts()`.
+- 13 offline regression tests in `tests/consumer-fixes.test.js` (60 total).
+  Full live suite also green: 533 passed / 12 skipped across 12 files.
+
+### Changed
+
+- **`@google/genai` `^2.15.0` → `^2.18.0`.** Changelog-audited across
+  2.16.0–2.18.0: no breaking changes to `chats.create`, `sendMessage`,
+  `sendMessageStream`, `generateContent` config or `usageMetadata`. 2.17.1 adds
+  the `gemini-3.7-flash` id. The flagged items (per-attempt `HttpOptions.timeout`,
+  structured `speech_config`, the `TOO_MANY_TOOL_CALLS` finish reason, the
+  `REQUIRES_ACTION` live-status deprecation) touch no code in this package.
+- `MODEL_PRICING_AS_OF` → `2026-08-24`.
+
 ## 2.6.2
 
 **Patch** bump — bug fix only. No API-surface changes, no behavior change for

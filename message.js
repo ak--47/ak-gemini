@@ -108,11 +108,14 @@ class Message extends BaseGemini {
 
 		const mergedLabels = { ...this.labels, ...(opts.labels || {}) };
 
+		// Build from _getChatCreateOptions() rather than raw chatConfig: grounding
+		// tools and cachedContent live there, not in chatConfig, so a send built
+		// from chatConfig alone silently ignored enableGrounding and useCache().
 		const result = await this._withRetry(() => this.genAIClient.models.generateContent({
 			model: this.modelName,
 			contents: contents,
 			config: {
-				...this.chatConfig,
+				...this._getChatCreateOptions().config,
 				...(this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels })
 			}
 		}));

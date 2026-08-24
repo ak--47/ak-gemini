@@ -208,21 +208,12 @@ class RagAgent extends BaseGemini {
 
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
+		this._resetUsage();
 		const response = await this._withRetry(() => this.chatSession.sendMessage({
 			message,
 			...(sendConfig && { config: sendConfig })
 		}));
-
-		this._captureMetadata(response);
-
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-			cachedTokens: this.lastResponseMetadata.cachedTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
+		this._accumulateUsage(response);
 
 		return {
 			text: response.text || '',
@@ -245,18 +236,22 @@ class RagAgent extends BaseGemini {
 		let fullText = '';
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
+		this._resetUsage();
+		const usage = this._streamUsage();
 		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
 			message,
 			...(sendConfig && { config: sendConfig })
 		}));
 
 		for await (const chunk of streamResponse) {
-			if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-				const text = chunk.candidates[0].content.parts[0].text;
+			usage.track(chunk);
+			for (const text of this._chunkTextParts(chunk)) {
 				fullText += text;
 				yield { type: 'text', text };
 			}
 		}
+
+		usage.commit();
 
 		yield {
 			type: 'done',

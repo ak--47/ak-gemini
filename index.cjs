@@ -420,14 +420,33 @@ var THINKING_SUPPORTED_MODELS = [
   /^gemini-2\.5-flash-lite(-preview)?$/,
   /^gemini-2\.0-flash$/
 ];
-var MODEL_PRICING_AS_OF = "2026-07-28";
+var MODEL_PRICING_AS_OF = "2026-08-24";
 var TIER_THRESHOLD = 2e5;
 var MODEL_PRICING = {
   // Gemini 3.x stable
-  "gemini-3.6-flash": { input: 1.5, output: 7.5, cachedInput: 0.15 },
+  // 3.7 and 3.6 Flash share a rate card, including the promo window that runs
+  // through 2026-12-31 before doubling on 2027-01-01.
+  "gemini-3.7-flash": {
+    input: 1.5,
+    output: 7.5,
+    cachedInput: 0.15,
+    intro: { input: 0.75, output: 3.75, cachedInput: 0.075, until: "2026-12-31" }
+  },
+  "gemini-3.6-flash": {
+    input: 1.5,
+    output: 7.5,
+    cachedInput: 0.15,
+    intro: { input: 0.75, output: 3.75, cachedInput: 0.075, until: "2026-12-31" }
+  },
   "gemini-3.5-flash": { input: 1.5, output: 9, cachedInput: 0.15 },
   "gemini-3.5-flash-lite": { input: 0.3, output: 2.5, cachedInput: 0.03 },
   "gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cachedInput: 0.025 },
+  "gemini-3.1-flash-image": { input: 0.5, output: 3 },
+  // text-only; image-output is $60/M
+  "gemini-3.1-flash-lite-image": { input: 0.25, output: 1.5 },
+  // text-only; image-output billed separately
+  "gemini-3-pro-image": { input: 2, output: 12 },
+  // text-only; image-output is $120/M
   // Gemini 3.x preview
   "gemini-3.1-pro-preview": {
     input: 2,
@@ -439,14 +458,14 @@ var MODEL_PRICING = {
   },
   "gemini-3-pro-preview": { input: 2, output: 12 },
   // ≤200k tier; launch rate (superseded by 3.1, off the pricing page)
-  "gemini-3-flash-preview": { input: 0.5, output: 3 },
+  "gemini-3-flash-preview": { input: 0.5, output: 3, cachedInput: 0.05 },
   "gemini-3.1-flash-lite-preview": { input: 0.25, output: 1.5, cachedInput: 0.025 },
   "gemini-3.1-flash-image-preview": { input: 0.5, output: 3 },
   // text-only; image-output is $60/M
   "gemini-3-pro-image-preview": { input: 2, output: 12 },
   // text-only; image-output is $120/M
   // Gemini 2.5 stable
-  "gemini-2.5-flash": { input: 0.3, output: 3, cachedInput: 0.05 },
+  "gemini-2.5-flash": { input: 0.3, output: 2.5, cachedInput: 0.03 },
   "gemini-2.5-flash-lite": { input: 0.1, output: 0.4, cachedInput: 0.01 },
   "gemini-2.5-pro": {
     input: 1.25,
@@ -462,17 +481,32 @@ var MODEL_PRICING = {
   "gemini-2.0-flash": { input: 0.1, output: 0.4 },
   "gemini-2.0-flash-lite": { input: 0.02, output: 0.1 },
   // Embeddings
-  "gemini-embedding-001": { input: 0.15, output: 0 }
+  "gemini-embedding-001": { input: 0.15, output: 0 },
+  "gemini-embedding-2-preview": { input: 0.2, output: 0 }
+  // text input; image $0.45, audio $6.50, video $12.00 not modelled
 };
 var MODEL_ALIASES = {
-  "gemini-flash-latest": "gemini-3.6-flash",
+  "gemini-flash-latest": "gemini-3.7-flash",
   "gemini-pro-latest": "gemini-3.1-pro-preview",
   "gemini-flash-lite-latest": "gemini-3.5-flash-lite"
 };
-function resolvePricing(modelId) {
+function _applyIntroPricing(entry, at) {
+  if (!entry?.intro) return entry;
+  const now = at === void 0 ? /* @__PURE__ */ new Date() : new Date(at);
+  const until = /* @__PURE__ */ new Date(`${entry.intro.until}T23:59:59.999Z`);
+  if (Number.isNaN(now.getTime()) || now > until) return entry;
+  return {
+    ...entry,
+    input: entry.intro.input,
+    output: entry.intro.output,
+    ...entry.intro.cachedInput !== void 0 && { cachedInput: entry.intro.cachedInput },
+    introUntil: entry.intro.until
+  };
+}
+function resolvePricing(modelId, opts = {}) {
   const entry = _lookupPricing(modelId);
   if (!entry) return null;
-  return { ...entry, tierThreshold: TIER_THRESHOLD, asOf: MODEL_PRICING_AS_OF };
+  return { ..._applyIntroPricing(entry, opts.at), tierThreshold: TIER_THRESHOLD, asOf: MODEL_PRICING_AS_OF };
 }
 function _lookupPricing(modelId) {
   if (!modelId) return null;
@@ -497,8 +531,8 @@ function _lookupPricing(modelId) {
   }
   return null;
 }
-function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
-  const pricing = resolvePricing(modelId);
+function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0, opts = {}) {
+  const pricing = resolvePricing(modelId, { at: opts.at });
   if (!pricing) return null;
   const above = (promptTokens || 0) > TIER_THRESHOLD;
   const inputRate = above && pricing.inputAbove200k || pricing.input;
@@ -513,7 +547,7 @@ var BaseGemini = class {
    * @param {BaseGeminiOptions} [options={}]
    */
   constructor(options = {}) {
-    this.modelName = options.modelName || "gemini-3.6-flash";
+    this.modelName = options.modelName || "gemini-3.7-flash";
     if (options.systemPrompt !== void 0) {
       this.systemPrompt = options.systemPrompt;
     } else {
@@ -640,6 +674,7 @@ var BaseGemini = class {
       },
       history: []
     };
+    if (this.cachedContent) delete opts.config.systemInstruction;
     if (this.enableGrounding) {
       const existingTools = opts.config.tools || [];
       opts.config.tools = [...existingTools, { googleSearch: this.groundingConfig }];
@@ -817,6 +852,96 @@ ${contextText}
       logger_default.warn(`Model "${this.modelName}" is marked DEPRECATED by Google. Plan migration.`);
       this._deprecationWarned = true;
     }
+  }
+  /**
+   * Zeroes the cumulative usage counters. Call once at the start of any method
+   * that makes one or more API round-trips, before the first `_accumulateUsage()`.
+   * @protected
+   */
+  _resetUsage() {
+    this._cumulativeUsage = {
+      promptTokens: 0,
+      responseTokens: 0,
+      thoughtsTokens: 0,
+      cachedTokens: 0,
+      totalTokens: 0,
+      attempts: 0
+    };
+  }
+  /**
+   * Captures metadata from `response` and ADDS its token counts to the running
+   * cumulative total. Call once per API round-trip.
+   *
+   * Multi-round methods (agent tool loops, Transformer retries) make several
+   * calls per turn; assigning from the final response only — as the tool loops
+   * used to — reports the last round and undercounts the turn several-fold,
+   * because `promptTokens` grows with the accumulated history so the final
+   * round looks plausibly large on its own.
+   *
+   * `attempts` becomes the number of API round-trips in the turn.
+   *
+   * @param {Object} response - A single API response (or a stream's final chunk)
+   * @protected
+   */
+  _accumulateUsage(response) {
+    this._captureMetadata(response);
+    if (!this._cumulativeUsage) this._resetUsage();
+    const meta = this.lastResponseMetadata;
+    const cumulative = this._cumulativeUsage;
+    cumulative.promptTokens += meta.promptTokens || 0;
+    cumulative.responseTokens += meta.responseTokens || 0;
+    cumulative.thoughtsTokens += meta.thoughtsTokens || 0;
+    cumulative.cachedTokens += meta.cachedTokens || 0;
+    cumulative.totalTokens += meta.totalTokens || 0;
+    cumulative.attempts += 1;
+  }
+  /**
+   * Creates a per-round usage accumulator for a streamed response.
+   *
+   * `stream()` used to yield `usage: this.getLastUsage()` without ever reading
+   * `usageMetadata` off the stream — so the `done` event carried `null` on a
+   * fresh instance, or stale numbers from an unrelated earlier call on a reused
+   * one. `@google/genai` emits `usageMetadata` on stream chunks holding the
+   * running totals for that round, so the LAST chunk carrying it has the round's
+   * final counts. Grounding metadata can arrive on any chunk.
+   *
+   * Call `track(chunk)` for every chunk, then `commit()` once the round's stream
+   * is exhausted.
+   *
+   * @returns {{ track: (chunk: any) => void, commit: () => void }}
+   * @protected
+   */
+  _streamUsage() {
+    let usageChunk = null;
+    let groundingMetadata = null;
+    return {
+      track: (chunk) => {
+        if (chunk?.usageMetadata) usageChunk = chunk;
+        const grounding = chunk?.candidates?.[0]?.groundingMetadata;
+        if (grounding) groundingMetadata = grounding;
+      },
+      commit: () => {
+        if (!usageChunk) return;
+        this._accumulateUsage(groundingMetadata ? { ...usageChunk, candidates: [{ groundingMetadata }] } : usageChunk);
+      }
+    };
+  }
+  /**
+   * Extracts the user-visible text parts of a stream chunk.
+   *
+   * Reads EVERY part, not just `parts[0]` — a chunk can split text across parts,
+   * or carry a thought summary followed by answer text, and indexing `[0]`
+   * silently truncates the rest. `thought` parts are skipped: thought summaries
+   * must not be concatenated into the answer.
+   *
+   * @param {any} chunk
+   * @returns {string[]}
+   * @protected
+   */
+  _chunkTextParts(chunk) {
+    const parts = chunk?.candidates?.[0]?.content?.parts;
+    if (!Array.isArray(parts)) return [];
+    return parts.filter((p) => p?.text && !p.thought).map((p) => p.text);
   }
   /**
    * Returns structured usage data from the last API call for billing verification.
@@ -1024,7 +1149,6 @@ ${contextText}
    */
   async useCache(cacheName) {
     this.cachedContent = cacheName;
-    delete this.chatConfig.systemInstruction;
     if (this.chatSession) {
       await this.init(true);
     }
@@ -1159,6 +1283,7 @@ Always respond ONLY with a valid JSON object that strictly adheres to the expect
 
 Do not include any additional text, explanations, or formatting before or after the JSON object.
 `;
+var EXTRACTION_RETRY_NUDGE = `Your previous response could not be parsed as JSON. Respond with a single valid JSON object and NOTHING else \u2014 no prose, no explanations, no markdown code fences.`;
 var Transformer = class extends base_default {
   /**
    * @param {TransformerOptions} [options={}]
@@ -1268,14 +1393,27 @@ var Transformer = class extends base_default {
         await this.init(true);
       };
     }
-    let lastPayload = this._preparePayload(payload);
+    const originalPayload = this._preparePayload(payload);
     const messageOptions = {};
     if (opts.labels) messageOptions.labels = opts.labels;
     this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
     let lastError = null;
+    let lastModelOutput = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const transformedPayload = attempt === 0 ? await this.rawSend(lastPayload, messageOptions) : await this.rebuild(lastPayload, lastError.message);
+        let transformedPayload;
+        if (attempt === 0) {
+          transformedPayload = await this.rawSend(originalPayload, messageOptions);
+        } else if (lastModelOutput !== null) {
+          transformedPayload = await this.rebuild(lastModelOutput, lastError.message, messageOptions);
+        } else {
+          transformedPayload = await this.rawSend(
+            `${originalPayload}
+
+${EXTRACTION_RETRY_NUDGE}`,
+            messageOptions
+          );
+        }
         if (this.lastResponseMetadata) {
           this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
           this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
@@ -1284,15 +1422,20 @@ var Transformer = class extends base_default {
           this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
           this._cumulativeUsage.attempts = attempt + 1;
         }
-        lastPayload = transformedPayload;
         if (validator) {
-          await validator(transformedPayload);
+          try {
+            await validator(transformedPayload);
+          } catch (validationError) {
+            validationError._akValidationPayload = transformedPayload;
+            throw validationError;
+          }
         }
         logger_default.debug(`Transformation succeeded on attempt ${attempt + 1}`);
         if (opts._restoreGrounding) await opts._restoreGrounding();
         return transformedPayload;
       } catch (error) {
         lastError = error;
+        lastModelOutput = "_akValidationPayload" in error ? error._akValidationPayload : null;
         logger_default.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
         if (attempt >= maxRetries) {
           logger_default.error(`All ${maxRetries + 1} attempts failed.`);
@@ -1327,12 +1470,7 @@ var Transformer = class extends base_default {
       if (result.usageMetadata && logger_default.level !== "silent") {
         logger_default.debug(`API response: model=${result.modelVersion || "unknown"}, tokens=${result.usageMetadata.totalTokenCount}`);
       }
-      const modelResponse = result.text;
-      const extractedJSON = extractJSON(modelResponse);
-      if (extractedJSON?.data) {
-        return extractedJSON.data;
-      }
-      return extractedJSON;
+      return this._parseModelResponse(result);
     } catch (error) {
       if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
         throw new Error(`Invalid JSON response from Gemini: ${error.message}`);
@@ -1340,15 +1478,36 @@ var Transformer = class extends base_default {
       throw new Error(`Transformation failed: ${error.message}`);
     }
   }
+  // ── Response Parsing ─────────────────────────────────────────────────────
+  /**
+   * Turns a raw API response into the transformed payload.
+   *
+   * Shared by `rawSend()` and `rebuild()` so both apply the SAME two steps:
+   * `extractJSON()` (handles markdown fences, prose preambles and truncation
+   * recovery, where bare `JSON.parse` throws) and the `{data: …}` unwrap that
+   * seeded Transformers need — `seed()` always uses `format: 'json'`, which
+   * trains the model to answer in that envelope. `rebuild()` used to do neither,
+   * so a repair either threw on a fenced response or returned `{data: payload}`
+   * where attempt 0 returned `payload`.
+   *
+   * @param {Object} result - Raw API response
+   * @returns {Object} The transformed payload
+   * @protected
+   */
+  _parseModelResponse(result) {
+    const extracted = extractJSON(result?.text);
+    return extracted?.data ? extracted.data : extracted;
+  }
   // ── Rebuild ──────────────────────────────────────────────────────────────
   /**
    * Asks the model to fix a payload that failed validation.
    *
    * @param {Object} lastPayload - The payload that failed
    * @param {string} serverError - The error message
+   * @param {Object} [messageOptions={}] - Per-message options (e.g., labels)
    * @returns {Promise<Object>} Corrected payload
    */
-  async rebuild(lastPayload, serverError) {
+  async rebuild(lastPayload, serverError, messageOptions = {}) {
     await this.init();
     const prompt = `
 The previous JSON payload (below) failed validation.
@@ -1366,14 +1525,17 @@ Respond with JSON only \u2013 no comments or explanations.
 `;
     let result;
     try {
-      result = await this._withRetry(() => this.chatSession.sendMessage({ message: prompt }));
+      const sendConfig = this._getSendConfig(messageOptions.labels);
+      result = await this._withRetry(() => this.chatSession.sendMessage({
+        message: prompt,
+        ...sendConfig && { config: sendConfig }
+      }));
       this._captureMetadata(result);
     } catch (err) {
       throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
     }
     try {
-      const text = result.text ?? result.response ?? "";
-      return typeof text === "object" ? text : JSON.parse(text);
+      return this._parseModelResponse(result);
     } catch (parseErr) {
       throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
     }
@@ -1401,26 +1563,17 @@ Respond with JSON only \u2013 no comments or explanations.
     }
     contents.push({ role: "user", parts: [{ text: payloadStr }] });
     const mergedLabels = { ...this.labels, ...opts.labels || {} };
+    this._resetUsage();
     const result = await this._withRetry(() => this.genAIClient.models.generateContent({
       model: this.modelName,
       contents,
       config: {
-        ...this.chatConfig,
+        ...this._getChatCreateOptions().config,
         ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
       }
     }));
-    this._captureMetadata(result);
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-      cachedTokens: this.lastResponseMetadata.cachedTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
-    const modelResponse = result.text;
-    const extractedJSON = extractJSON(modelResponse);
-    let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
+    this._accumulateUsage(result);
+    let transformedPayload = this._parseModelResponse(result);
     if (validatorFn) {
       await validatorFn(transformedPayload);
     }
@@ -1531,16 +1684,9 @@ var Chat = class extends base_default {
     const sendParams = { message };
     const config = this._getSendConfig(opts.labels);
     if (config) sendParams.config = config;
+    this._resetUsage();
     const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
-    this._captureMetadata(result);
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-      cachedTokens: this.lastResponseMetadata.cachedTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
+    this._accumulateUsage(result);
     return {
       text: result.text || "",
       usage: this.getLastUsage()
@@ -1559,14 +1705,17 @@ var Chat = class extends base_default {
     const sendParams = { message };
     const config = this._getSendConfig(opts.labels);
     if (config) sendParams.config = config;
+    this._resetUsage();
+    const usage = this._streamUsage();
     const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream(sendParams));
     for await (const chunk of streamResponse) {
-      if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-        const text = chunk.candidates[0].content.parts[0].text;
+      usage.track(chunk);
+      for (const text of this._chunkTextParts(chunk)) {
         fullText += text;
         yield { type: "text", text };
       }
     }
+    usage.commit();
     yield {
       type: "done",
       fullText,
@@ -1626,7 +1775,7 @@ var Message = class extends base_default {
       model: this.modelName,
       contents,
       config: {
-        ...this.chatConfig,
+        ...this._getChatCreateOptions().config,
         ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
       }
     }));
@@ -1746,10 +1895,12 @@ var ToolAgent = class extends base_default {
     this._stopped = false;
     const allToolCalls = [];
     const sendConfig = this._getSendConfig(opts.labels);
+    this._resetUsage();
     let response = await this._withRetry(() => this.chatSession.sendMessage({
       message,
       ...sendConfig && { config: sendConfig }
     }));
+    this._accumulateUsage(response);
     for (let round = 0; round < this.maxToolRounds; round++) {
       if (this._stopped) break;
       const functionCalls = response.functionCalls;
@@ -1794,16 +1945,8 @@ var ToolAgent = class extends base_default {
         })),
         ...sendConfig && { config: sendConfig }
       }));
+      this._accumulateUsage(response);
     }
-    this._captureMetadata(response);
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-      cachedTokens: this.lastResponseMetadata.cachedTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
     return {
       text: response.text || "",
       toolCalls: allToolCalls,
@@ -1831,24 +1974,24 @@ var ToolAgent = class extends base_default {
     const allToolCalls = [];
     let fullText = "";
     const sendConfig = this._getSendConfig(opts.labels);
+    this._resetUsage();
     let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
       message,
       ...sendConfig && { config: sendConfig }
     }));
     for (let round = 0; round < this.maxToolRounds; round++) {
       if (this._stopped) break;
-      let roundText = "";
       const functionCalls = [];
+      const usage = this._streamUsage();
       for await (const chunk of streamResponse) {
-        if (chunk.functionCalls) {
-          functionCalls.push(...chunk.functionCalls);
-        } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-          const text = chunk.candidates[0].content.parts[0].text;
-          roundText += text;
+        usage.track(chunk);
+        if (chunk.functionCalls) functionCalls.push(...chunk.functionCalls);
+        for (const text of this._chunkTextParts(chunk)) {
           fullText += text;
           yield { type: "text", text };
         }
       }
+      usage.commit();
       if (functionCalls.length === 0) {
         yield {
           type: "done",
@@ -1934,6 +2077,7 @@ var ToolAgent = class extends base_default {
           toolResults.push({ id: r.id, name: r.name, result: r.result });
         }
       }
+      if (this._stopped) break;
       streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
         message: toolResults.map((r) => ({
           functionResponse: {
@@ -2772,10 +2916,12 @@ ${this.envOverview}`;
     const toolCalls = [];
     let consecutiveFailures = 0;
     const sendConfig = this._getSendConfig(opts.labels);
+    this._resetUsage();
     let response = await this._withRetry(() => this.chatSession.sendMessage({
       message,
       ...sendConfig && { config: sendConfig }
     }));
+    this._accumulateUsage(response);
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
       const functionCalls = response.functionCalls;
@@ -2816,17 +2962,9 @@ ${this.envOverview}`;
         })),
         ...sendConfig && { config: sendConfig }
       }));
+      this._accumulateUsage(response);
       if (consecutiveFailures >= this.maxRetries) break;
     }
-    this._captureMetadata(response);
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-      cachedTokens: this.lastResponseMetadata.cachedTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
     const codeExecutions = toolCalls.filter((tc) => tc.tool === "execute_code" || tc.tool === "write_and_run_code" || tc.tool === "fix_code" && tc.executed).map((tc) => ({
       code: tc.code || tc.fixedCode,
       purpose: this._slugify(tc.purpose),
@@ -2866,6 +3004,7 @@ ${this.envOverview}`;
     let fullText = "";
     let consecutiveFailures = 0;
     const sendConfig = this._getSendConfig(opts.labels);
+    this._resetUsage();
     let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
       message,
       ...sendConfig && { config: sendConfig }
@@ -2873,15 +3012,16 @@ ${this.envOverview}`;
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
       const functionCalls = [];
+      const usage = this._streamUsage();
       for await (const chunk of streamResponse) {
-        if (chunk.functionCalls) {
-          functionCalls.push(...chunk.functionCalls);
-        } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-          const text = chunk.candidates[0].content.parts[0].text;
+        usage.track(chunk);
+        if (chunk.functionCalls) functionCalls.push(...chunk.functionCalls);
+        for (const text of this._chunkTextParts(chunk)) {
           fullText += text;
           yield { type: "text", text };
         }
       }
+      usage.commit();
       if (functionCalls.length === 0) {
         const codeExecutions2 = toolCalls.filter((tc) => tc.tool === "execute_code" || tc.tool === "write_and_run_code" || tc.tool === "fix_code" && tc.executed).map((tc) => ({
           code: tc.code || tc.fixedCode,
@@ -3143,19 +3283,12 @@ ${serialized}` });
   async chat(message, opts = {}) {
     if (!this._initialized) await this.init();
     const sendConfig = this._getSendConfig(opts.labels);
+    this._resetUsage();
     const response = await this._withRetry(() => this.chatSession.sendMessage({
       message,
       ...sendConfig && { config: sendConfig }
     }));
-    this._captureMetadata(response);
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-      cachedTokens: this.lastResponseMetadata.cachedTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
+    this._accumulateUsage(response);
     return {
       text: response.text || "",
       usage: this.getLastUsage()
@@ -3173,17 +3306,20 @@ ${serialized}` });
     if (!this._initialized) await this.init();
     let fullText = "";
     const sendConfig = this._getSendConfig(opts.labels);
+    this._resetUsage();
+    const usage = this._streamUsage();
     const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
       message,
       ...sendConfig && { config: sendConfig }
     }));
     for await (const chunk of streamResponse) {
-      if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-        const text = chunk.candidates[0].content.parts[0].text;
+      usage.track(chunk);
+      for (const text of this._chunkTextParts(chunk)) {
         fullText += text;
         yield { type: "text", text };
       }
     }
+    usage.commit();
     yield {
       type: "done",
       fullText,

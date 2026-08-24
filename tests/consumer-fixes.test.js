@@ -104,8 +104,8 @@ describe('consumer-fixes (ak-gemini)', () => {
 			const msg = new Message({ ...KEY });
 			stubGen(msg, jest.fn(async () => fakeResponse('r', 1_000_000, 1_000_000, 'gemini-2.5-flash')));
 			const r = await msg.send('hi');
-			// gemini-2.5-flash: input 0.30, output 3.00 per M
-			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 3.00, 5);
+			// gemini-2.5-flash: input 0.30, output 2.50 per M
+			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 2.50, 5);
 		});
 
 		it('returns null estimatedCost when neither modelVersion nor requestedModel is priced', async () => {
@@ -123,7 +123,7 @@ describe('consumer-fixes (ak-gemini)', () => {
 		});
 
 		it('resolves -latest aliases for pricing', () => {
-			expect(resolvePricing('gemini-flash-latest')).toEqual(resolvePricing('gemini-3.6-flash'));
+			expect(resolvePricing('gemini-flash-latest')).toEqual(resolvePricing('gemini-3.7-flash'));
 			expect(resolvePricing('gemini-flash-lite-latest')).toEqual(resolvePricing('gemini-3.5-flash-lite'));
 			expect(resolvePricing('gemini-pro-latest')).toEqual(resolvePricing('gemini-3.1-pro-preview'));
 			expect(resolvePricing('totally-made-up')).toBeNull();
@@ -231,8 +231,8 @@ describe('consumer-fixes (ak-gemini)', () => {
 			const r = await msg.send('hi');
 			expect(r.usage.thoughtsTokens).toBe(1_000_000);
 			expect(r.usage.totalTokens).toBe(3_000_000);
-			// input 0.30 + (candidates 1M + thoughts 1M) * output 3.00 = 0.30 + 6.00
-			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 6.00, 5);
+			// input 0.30 + (candidates 1M + thoughts 1M) * output 2.50 = 0.30 + 5.00
+			expect(r.usage.estimatedCost).toBeCloseTo(0.30 + 5.00, 5);
 		});
 	});
 
@@ -284,8 +284,8 @@ describe('consumer-fixes (ak-gemini)', () => {
 			const msg = new Message({ ...KEY, modelName: 'gemini-2.5-flash' });
 			stubGen(msg, jest.fn(async () => cachedResponse(10_000, 8_000, 0)));
 			const r = await msg.send('hi');
-			// gemini-2.5-flash: input 0.30, cachedInput 0.05
-			const expected = (2_000 / 1e6) * 0.30 + (8_000 / 1e6) * 0.05;
+			// gemini-2.5-flash: input 0.30, cachedInput 0.03
+			const expected = (2_000 / 1e6) * 0.30 + (8_000 / 1e6) * 0.03;
 			expect(r.usage.estimatedCost).toBeCloseTo(expected, 10);
 		});
 
@@ -299,7 +299,7 @@ describe('consumer-fixes (ak-gemini)', () => {
 
 		it('computeCost never double-charges when cached >= prompt', () => {
 			// Defensive: a malformed response must not produce a negative billable count.
-			expect(computeCost('gemini-2.5-flash', 1_000, 0, 0, 5_000)).toBeCloseTo((1_000 / 1e6) * 0.05, 10);
+			expect(computeCost('gemini-2.5-flash', 1_000, 0, 0, 5_000)).toBeCloseTo((1_000 / 1e6) * 0.03, 10);
 		});
 
 		it('falls back to the full input rate when no cachedInput is published', () => {
@@ -323,7 +323,9 @@ describe('consumer-fixes (ak-gemini)', () => {
 		});
 
 		it('leaves untiered models on a single rate', () => {
-			expect(computeCost('gemini-3.6-flash', 1_000_000, 0)).toBeCloseTo(1.50, 10);
+			// 3.6-flash is untiered, and on its promo rate until 2026-12-31.
+			expect(computeCost('gemini-3.6-flash', 1_000_000, 0, 0, 0, { at: '2026-08-24' })).toBeCloseTo(0.75, 10);
+			expect(computeCost('gemini-3.6-flash', 1_000_000, 0, 0, 0, { at: '2027-01-01' })).toBeCloseTo(1.50, 10);
 		});
 	});
 
@@ -348,7 +350,7 @@ describe('consumer-fixes (ak-gemini)', () => {
 		});
 
 		it('includes the newly added models', () => {
-			expect(resolvePricing('gemini-3.6-flash')).toMatchObject({ input: 1.50, output: 7.50, cachedInput: 0.15 });
+			expect(resolvePricing('gemini-3.6-flash', { at: '2027-01-01' })).toMatchObject({ input: 1.50, output: 7.50, cachedInput: 0.15 });
 			expect(resolvePricing('gemini-3.5-flash-lite')).toMatchObject({ input: 0.30, output: 2.50, cachedInput: 0.03 });
 		});
 	});
@@ -497,6 +499,21 @@ describe('consumer-fixes (ak-gemini)', () => {
 			expect(seen[0].labels).toEqual({ app: 'my-app', component: 'agent' });
 		});
 
+		it('carries grounding tools and cachedContent into stateless Message.send', async () => {
+			// #7 — grounding tools and cachedContent live in _getChatCreateOptions(),
+			// not chatConfig, so a config built from chatConfig alone dropped both.
+			const seenConfig = [];
+			const msg = new Message({ ...KEY, systemPrompt: 'sys', enableGrounding: true });
+			msg.cachedContent = 'caches/abc';
+			stubGen(msg, jest.fn(async (req) => { seenConfig.push(req.config); return fakeResponse('ok', 1, 1); }));
+			await msg.send('hi');
+
+			expect(seenConfig[0].tools).toEqual([{ googleSearch: {} }]);
+			expect(seenConfig[0].cachedContent).toBe('caches/abc');
+			// #9 — a cache carries its own system instruction; strip it for this call
+			expect(seenConfig[0].systemInstruction).toBeUndefined();
+		});
+
 		it('does not attach labels on the non-vertex path', async () => {
 			const seen = [];
 			const chat = new Chat({ ...KEY, systemPrompt: 'You are a canary.', labels: { app: 'my-app' } });
@@ -506,6 +523,226 @@ describe('consumer-fixes (ak-gemini)', () => {
 
 			expect(seen[0].systemInstruction).toBe('You are a canary.');
 			expect(seen[0].labels).toBeUndefined();
+		});
+	});
+
+	// ── 2.7.0: streaming usage, chunk handling, retry class, cache detach ──
+	describe('2.7.0 defect sweep', () => {
+		/** Chunk with usageMetadata attached. */
+		const usageChunk = (prompt, candidates) => ({
+			usageMetadata: { promptTokenCount: prompt, candidatesTokenCount: candidates, totalTokenCount: prompt + candidates },
+			modelVersion: 'gemini-2.5-flash'
+		});
+		const textChunk = (...parts) => ({ candidates: [{ content: { parts } }] });
+
+		/** Stubs a chat session that replays scripted chunk arrays, one array per round. */
+		function stubStream(instance, rounds) {
+			let round = 0;
+			instance.genAIClient = {
+				models: { list: jest.fn(async () => []) },
+				chats: {
+					create: jest.fn((createOpts) => ({
+						config: createOpts.config,
+						getHistory: () => [],
+						async sendMessage() { return { ...usageChunk(100, 50), text: 'ok' }; },
+						async sendMessageStream() {
+							const chunks = rounds[round++] || [];
+							return (async function* () { for (const c of chunks) yield c; })();
+						}
+					}))
+				}
+			};
+		}
+
+		// ── #1 stream() usage ──
+		it('Chat.stream reports real usage on the done event', async () => {
+			const chat = new Chat({ ...KEY, modelName: 'gemini-2.5-flash' });
+			stubStream(chat, [[textChunk({ text: 'hi' }), usageChunk(1_000_000, 0)]]);
+			await chat.init();
+
+			let done = null;
+			for await (const ev of chat.stream('hello')) if (ev.type === 'done') done = ev;
+
+			expect(done.usage).not.toBeNull();
+			expect(done.usage.promptTokens).toBe(1_000_000);
+			expect(done.usage.estimatedCost).toBeCloseTo(0.30, 5);
+		});
+
+		it('Chat.stream does not report stale usage from an earlier call', async () => {
+			const chat = new Chat({ ...KEY, modelName: 'gemini-2.5-flash' });
+			stubStream(chat, [[textChunk({ text: 'a' }), usageChunk(10, 5)]]);
+			await chat.init();
+			// Seed stale instance state, as a prior non-streaming send would.
+			chat._captureMetadata({ ...usageChunk(999_999, 999_999) });
+
+			let done = null;
+			for await (const ev of chat.stream('hello')) if (ev.type === 'done') done = ev;
+			expect(done.usage.promptTokens).toBe(10);
+		});
+
+		// ── #2 text alongside functionCall ──
+		it('ToolAgent.stream keeps text emitted in the same chunk as a functionCall', async () => {
+			const agent = new ToolAgent({
+				...KEY, modelName: 'gemini-2.5-flash',
+				tools: [{ name: 'noop', description: 'n', parametersJsonSchema: { type: 'object' } }],
+				toolExecutor: async () => 'done'
+			});
+			// Round 0: preamble text AND a functionCall in one chunk. Round 1: final answer.
+			stubStream(agent, [
+				[{ functionCalls: [{ id: '1', name: 'noop', args: {} }], ...textChunk({ text: 'Let me look that up…' }) }, usageChunk(10, 5)],
+				[textChunk({ text: 'Found it.' }), usageChunk(20, 10)]
+			]);
+			await agent.init();
+
+			const texts = [];
+			let done = null;
+			for await (const ev of agent.stream('hi')) {
+				if (ev.type === 'text') texts.push(ev.text);
+				if (ev.type === 'done') done = ev;
+			}
+			expect(texts).toContain('Let me look that up…');
+			expect(done.fullText).toBe('Let me look that up…Found it.');
+		});
+
+		// ── #3 multi-part chunks ──
+		it('Chat.stream reads every part and skips thought summaries', async () => {
+			const chat = new Chat({ ...KEY, modelName: 'gemini-2.5-flash' });
+			stubStream(chat, [[
+				textChunk({ text: 'thinking out loud', thought: true }, { text: 'part one ' }, { text: 'part two' }),
+				usageChunk(10, 5)
+			]]);
+			await chat.init();
+
+			let done = null;
+			for await (const ev of chat.stream('hello')) if (ev.type === 'done') done = ev;
+			expect(done.fullText).toBe('part one part two');
+		});
+
+		// ── #5 multi-round token accounting ──
+		it('ToolAgent.chat sums tokens across every round', async () => {
+			const agent = new ToolAgent({
+				...KEY, modelName: 'gemini-2.5-flash',
+				tools: [{ name: 'noop', description: 'n', parametersJsonSchema: { type: 'object' } }],
+				toolExecutor: async () => 'done'
+			});
+			let call = 0;
+			const responses = [
+				{ ...usageChunk(100, 10), functionCalls: [{ id: '1', name: 'noop', args: {} }], text: '' },
+				{ ...usageChunk(200, 20), text: 'final' }
+			];
+			agent.genAIClient = {
+				models: { list: jest.fn(async () => []) },
+				chats: { create: jest.fn((o) => ({ config: o.config, getHistory: () => [], sendMessage: async () => responses[call++] })) }
+			};
+			await agent.init();
+			const r = await agent.chat('hi');
+
+			expect(r.usage.promptTokens).toBe(300);   // 100 + 200, not just the final round
+			expect(r.usage.responseTokens).toBe(30);
+			expect(r.usage.attempts).toBe(2);         // two API round-trips
+		});
+
+		// ── #4 rebuild() shares rawSend()'s parsing ──
+		it('Transformer.rebuild extracts fenced JSON and unwraps the data envelope', async () => {
+			const tf = new Transformer({ ...KEY, modelName: 'gemini-2.5-flash' });
+			tf.genAIClient = {
+				models: { list: jest.fn(async () => []) },
+				chats: {
+					create: jest.fn((o) => ({
+						config: o.config, getHistory: () => [],
+						sendMessage: async () => ({ ...usageChunk(10, 5), text: '```json\n{"data":{"fixed":true}}\n```' })
+					}))
+				}
+			};
+			await tf.init();
+			// Bare JSON.parse threw on the fence; no unwrap returned {data:{...}}.
+			expect(await tf.rebuild({ broken: true }, 'nope')).toEqual({ fixed: true });
+		});
+
+		// ── #6 extraction failures retry the task, not rebuild() ──
+		it('Transformer.send retries an unparseable response with a format nudge', async () => {
+			const tf = new Transformer({ ...KEY, modelName: 'gemini-2.5-flash', retryDelay: 1 });
+			const sent = [];
+			let call = 0;
+			tf.genAIClient = {
+				models: { list: jest.fn(async () => []) },
+				chats: {
+					create: jest.fn((o) => ({
+						config: o.config, getHistory: () => [],
+						sendMessage: async ({ message }) => {
+							sent.push(message);
+							// Attempt 0 returns prose; attempt 1 returns valid JSON.
+							return call++ === 0
+								? { ...usageChunk(10, 5), text: 'Here is a haiku about the ocean instead.' }
+								: { ...usageChunk(10, 5), text: '{"ok":true}' };
+						}
+					}))
+				}
+			};
+			await tf.init();
+			const out = await tf.send({ some: 'input' });
+
+			expect(out).toEqual({ ok: true });
+			// The retry must NOT be a rebuild() prompt calling the user's input a bad payload.
+			expect(sent[1]).not.toContain('BAD PAYLOAD');
+			expect(sent[1]).toContain('could not be parsed as JSON');
+			expect(sent[1]).toContain('"some": "input"');
+		});
+
+		it('Transformer.send still rebuilds the model output on a validation failure', async () => {
+			const tf = new Transformer({ ...KEY, modelName: 'gemini-2.5-flash', retryDelay: 1 });
+			const sent = [];
+			let call = 0;
+			tf.genAIClient = {
+				models: { list: jest.fn(async () => []) },
+				chats: {
+					create: jest.fn((o) => ({
+						config: o.config, getHistory: () => [],
+						sendMessage: async ({ message }) => {
+							sent.push(message);
+							return call++ === 0
+								? { ...usageChunk(10, 5), text: '{"wrong":1}' }
+								: { ...usageChunk(10, 5), text: '{"right":1}' };
+						}
+					}))
+				}
+			};
+			await tf.init();
+			const validator = async (p) => { if (!p.right) throw new Error('needs a right key'); };
+			const out = await tf.send({ some: 'input' }, {}, validator);
+
+			expect(out).toEqual({ right: 1 });
+			// The repair prompt shows the MODEL's output, not the user's input.
+			expect(sent[1]).toContain('BAD PAYLOAD');
+			expect(sent[1]).toContain('"wrong": 1');
+		});
+
+		// ── #9 useCache no longer destroys the system prompt ──
+		it('detaching a cache restores the system instruction', async () => {
+			const chat = new Chat({ ...KEY, systemPrompt: 'stay yourself' });
+			stubStream(chat, []);
+			await chat.init();
+
+			await chat.useCache('caches/abc');
+			expect(chat._getChatCreateOptions().config.systemInstruction).toBeUndefined();
+			expect(chat.chatConfig.systemInstruction).toBe('stay yourself');
+
+			chat.cachedContent = null;
+			expect(chat._getChatCreateOptions().config.systemInstruction).toBe('stay yourself');
+		});
+
+		// ── pricing table freshness ──
+		it('prices gemini-3.7-flash on its promo rate and after it lapses', () => {
+			expect(computeCost('gemini-3.7-flash', 1_000_000, 1_000_000, 0, 0, { at: '2026-08-24' }))
+				.toBeCloseTo(0.75 + 3.75, 10);
+			expect(computeCost('gemini-3.7-flash', 1_000_000, 1_000_000, 0, 0, { at: '2027-01-01' }))
+				.toBeCloseTo(1.50 + 7.50, 10);
+			expect(resolvePricing('gemini-3.7-flash', { at: '2026-08-24' }).introUntil).toBe('2026-12-31');
+			expect(resolvePricing('gemini-3.7-flash', { at: '2027-01-01' }).introUntil).toBeUndefined();
+		});
+
+		it('defaults to gemini-3.7-flash', () => {
+			expect(new Chat({ ...KEY }).modelName).toBe('gemini-3.7-flash');
 		});
 	});
 });

@@ -53,7 +53,7 @@ import AI from 'ak-gemini';
 const t = new AI.Transformer({ ... });
 ```
 
-The default model is `gemini-3.6-flash`. Override with `modelName`:
+The default model is `gemini-3.7-flash`. Override with `modelName`:
 
 ```javascript
 new Chat({ modelName: 'gemini-2.5-pro' });
@@ -1240,7 +1240,8 @@ app.post('/classify', async (req, res) => {
 |---|---|---|---|
 | `gemini-2.0-flash-lite` | Fastest | Cheapest | Classification, extraction, simple tasks |
 | `gemini-2.0-flash` | Fast | Low | General purpose, good quality |
-| `gemini-3.6-flash` | Fast | Low | Current stable flagship (default) |
+| `gemini-3.7-flash` | Fast | Low | Current stable flagship (default) |
+| `gemini-3.6-flash` | Fast | Low | Previous flagship; same rate card as 3.7 |
 | `gemini-2.5-flash` | Medium | Low | Best balance of speed and quality |
 | `gemini-2.5-pro` | Slow | High | Complex reasoning, code, analysis |
 
@@ -1430,7 +1431,7 @@ const { Transformer, Chat, Embedding } = require('ak-gemini');
 
 | Option | Type | Default |
 |---|---|---|
-| `modelName` | string | `'gemini-3.6-flash'` |
+| `modelName` | string | `'gemini-3.7-flash'` |
 | `systemPrompt` | string \| null \| false | varies by class |
 | `apiKey` | string | `GEMINI_API_KEY` env var |
 | `vertexai` | boolean | `false` |

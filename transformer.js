@@ -24,6 +24,13 @@ Do not include any additional text, explanations, or formatting before or after 
 `;
 
 /**
+ * Appended to the original task when a previous attempt returned output that
+ * could not be parsed as JSON. The failed response is already in the chat
+ * history, so this only needs to correct the format — not restate the task.
+ */
+const EXTRACTION_RETRY_NUDGE = `Your previous response could not be parsed as JSON. Respond with a single valid JSON object and NOTHING else — no prose, no explanations, no markdown code fences.`;
+
+/**
  * @typedef {import('./types').TransformerOptions} TransformerOptions
  * @typedef {import('./types').AsyncValidatorFunction} AsyncValidatorFunction
  * @typedef {import('./types').TransformationExample} TransformationExample
@@ -194,7 +201,7 @@ class Transformer extends BaseGemini {
 		}
 
 		// Prepare the payload
-		let lastPayload = this._preparePayload(payload);
+		const originalPayload = this._preparePayload(payload);
 
 		// Extract per-message labels
 		const messageOptions = {};
@@ -204,12 +211,30 @@ class Transformer extends BaseGemini {
 		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
 
 		let lastError = null;
+		// The payload the MODEL produced, when it produced a parseable one. Stays
+		// null after an extraction failure — there is nothing to repair.
+		let lastModelOutput = null;
 
 		for (let attempt = 0; attempt <= maxRetries; attempt++) {
 			try {
-				const transformedPayload = (attempt === 0)
-					? await this.rawSend(lastPayload, messageOptions)
-					: await this.rebuild(lastPayload, lastError.message);
+				let transformedPayload;
+				if (attempt === 0) {
+					transformedPayload = await this.rawSend(originalPayload, messageOptions);
+				} else if (lastModelOutput !== null) {
+					// Validation failure: the model produced parseable output that the
+					// validator rejected. Repair the payload it actually returned.
+					transformedPayload = await this.rebuild(lastModelOutput, lastError.message, messageOptions);
+				} else {
+					// Extraction failure: the model returned something unparseable, so
+					// there is no bad payload to repair. rebuild() would hand it the
+					// ORIGINAL INPUT labelled "BAD PAYLOAD" (double-encoded, since
+					// _preparePayload already stringified it) — re-send the task with a
+					// format nudge instead.
+					transformedPayload = await this.rawSend(
+						`${originalPayload}\n\n${EXTRACTION_RETRY_NUDGE}`,
+						messageOptions
+					);
+				}
 
 				// Accumulate token usage
 				if (this.lastResponseMetadata) {
@@ -221,11 +246,16 @@ class Transformer extends BaseGemini {
 					this._cumulativeUsage.attempts = attempt + 1;
 				}
 
-				lastPayload = transformedPayload;
-
 				// Validate
 				if (validator) {
-					await validator(transformedPayload);
+					try {
+						await validator(transformedPayload);
+					} catch (validationError) {
+						// Tag it so the next attempt repairs this payload rather than
+						// treating the failure as an extraction problem.
+						validationError._akValidationPayload = transformedPayload;
+						throw validationError;
+					}
 				}
 
 				log.debug(`Transformation succeeded on attempt ${attempt + 1}`);
@@ -235,6 +265,7 @@ class Transformer extends BaseGemini {
 
 			} catch (error) {
 				lastError = error;
+				lastModelOutput = '_akValidationPayload' in error ? error._akValidationPayload : null;
 				log.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
 
 				if (attempt >= maxRetries) {
@@ -283,14 +314,7 @@ class Transformer extends BaseGemini {
 				log.debug(`API response: model=${result.modelVersion || 'unknown'}, tokens=${result.usageMetadata.totalTokenCount}`);
 			}
 
-			const modelResponse = result.text;
-			const extractedJSON = extractJSON(modelResponse);
-
-			// Unwrap the 'data' property if it exists
-			if (extractedJSON?.data) {
-				return extractedJSON.data;
-			}
-			return extractedJSON;
+			return this._parseModelResponse(result);
 
 		} catch (error) {
 			if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
@@ -300,6 +324,28 @@ class Transformer extends BaseGemini {
 		}
 	}
 
+	// ── Response Parsing ─────────────────────────────────────────────────────
+
+	/**
+	 * Turns a raw API response into the transformed payload.
+	 *
+	 * Shared by `rawSend()` and `rebuild()` so both apply the SAME two steps:
+	 * `extractJSON()` (handles markdown fences, prose preambles and truncation
+	 * recovery, where bare `JSON.parse` throws) and the `{data: …}` unwrap that
+	 * seeded Transformers need — `seed()` always uses `format: 'json'`, which
+	 * trains the model to answer in that envelope. `rebuild()` used to do neither,
+	 * so a repair either threw on a fenced response or returned `{data: payload}`
+	 * where attempt 0 returned `payload`.
+	 *
+	 * @param {Object} result - Raw API response
+	 * @returns {Object} The transformed payload
+	 * @protected
+	 */
+	_parseModelResponse(result) {
+		const extracted = extractJSON(result?.text);
+		return extracted?.data ? extracted.data : extracted;
+	}
+
 	// ── Rebuild ──────────────────────────────────────────────────────────────
 
 	/**
@@ -307,9 +353,10 @@ class Transformer extends BaseGemini {
 	 *
 	 * @param {Object} lastPayload - The payload that failed
 	 * @param {string} serverError - The error message
+	 * @param {Object} [messageOptions={}] - Per-message options (e.g., labels)
 	 * @returns {Promise<Object>} Corrected payload
 	 */
-	async rebuild(lastPayload, serverError) {
+	async rebuild(lastPayload, serverError, messageOptions = {}) {
 		await this.init();
 		const prompt = `
 The previous JSON payload (below) failed validation.
@@ -328,15 +375,18 @@ Respond with JSON only – no comments or explanations.
 
 		let result;
 		try {
-			result = await this._withRetry(() => this.chatSession.sendMessage({ message: prompt }));
+			const sendConfig = this._getSendConfig(messageOptions.labels);
+			result = await this._withRetry(() => this.chatSession.sendMessage({
+				message: prompt,
+				...(sendConfig && { config: sendConfig })
+			}));
 			this._captureMetadata(result);
 		} catch (err) {
 			throw new Error(`Gemini call failed while repairing payload: ${err.message}`);
 		}
 
 		try {
-			const text = result.text ?? result.response ?? '';
-			return typeof text === 'object' ? text : JSON.parse(text);
+			return this._parseModelResponse(result);
 		} catch (parseErr) {
 			throw new Error(`Gemini returned non-JSON while repairing payload: ${parseErr.message}`);
 		}
@@ -375,29 +425,21 @@ Respond with JSON only – no comments or explanations.
 
 		const mergedLabels = { ...this.labels, ...(opts.labels || {}) };
 
+		// Build from _getChatCreateOptions() rather than raw chatConfig: grounding
+		// tools and cachedContent live there, not in chatConfig, so a stateless send
+		// built from chatConfig alone silently ignored enableGrounding and useCache().
+		this._resetUsage();
 		const result = await this._withRetry(() => this.genAIClient.models.generateContent({
 			model: this.modelName,
 			contents: contents,
 			config: {
-				...this.chatConfig,
+				...this._getChatCreateOptions().config,
 				...(this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels })
 			}
 		}));
+		this._accumulateUsage(result);
 
-		this._captureMetadata(result);
-
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			thoughtsTokens: this.lastResponseMetadata.thoughtsTokens,
-			cachedTokens: this.lastResponseMetadata.cachedTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
-
-		const modelResponse = result.text;
-		const extractedJSON = extractJSON(modelResponse);
-		let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
+		let transformedPayload = this._parseModelResponse(result);
 
 		if (validatorFn) {
 			await validatorFn(transformedPayload);
