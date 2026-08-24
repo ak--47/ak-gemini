@@ -2,7 +2,7 @@
 	"name": "ak-gemini",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Generative AI Helper for doing... everything",
-	"version": "2.6.1",
+	"version": "2.6.2",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -21,7 +21,7 @@
 		"logger.js",
 		"GUIDE.md",
 		"UPGRADING.md",
-    "CHANGELOG.md"
+		"CHANGELOG.md"
 	],
 	"types": "types.d.ts",
 	"exports": {

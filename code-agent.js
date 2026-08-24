@@ -862,8 +862,13 @@ ${lang.codeRules}
 
 		const toolCalls = [];
 		let consecutiveFailures = 0;
+		// undefined unless there are per-message label overrides; see _getSendConfig()
+		const sendConfig = this._getSendConfig(opts.labels);
 
-		let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
+		let response = await this._withRetry(() => this.chatSession.sendMessage({
+			message,
+			...(sendConfig && { config: sendConfig })
+		}));
 
 		for (let round = 0; round < this.maxRounds; round++) {
 			if (this._stopped) break;
@@ -911,7 +916,8 @@ ${lang.codeRules}
 						name: r.name,
 						response: { output: r.result }
 					}
-				}))
+				})),
+				...(sendConfig && { config: sendConfig })
 			}));
 
 			if (consecutiveFailures >= this.maxRetries) break;
@@ -973,8 +979,13 @@ ${lang.codeRules}
 		const toolCalls = [];
 		let fullText = '';
 		let consecutiveFailures = 0;
+		// undefined unless there are per-message label overrides; see _getSendConfig()
+		const sendConfig = this._getSendConfig(opts.labels);
 
-		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
+			message,
+			...(sendConfig && { config: sendConfig })
+		}));
 
 		for (let round = 0; round < this.maxRounds; round++) {
 			if (this._stopped) break;
@@ -1083,7 +1094,8 @@ ${lang.codeRules}
 						name: r.name,
 						response: { output: r.result }
 					}
-				}))
+				})),
+				...(sendConfig && { config: sendConfig })
 			}));
 
 			if (consecutiveFailures >= this.maxRetries) break;

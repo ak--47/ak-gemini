@@ -206,7 +206,12 @@ class RagAgent extends BaseGemini {
 	async chat(message, opts = {}) {
 		if (!this._initialized) await this.init();
 
-		const response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
+		// undefined unless there are per-message label overrides; see _getSendConfig()
+		const sendConfig = this._getSendConfig(opts.labels);
+		const response = await this._withRetry(() => this.chatSession.sendMessage({
+			message,
+			...(sendConfig && { config: sendConfig })
+		}));
 
 		this._captureMetadata(response);
 
@@ -238,7 +243,12 @@ class RagAgent extends BaseGemini {
 		if (!this._initialized) await this.init();
 
 		let fullText = '';
-		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+		// undefined unless there are per-message label overrides; see _getSendConfig()
+		const sendConfig = this._getSendConfig(opts.labels);
+		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
+			message,
+			...(sendConfig && { config: sendConfig })
+		}));
 
 		for await (const chunk of streamResponse) {
 			if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {

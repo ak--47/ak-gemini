@@ -647,6 +647,32 @@ var BaseGemini = class {
     }
     return opts;
   }
+  /**
+   * Builds the `config` for a per-message `chatSession.sendMessage()` /
+   * `sendMessageStream()` call.
+   *
+   * `@google/genai` resolves it as `config: params.config ?? this.config` —
+   * a per-message config REPLACES the create-time session config rather than
+   * merging with it. So anything passed per-message must carry the full
+   * create-time config forward, or `systemInstruction`, `responseSchema`,
+   * `responseMimeType`, `maxOutputTokens`, `thinkingConfig`, `tools` and
+   * `cachedContent` are all silently dropped for that request.
+   *
+   * Returns `undefined` when there is nothing to override, so the call site
+   * can omit `config` entirely and let the SDK fall through to the session
+   * config it already holds.
+   *
+   * @param {Record<string, string>} [perMessageLabels] - Per-message billing labels (Vertex only)
+   * @returns {Object|undefined}
+   * @protected
+   */
+  _getSendConfig(perMessageLabels) {
+    const hasOverride = this.vertexai && perMessageLabels && Object.keys(perMessageLabels).length > 0;
+    if (!hasOverride) return void 0;
+    const config = { ...this._getChatCreateOptions().config };
+    config.labels = { ...config.labels || {}, ...perMessageLabels };
+    return config;
+  }
   // ── Chat Session Management ──────────────────────────────────────────────
   /**
    * Creates a new chat session with the given history.
@@ -1292,13 +1318,10 @@ var Transformer = class extends base_default {
       throw new Error("Chat session not initialized.");
     }
     const actualPayload = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
-    const mergedLabels = { ...this.labels, ...messageOptions.labels || {} };
-    const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
     try {
       const sendParams = { message: actualPayload };
-      if (hasLabels) {
-        sendParams.config = { labels: mergedLabels };
-      }
+      const config = this._getSendConfig(messageOptions.labels);
+      if (config) sendParams.config = config;
       const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
       this._captureMetadata(result);
       if (result.usageMetadata && logger_default.level !== "silent") {
@@ -1505,12 +1528,9 @@ var Chat = class extends base_default {
    */
   async send(message, opts = {}) {
     if (!this.chatSession) await this.init();
-    const mergedLabels = { ...this.labels, ...opts.labels || {} };
-    const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
     const sendParams = { message };
-    if (hasLabels) {
-      sendParams.config = { labels: mergedLabels };
-    }
+    const config = this._getSendConfig(opts.labels);
+    if (config) sendParams.config = config;
     const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
     this._captureMetadata(result);
     this._cumulativeUsage = {
@@ -1536,7 +1556,10 @@ var Chat = class extends base_default {
   async *stream(message, opts = {}) {
     if (!this.chatSession) await this.init();
     let fullText = "";
-    const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+    const sendParams = { message };
+    const config = this._getSendConfig(opts.labels);
+    if (config) sendParams.config = config;
+    const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream(sendParams));
     for await (const chunk of streamResponse) {
       if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
         const text = chunk.candidates[0].content.parts[0].text;
@@ -1722,7 +1745,11 @@ var ToolAgent = class extends base_default {
     if (!this.chatSession) await this.init();
     this._stopped = false;
     const allToolCalls = [];
-    let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
+    const sendConfig = this._getSendConfig(opts.labels);
+    let response = await this._withRetry(() => this.chatSession.sendMessage({
+      message,
+      ...sendConfig && { config: sendConfig }
+    }));
     for (let round = 0; round < this.maxToolRounds; round++) {
       if (this._stopped) break;
       const functionCalls = response.functionCalls;
@@ -1764,7 +1791,8 @@ var ToolAgent = class extends base_default {
             name: r.name,
             response: { output: r.result }
           }
-        }))
+        })),
+        ...sendConfig && { config: sendConfig }
       }));
     }
     this._captureMetadata(response);
@@ -1802,7 +1830,11 @@ var ToolAgent = class extends base_default {
     this._stopped = false;
     const allToolCalls = [];
     let fullText = "";
-    let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+    const sendConfig = this._getSendConfig(opts.labels);
+    let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
+      message,
+      ...sendConfig && { config: sendConfig }
+    }));
     for (let round = 0; round < this.maxToolRounds; round++) {
       if (this._stopped) break;
       let roundText = "";
@@ -1909,7 +1941,8 @@ var ToolAgent = class extends base_default {
             name: r.name,
             response: { output: r.result }
           }
-        }))
+        })),
+        ...sendConfig && { config: sendConfig }
       }));
     }
     yield {
@@ -2738,7 +2771,11 @@ ${this.envOverview}`;
     this._stopped = false;
     const toolCalls = [];
     let consecutiveFailures = 0;
-    let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
+    const sendConfig = this._getSendConfig(opts.labels);
+    let response = await this._withRetry(() => this.chatSession.sendMessage({
+      message,
+      ...sendConfig && { config: sendConfig }
+    }));
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
       const functionCalls = response.functionCalls;
@@ -2776,7 +2813,8 @@ ${this.envOverview}`;
             name: r.name,
             response: { output: r.result }
           }
-        }))
+        })),
+        ...sendConfig && { config: sendConfig }
       }));
       if (consecutiveFailures >= this.maxRetries) break;
     }
@@ -2827,7 +2865,11 @@ ${this.envOverview}`;
     const toolCalls = [];
     let fullText = "";
     let consecutiveFailures = 0;
-    let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+    const sendConfig = this._getSendConfig(opts.labels);
+    let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
+      message,
+      ...sendConfig && { config: sendConfig }
+    }));
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
       const functionCalls = [];
@@ -2910,7 +2952,8 @@ ${this.envOverview}`;
             name: r.name,
             response: { output: r.result }
           }
-        }))
+        })),
+        ...sendConfig && { config: sendConfig }
       }));
       if (consecutiveFailures >= this.maxRetries) break;
     }
@@ -3099,7 +3142,11 @@ ${serialized}` });
    */
   async chat(message, opts = {}) {
     if (!this._initialized) await this.init();
-    const response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
+    const sendConfig = this._getSendConfig(opts.labels);
+    const response = await this._withRetry(() => this.chatSession.sendMessage({
+      message,
+      ...sendConfig && { config: sendConfig }
+    }));
     this._captureMetadata(response);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -3125,7 +3172,11 @@ ${serialized}` });
   async *stream(message, opts = {}) {
     if (!this._initialized) await this.init();
     let fullText = "";
-    const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+    const sendConfig = this._getSendConfig(opts.labels);
+    const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
+      message,
+      ...sendConfig && { config: sendConfig }
+    }));
     for await (const chunk of streamResponse) {
       if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
         const text = chunk.candidates[0].content.parts[0].text;

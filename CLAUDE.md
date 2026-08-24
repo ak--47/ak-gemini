@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v2.6.1) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v2.6.2) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -300,5 +300,8 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - `outputDimensionality` controls vector size (supported by gemini-embedding-001)
 
 ### Billing Labels (Vertex AI)
-- Constructor-level: `labels: { app: 'myapp', env: 'prod' }`
-- Per-message: `send(payload, { labels: { ... } })`
+- Constructor-level: `labels: { app: 'myapp', env: 'prod' }` — folded into the session config by `_getChatCreateOptions()`
+- Per-message: `send(payload, { labels: { ... } })` / `chat()` / `stream()` on every chat-session class
+- **`@google/genai` resolves a chat send as `config: params.config ?? this.config` — a per-message config REPLACES the create-time session config, it does NOT merge.** Never pass a bare `{ config: { labels } }` to `sendMessage`/`sendMessageStream`; it silently drops `systemInstruction`, `responseSchema`, `responseMimeType`, `maxOutputTokens`, `thinkingConfig`, `tools` and `cachedContent` for that request. This was the 2.6.2 bug.
+- Use the protected `BaseGemini._getSendConfig(perMessageLabels)` helper for any per-message config. It returns `undefined` when there is nothing to override (so the SDK falls through to the session config) and otherwise spreads the full `_getChatCreateOptions().config` with labels merged on top.
+- `Message` is the exception — it calls `models.generateContent()` directly and builds the full config inline (`...this.chatConfig`), so it never had the bug.

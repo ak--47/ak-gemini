@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.6.2
+
+**Patch** bump — bug fix only. No API-surface changes, no behavior change for
+callers who don't use `labels`.
+
+### Fixed
+- **Billing `labels` no longer discard the entire generation config.**
+  `@google/genai` resolves a chat send as `config: params.config ?? this.config`
+  — a per-message config **replaces** the create-time session config instead of
+  merging with it. `Chat.send()` and `Transformer.rawSend()` were setting
+  `config: { labels }` whenever labels were present, which silently dropped
+  `systemInstruction`, `responseSchema`, `responseMimeType`, `maxOutputTokens`,
+  `thinkingConfig`, `tools` and `cachedContent` for that request.
+
+  Symptom: any caller using `vertexai: true` + `labels` got a model that ignored
+  the system prompt and JSON mode and returned prose. In `Transformer.send()`
+  this was masked — attempt 0 (`rawSend`) failed with `Could not extract valid
+  JSON from model response`, then attempt 1 (`rebuild`, which sends no
+  per-message config) succeeded — so it burned a full generation on every call
+  and failed outright when the retry budget ran out.
+
+  A per-message `config` is now only sent when there is an actual per-message
+  override, and when sent it carries the full create-time config forward via the
+  new protected `_getSendConfig()` helper on `BaseGemini`. `Message.send()` was
+  already correct (it spreads `...this.chatConfig`) and is unchanged.
+
+  If you applied the workaround of moving `labels` into `chatConfig`, it still
+  works — you can move them back to the top-level `labels` option at your
+  convenience.
+
+### Added
+- `Chat.stream(message, { labels })` now honours per-message labels. It
+  previously accepted and ignored `opts`.
+- Offline regression coverage in `tests/consumer-fixes.test.js` asserting that
+  `systemInstruction` / `responseSchema` / `responseMimeType` survive alongside
+  both instance-level and per-message labels.
+
 ## 2.6.1
 
 **Patch** bump — the default model changes when you don't pass `modelName`

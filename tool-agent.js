@@ -139,8 +139,13 @@ class ToolAgent extends BaseGemini {
 		this._stopped = false;
 
 		const allToolCalls = [];
+		// undefined unless there are per-message label overrides; see _getSendConfig()
+		const sendConfig = this._getSendConfig(opts.labels);
 
-		let response = await this._withRetry(() => this.chatSession.sendMessage({ message }));
+		let response = await this._withRetry(() => this.chatSession.sendMessage({
+			message,
+			...(sendConfig && { config: sendConfig })
+		}));
 
 		for (let round = 0; round < this.maxToolRounds; round++) {
 			if (this._stopped) break;
@@ -190,7 +195,8 @@ class ToolAgent extends BaseGemini {
 						name: r.name,
 						response: { output: r.result }
 					}
-				}))
+				})),
+				...(sendConfig && { config: sendConfig })
 			}));
 		}
 
@@ -235,8 +241,13 @@ class ToolAgent extends BaseGemini {
 
 		const allToolCalls = [];
 		let fullText = '';
+		// undefined unless there are per-message label overrides; see _getSendConfig()
+		const sendConfig = this._getSendConfig(opts.labels);
 
-		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
+			message,
+			...(sendConfig && { config: sendConfig })
+		}));
 
 		for (let round = 0; round < this.maxToolRounds; round++) {
 			if (this._stopped) break;
@@ -360,7 +371,8 @@ class ToolAgent extends BaseGemini {
 						name: r.name,
 						response: { output: r.result }
 					}
-				}))
+				})),
+				...(sendConfig && { config: sendConfig })
 			}));
 		}
 

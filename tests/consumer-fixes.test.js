@@ -6,7 +6,7 @@
  */
 
 import { jest } from '@jest/globals';
-import { Message, Chat } from '../index.js';
+import { Message, Chat, Transformer, ToolAgent } from '../index.js';
 import { validateSchema, resolvePricing, computeCost, MODEL_PRICING, MODEL_ALIASES, MODEL_PRICING_AS_OF, EFFORT_LEVELS } from '../index.js';
 
 const KEY = { apiKey: 'test-key', logLevel: 'silent' };
@@ -386,6 +386,126 @@ describe('consumer-fixes (ak-gemini)', () => {
 		it('rejects an unknown effort level at construction', () => {
 			expect(() => new Message({ ...KEY, effort: 'turbo' })).toThrow(/Invalid effort/);
 			expect(EFFORT_LEVELS).toContain('minimal');
+		});
+	});
+
+	// ── 2.6.2: per-message labels must not discard the session config ──
+	describe('per-message labels preserve the create-time generation config', () => {
+		const schema = { type: 'object', properties: { canary: { type: 'string' } }, required: ['canary'] };
+
+		/**
+		 * Stubs `chats.create` with a fake that reproduces the SDK's replace
+		 * semantics: `config: params.config ?? this.config` (@google/genai
+		 * dist/index.mjs, Chat#sendMessage). `seen` collects the config that
+		 * each send actually resolved to.
+		 */
+		function stubChats(instance, seen, text) {
+			instance.genAIClient = {
+				models: { list: jest.fn(async () => []) },
+				chats: {
+					create: jest.fn((createOpts) => ({
+						config: createOpts.config,
+						getHistory: () => [],
+						async sendMessage(params) {
+							seen.push(params.config ?? this.config);
+							return fakeResponse(text, 10, 5);
+						},
+						async sendMessageStream(params) {
+							seen.push(params.config ?? this.config);
+							return (async function* () { yield fakeResponse(text, 10, 5); })();
+						}
+					}))
+				}
+			};
+		}
+
+		const vertexOpts = {
+			logLevel: 'silent',
+			vertexai: true,
+			project: 'test-project',
+			labels: { app: 'my-app', component: 'probe' },
+			systemPrompt: 'You are a canary.',
+			// Chat has no top-level responseSchema option — it goes through chatConfig,
+			// which is exactly the shape the production repro used.
+			chatConfig: { responseMimeType: 'application/json', responseSchema: schema }
+		};
+
+		it('Chat.send keeps systemInstruction/responseSchema alongside labels', async () => {
+			const seen = [];
+			const chat = new Chat(vertexOpts);
+			stubChats(chat, seen, 'ok');
+			await chat.init();
+			await chat.send('hello');
+
+			expect(seen).toHaveLength(1);
+			expect(seen[0].systemInstruction).toBe('You are a canary.');
+			expect(seen[0].responseSchema).toBe(schema);
+			expect(seen[0].responseMimeType).toBe('application/json');
+			expect(seen[0].labels).toEqual({ app: 'my-app', component: 'probe' });
+		});
+
+		it('Chat.send merges per-message labels over instance labels', async () => {
+			const seen = [];
+			const chat = new Chat(vertexOpts);
+			stubChats(chat, seen, 'ok');
+			await chat.init();
+			await chat.send('hello', { labels: { component: 'override', extra: 'x' } });
+
+			expect(seen[0].systemInstruction).toBe('You are a canary.');
+			expect(seen[0].labels).toEqual({ app: 'my-app', component: 'override', extra: 'x' });
+		});
+
+		it('Chat.stream keeps the session config and applies per-message labels', async () => {
+			const seen = [];
+			const chat = new Chat(vertexOpts);
+			stubChats(chat, seen, 'ok');
+			await chat.init();
+			// eslint-disable-next-line no-empty
+			for await (const _ of chat.stream('hello', { labels: { component: 'streamed' } })) { }
+
+			expect(seen[0].systemInstruction).toBe('You are a canary.');
+			expect(seen[0].responseSchema).toBe(schema);
+			expect(seen[0].labels).toEqual({ app: 'my-app', component: 'streamed' });
+		});
+
+		it('Transformer.rawSend keeps systemInstruction/responseSchema alongside labels', async () => {
+			const seen = [];
+			const tf = new Transformer(vertexOpts);
+			stubChats(tf, seen, '{"canary":"alive"}');
+			await tf.init();
+			const out = await tf.rawSend('hello');
+
+			expect(out).toEqual({ canary: 'alive' });
+			expect(seen[0].systemInstruction).toBe('You are a canary.');
+			expect(seen[0].responseSchema).toBe(schema);
+			expect(seen[0].labels).toEqual({ app: 'my-app', component: 'probe' });
+		});
+
+		it('ToolAgent.chat applies per-message labels without dropping tools', async () => {
+			const seen = [];
+			const agent = new ToolAgent({
+				...vertexOpts,
+				tools: [{ name: 'noop', description: 'does nothing', parametersJsonSchema: { type: 'object' } }],
+				toolExecutor: async () => 'done'
+			});
+			stubChats(agent, seen, 'ok');
+			await agent.init();
+			await agent.chat('hello', { labels: { component: 'agent' } });
+
+			expect(seen[0].systemInstruction).toBe('You are a canary.');
+			expect(seen[0].tools).toBeDefined();
+			expect(seen[0].labels).toEqual({ app: 'my-app', component: 'agent' });
+		});
+
+		it('does not attach labels on the non-vertex path', async () => {
+			const seen = [];
+			const chat = new Chat({ ...KEY, systemPrompt: 'You are a canary.', labels: { app: 'my-app' } });
+			stubChats(chat, seen, 'ok');
+			await chat.init();
+			await chat.send('hello', { labels: { component: 'probe' } });
+
+			expect(seen[0].systemInstruction).toBe('You are a canary.');
+			expect(seen[0].labels).toBeUndefined();
 		});
 	});
 });

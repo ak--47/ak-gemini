@@ -268,14 +268,12 @@ class Transformer extends BaseGemini {
 			? payload
 			: JSON.stringify(payload, null, 2);
 
-		const mergedLabels = { ...this.labels, ...(messageOptions.labels || {}) };
-		const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
-
 		try {
+			// Only set a per-message config when there is something to override — it
+			// REPLACES the session config in @google/genai. See _getSendConfig().
 			const sendParams = { message: actualPayload };
-			if (hasLabels) {
-				sendParams.config = { labels: mergedLabels };
-			}
+			const config = this._getSendConfig(messageOptions.labels);
+			if (config) sendParams.config = config;
 
 			const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
 

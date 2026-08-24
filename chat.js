@@ -71,13 +71,11 @@ class Chat extends BaseGemini {
 	async send(message, opts = {}) {
 		if (!this.chatSession) await this.init();
 
-		const mergedLabels = { ...this.labels, ...(opts.labels || {}) };
-		const hasLabels = this.vertexai && Object.keys(mergedLabels).length > 0;
-
+		// Only set a per-message config when there is something to override — it
+		// REPLACES the session config in @google/genai. See _getSendConfig().
 		const sendParams = { message };
-		if (hasLabels) {
-			sendParams.config = { labels: mergedLabels };
-		}
+		const config = this._getSendConfig(opts.labels);
+		if (config) sendParams.config = config;
 
 		const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
 
@@ -110,7 +108,11 @@ class Chat extends BaseGemini {
 		if (!this.chatSession) await this.init();
 
 		let fullText = '';
-		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({ message }));
+		const sendParams = { message };
+		const config = this._getSendConfig(opts.labels);
+		if (config) sendParams.config = config;
+
+		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream(sendParams));
 
 		for await (const chunk of streamResponse) {
 			if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {

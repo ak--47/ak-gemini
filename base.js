@@ -431,6 +431,34 @@ class BaseGemini {
 		return opts;
 	}
 
+	/**
+	 * Builds the `config` for a per-message `chatSession.sendMessage()` /
+	 * `sendMessageStream()` call.
+	 *
+	 * `@google/genai` resolves it as `config: params.config ?? this.config` —
+	 * a per-message config REPLACES the create-time session config rather than
+	 * merging with it. So anything passed per-message must carry the full
+	 * create-time config forward, or `systemInstruction`, `responseSchema`,
+	 * `responseMimeType`, `maxOutputTokens`, `thinkingConfig`, `tools` and
+	 * `cachedContent` are all silently dropped for that request.
+	 *
+	 * Returns `undefined` when there is nothing to override, so the call site
+	 * can omit `config` entirely and let the SDK fall through to the session
+	 * config it already holds.
+	 *
+	 * @param {Record<string, string>} [perMessageLabels] - Per-message billing labels (Vertex only)
+	 * @returns {Object|undefined}
+	 * @protected
+	 */
+	_getSendConfig(perMessageLabels) {
+		const hasOverride = this.vertexai && perMessageLabels && Object.keys(perMessageLabels).length > 0;
+		if (!hasOverride) return undefined;
+
+		const config = { ...this._getChatCreateOptions().config };
+		config.labels = { ...(config.labels || {}), ...perMessageLabels };
+		return config;
+	}
+
 	// ── Chat Session Management ──────────────────────────────────────────────
 
 	/**
