@@ -1240,6 +1240,7 @@ app.post('/classify', async (req, res) => {
 |---|---|---|---|
 | `gemini-2.0-flash-lite` | Fastest | Cheapest | Classification, extraction, simple tasks |
 | `gemini-2.0-flash` | Fast | Low | General purpose, good quality |
+| `gemini-3.8-flash` | Fast | Low | Newest Flash. Same rate card as 3.7. Vertex `global` endpoint only |
 | `gemini-3.7-flash` | Fast | Low | Current stable flagship (default) |
 | `gemini-3.6-flash` | Fast | Low | Previous flagship; same rate card as 3.7 |
 | `gemini-2.5-flash` | Medium | Low | Best balance of speed and quality |

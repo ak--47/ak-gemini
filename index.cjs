@@ -420,12 +420,18 @@ var THINKING_SUPPORTED_MODELS = [
   /^gemini-2\.5-flash-lite(-preview)?$/,
   /^gemini-2\.0-flash$/
 ];
-var MODEL_PRICING_AS_OF = "2026-08-24";
+var MODEL_PRICING_AS_OF = "2026-09-11";
 var TIER_THRESHOLD = 2e5;
 var MODEL_PRICING = {
   // Gemini 3.x stable
-  // 3.7 and 3.6 Flash share a rate card, including the promo window that runs
-  // through 2026-12-31 before doubling on 2027-01-01.
+  // 3.8, 3.7 and 3.6 Flash share one rate card, including the promo window that
+  // runs through 2026-12-31 before doubling on 2027-01-01.
+  "gemini-3.8-flash": {
+    input: 1.5,
+    output: 7.5,
+    cachedInput: 0.15,
+    intro: { input: 0.75, output: 3.75, cachedInput: 0.075, until: "2026-12-31" }
+  },
   "gemini-3.7-flash": {
     input: 1.5,
     output: 7.5,

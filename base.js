@@ -53,7 +53,7 @@ const THINKING_SUPPORTED_MODELS = [
 ];
 
 /** Date the pricing table below was last verified against Google's pricing page. */
-const MODEL_PRICING_AS_OF = '2026-08-24';
+const MODEL_PRICING_AS_OF = '2026-09-11';
 
 /** Context-window size at which tiered models switch to their higher rate. */
 const TIER_THRESHOLD = 200_000;
@@ -84,8 +84,12 @@ const TIER_THRESHOLD = 200_000;
  */
 const MODEL_PRICING = {
 	// Gemini 3.x stable
-	// 3.7 and 3.6 Flash share a rate card, including the promo window that runs
-	// through 2026-12-31 before doubling on 2027-01-01.
+	// 3.8, 3.7 and 3.6 Flash share one rate card, including the promo window that
+	// runs through 2026-12-31 before doubling on 2027-01-01.
+	'gemini-3.8-flash': {
+		input: 1.50, output: 7.50, cachedInput: 0.15,
+		intro: { input: 0.75, output: 3.75, cachedInput: 0.075, until: '2026-12-31' }
+	},
 	'gemini-3.7-flash': {
 		input: 1.50, output: 7.50, cachedInput: 0.15,
 		intro: { input: 0.75, output: 3.75, cachedInput: 0.075, until: '2026-12-31' }

@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.7.1
+
+Pricing-table update. No code paths change, no signatures change.
+
+### Added
+
+- **`gemini-3.8-flash` pricing.** The model was reachable but unpriced, so every
+  `estimatedCost` for it came back `null`. It shares one rate card with 3.7 and
+  3.6 Flash: $0.75 in / $3.75 out / $0.075 cached through 2026-12-31, then
+  $1.50 / $7.50 / $0.15 on 2027-01-01, modelled as a date-windowed `intro`
+  block. Thinking tokens bill at the output rate, as on the sibling models.
+
+  Verified live on Vertex AI, `global` endpoint: `send()`, `stream()` and
+  `effort: 'low'` all work, and the API echoes `modelVersion:
+  'gemini-3.8-flash'`. The `us-central1` endpoint returns 404 for this model —
+  use `location: 'global'`. `THINKING_SUPPORTED_MODELS` already matched the id,
+  so thinking needed no change.
+
+### Changed
+
+- **`MODEL_PRICING_AS_OF` is now `2026-09-11`** (was `2026-08-24`). The whole
+  table was re-read against <https://ai.google.dev/gemini-api/docs/pricing> on
+  that date. **Every existing rate was already correct** — no corrections in
+  this release, only the new entry.
+
+### Not changed
+
+- **The default model stays `gemini-3.7-flash`.** 3.8-flash is not yet served on
+  regional Vertex endpoints, so promoting it would break callers who pin a
+  region. Pass `modelName: 'gemini-3.8-flash'` to opt in.
+- **`gemini-flash-latest` still resolves to `gemini-3.7-flash`** for pricing.
+  The three Flash models share a rate card, so this alias cannot mis-price a
+  call today whichever one Google rotates it to.
+
 ## 2.7.0
 
 Follow-on sweep to 2.6.2, from a full read of the package by a downstream
