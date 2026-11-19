@@ -111,7 +111,7 @@ class Message extends BaseGemini {
 		// Build from _getChatCreateOptions() rather than raw chatConfig: grounding
 		// tools and cachedContent live there, not in chatConfig, so a send built
 		// from chatConfig alone silently ignored enableGrounding and useCache().
-		const result = await this._withRetry(() => this.genAIClient.models.generateContent({
+		const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
 			model: this.modelName,
 			contents: contents,
 			config: {

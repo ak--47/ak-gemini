@@ -272,7 +272,19 @@ new Chat({ apiKey: 'your-key' }); // or GEMINI_API_KEY env var
 
 // Vertex AI
 new Chat({ vertexai: true, project: 'my-gcp-project' });
+
+// Vertex AI inside GCP (Cloud Run, GKE, GCE) with Application Default Credentials.
+// No project needed: it is read from the metadata server on the first call.
+new Chat({ vertexai: true });
 ```
+
+On Vertex, the default location is `global`. The default model
+(`gemini-3.8-flash`) and the Gemini 4 models are served from `global` and `us`,
+not from `us-central1`.
+
+On the Gemini API, ak-gemini pins API version `v1beta`. `@google/genai` 3.x
+defaults to `v1`, which has no context caching and no `-latest` aliases. Pass
+`apiVersion: 'v1'` or set `GOOGLE_GENAI_API_VERSION` to override.
 
 ### Token Estimation
 
@@ -301,7 +313,7 @@ rate: an overestimate, never an underestimate.
 
 Two things are deliberately **not** modelled: cache **storage** (time-based,
 $1.00/1M tokens/hour on Flash tiers and $4.50 on Pro) and image-output tokens on
-the Nano Banana models ($60/M or $120/M).
+the Nano Banana models ($30/M on `gemini-nano-banana-2.1`, $60/M or $120/M on older ones).
 
 Pro models are tiered — `gemini-2.5-pro` and `gemini-3.1-pro-preview` switch to a
 higher rate above 200,000 prompt tokens. `resolvePricing()` returns `tierThreshold`
@@ -329,8 +341,19 @@ new Chat({
 // wire: thinkingConfig: { thinkingLevel: 'high' }
 ```
 
-`xhigh` and `max` are ak-claude-only levels and clamp to `high` here. An
-unrecognized level throws at construction.
+Accepted levels vary by model. A level the model rejects clamps to the nearest
+level it accepts, and `max` maps to the model's highest level:
+
+| Model | Accepted levels | `thinkingBudget` |
+|---|---|---|
+| `gemini-4-neon`, `gemini-4-hydrogen` | low, medium, high, xhigh | rejected; translated to a level |
+| `gemini-4-carbon`, `gemini-4-argon` | low, medium, high | rejected; translated to a level |
+| `gemini-3.8-flash`, `gemini-3.7-flash` | low, medium, high | accepted |
+| other `gemini-3.x` Flash / Flash-Lite | minimal, low, medium, high | accepted |
+| `gemini-2.5-*` | none (`effort` ignored) | accepted |
+
+The table is exported as `THINKING_CAPABILITIES`. A model not in the table gets
+the config unchanged. An unrecognized `effort` throws at construction.
 
 The raw SDK shape still works:
 
@@ -420,18 +443,20 @@ All classes accept `BaseGeminiOptions`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `modelName` | string | `'gemini-3.7-flash'` | Gemini model to use |
+| `modelName` | string | `'gemini-3.8-flash'` | Gemini model to use |
 | `systemPrompt` | string | varies by class | System prompt |
 | `apiKey` | string | env var | Gemini API key |
 | `vertexai` | boolean | `false` | Use Vertex AI |
-| `project` | string | env var | GCP project ID |
+| `project` | string | env var, then ADC | GCP project ID |
 | `location` | string | `'global'` | GCP region |
+| `apiVersion` | string | `'v1beta'` (Gemini API) | API version passed to `@google/genai` |
+| `store` | boolean | — | Gemini API only. Whether Google may store the request |
 | `chatConfig` | object | — | Gemini chat config overrides |
 | `thinkingConfig` | object | — | Thinking features config (`thinkingBudget` or `thinkingLevel`) |
 | `effort` | string | — | `'minimal'`\|`'low'`\|`'medium'`\|`'high'`\|`'xhigh'`\|`'max'`. Maps to `thinkingConfig.thinkingLevel`; wins over it |
 | `maxOutputTokens` | number | `50000` | Max tokens in response (`null` removes limit) |
 | `logLevel` | string | based on NODE_ENV | `'trace'`\|`'debug'`\|`'info'`\|`'warn'`\|`'error'`\|`'none'` |
-| `labels` | object | — | Billing labels (Vertex AI) |
+| `labels` | object | — | Billing labels (Vertex AI and Gemini API) |
 | `enableGrounding` | boolean | `false` | Enable Google Search grounding |
 | `groundingConfig` | object | — | Grounding config (excludeDomains, timeRangeFilter) |
 | `cachedContent` | string | — | Cached content resource name |

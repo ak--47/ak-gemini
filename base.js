@@ -9,6 +9,7 @@ dotenv.config({ quiet: true });
 const { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
 
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
+import { GoogleAuth } from 'google-auth-library';
 import log from './logger.js';
 import { isJSON } from './json-helpers.js';
 
@@ -27,33 +28,107 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 50_000;
 
 /**
  * Effort levels accepted by the cross-package `effort` option.
- * Gemini's wire field is `thinkingConfig.thinkingLevel`, which accepts
- * minimal/low/medium/high. `xhigh` and `max` exist on ak-claude only and are
- * clamped to `high` so the same config object works against both packages.
+ * Gemini's wire field is `thinkingConfig.thinkingLevel`. Which levels a model
+ * accepts varies per model (see THINKING_CAPABILITIES); `max` is ak-claude-only
+ * and maps to the highest level the model accepts.
  */
 const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-const EFFORT_TO_THINKING_LEVEL = {
-	minimal: 'minimal',
-	low: 'low',
-	medium: 'medium',
-	high: 'high',
-	xhigh: 'high',
-	max: 'high'
-};
 
-/** Models that support thinking features. Image / live / tts variants intentionally excluded. */
-const THINKING_SUPPORTED_MODELS = [
-	/^gemini-3(\.\d+)?-pro(-preview)?$/,
-	/^gemini-3(\.\d+)?-flash(-preview)?$/,
-	/^gemini-3(\.\d+)?-flash-lite(-preview)?$/,
-	/^gemini-2\.5-pro/,
-	/^gemini-2\.5-flash(-preview)?$/,
-	/^gemini-2\.5-flash-lite(-preview)?$/,
-	/^gemini-2\.0-flash$/
+/** Gemini thinking levels, lowest to highest. */
+const THINKING_LEVEL_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+
+const LEVELS_LOW_HIGH = ['low', 'medium', 'high'];
+const LEVELS_LOW_XHIGH = ['low', 'medium', 'high', 'xhigh'];
+const LEVELS_MINIMAL_HIGH = ['minimal', 'low', 'medium', 'high'];
+
+/**
+ * Per-model thinking support, first match wins.
+ * - `levels`: thinkingLevel values the model accepts (null = no thinkingLevel; budget only)
+ * - `budget`: whether the model accepts thinkingBudget
+ *
+ * Measured live on Vertex 2026-11-19: the API returns a 400 for a level or a
+ * budget the model does not accept ("Thinking level is unsupported",
+ * "Thinking budget is not supported for this model"). Image / live / tts
+ * variants intentionally excluded.
+ * @type {Array<{ pattern: RegExp, levels: string[]|null, budget: boolean }>}
+ */
+const THINKING_CAPABILITIES = [
+	{ pattern: /^gemini-4-(neon|hydrogen)$/, levels: LEVELS_LOW_XHIGH, budget: false },
+	{ pattern: /^gemini-4-(carbon|argon)$/, levels: LEVELS_LOW_HIGH, budget: false },
+	{ pattern: /^gemini-3\.[78]-flash$/, levels: LEVELS_LOW_HIGH, budget: true },
+	{ pattern: /^gemini-3(\.\d+)?-pro(-preview)?$/, levels: LEVELS_LOW_HIGH, budget: true },
+	{ pattern: /^gemini-3(\.\d+)?-flash(-preview)?$/, levels: LEVELS_MINIMAL_HIGH, budget: true },
+	{ pattern: /^gemini-3(\.\d+)?-flash-lite(-preview)?$/, levels: LEVELS_MINIMAL_HIGH, budget: true },
+	{ pattern: /^gemini-2\.5-pro/, levels: null, budget: true },
+	{ pattern: /^gemini-2\.5-flash(-preview)?$/, levels: null, budget: true },
+	{ pattern: /^gemini-2\.5-flash-lite(-preview)?$/, levels: null, budget: true },
+	{ pattern: /^gemini-2\.0-flash$/, levels: null, budget: true }
 ];
 
+/**
+ * Translates a legacy thinkingBudget to a thinkingLevel, for models that accept
+ * only levels. 0 means "as little thinking as possible"; a negative budget
+ * (-1 = dynamic) means "model default", so no level is sent.
+ * @param {number} budget
+ * @returns {string|undefined}
+ */
+function budgetToThinkingLevel(budget) {
+	if (budget < 0) return undefined;
+	if (budget === 0) return 'minimal'; // clamped to the model's lowest level
+	if (budget <= 2048) return 'low';
+	if (budget <= 8192) return 'medium';
+	return 'high';
+}
+
+/** Model families that reject thinkingConfig on generateContent (image, audio, embedding). */
+const NO_THINKING_MODELS = /(image|banana|tts|live|transcribe|embedding|omni)/;
+
+/** Models that support thinking features. Derived from THINKING_CAPABILITIES; kept as an export for compatibility. */
+const THINKING_SUPPORTED_MODELS = THINKING_CAPABILITIES.map(c => c.pattern);
+
+/**
+ * Returns the thinking capability entry for a model, or null if the model is not in the table.
+ * @param {string} modelName
+ * @returns {{ pattern: RegExp, levels: string[]|null, budget: boolean }|null}
+ */
+function thinkingCapabilities(modelName) {
+	return THINKING_CAPABILITIES.find(c => c.pattern.test(modelName)) || null;
+}
+
+/**
+ * Maps a requested thinking level (or `max`) to one the model accepts.
+ * A level below the model's range clamps up to its lowest level; a level above
+ * clamps down to its highest. `max` always means the highest accepted level.
+ * @param {string} requested - an EFFORT_LEVELS value
+ * @param {string[]|null} accepted - levels the model accepts; null = unknown model, pass through
+ * @returns {string}
+ */
+function clampThinkingLevel(requested, accepted) {
+	if (!accepted) return requested === 'max' ? 'high' : requested;
+	if (requested === 'max') return accepted[accepted.length - 1];
+	if (accepted.includes(requested) || !THINKING_LEVEL_ORDER.includes(requested)) return requested;
+	const idx = THINKING_LEVEL_ORDER.indexOf(requested);
+	const lowest = THINKING_LEVEL_ORDER.indexOf(accepted[0]);
+	return idx < lowest ? accepted[0] : accepted[accepted.length - 1];
+}
+
+/**
+ * Default generative model. gemini-3.8-flash is served on Vertex `global` (the
+ * SDK default location) and `us`, NOT on `us-central1` — region-pinned callers
+ * must pass `modelName` or `location: 'global'`.
+ */
+const DEFAULT_MODEL = 'gemini-3.8-flash';
+
+/**
+ * API version for the Gemini Developer API. @google/genai 3.0 moved its default
+ * to `v1`, which has no explicit context caching (`caches.*` 404), no `-latest`
+ * aliases and no `-preview` models. ak-gemini pins `v1beta` so those keep working.
+ * Vertex is unaffected (SDK default `v1beta1`).
+ */
+const DEFAULT_GEMINI_API_VERSION = 'v1beta';
+
 /** Date the pricing table below was last verified against Google's pricing page. */
-const MODEL_PRICING_AS_OF = '2026-09-11';
+const MODEL_PRICING_AS_OF = '2026-11-19';
 
 /** Context-window size at which tiered models switch to their higher rate. */
 const TIER_THRESHOLD = 200_000;
@@ -75,14 +150,29 @@ const TIER_THRESHOLD = 200_000;
  * NOTES:
  * - Gemma models (e.g. Gemma 4) are intentionally excluded — they are open models with
  *   no paid per-token tier on the Gemini API (Vertex deployments bill by compute).
- * - Image-output tokens on Nano Banana models bill at $60/M (1.5 Flash Image) or $120/M (3 Pro Image).
+ * - Image-output tokens on Nano Banana models bill at $30/M (nano-banana-2.1), $60/M (3.1 Flash Image) or $120/M (3 Pro Image).
  *   Only text-input/text-output rates are modelled here; image-output cost is NOT included in estimateCost().
  * - Audio input is more expensive on most models — listed rate covers text/image/video input.
  * - Cache STORAGE ($1.00/1M tokens/hour on Flash tiers, $4.50 on Pro) is time-based and
  *   NOT modelled here — estimatedCost only covers per-token charges.
+ * - Vertex non-global endpoints cost 10% more. NOT modelled.
  * - A null result from resolvePricing()/computeCost() means UNKNOWN, not free.
  */
 const MODEL_PRICING = {
+	// Gemini 4 (GA Oct-Nov 2026). Explicit context caching is NOT supported
+	// (`caches.create` returns a 400); cachedInput prices implicit cache hits.
+	// Carbon/Argon intro is a lower list price on the Gemini API. Vertex bills the
+	// full list price and returns 50% as credits, which this table does not model.
+	'gemini-4-carbon': {
+		input: 4.00, output: 20.00, cachedInput: 0.20,
+		intro: { input: 2.00, output: 10.00, cachedInput: 0.10, until: '2026-11-30' }
+	},
+	'gemini-4-argon': {
+		input: 4.00, output: 20.00, cachedInput: 0.20,
+		intro: { input: 2.00, output: 10.00, cachedInput: 0.10, until: '2026-11-30' }
+	},
+	'gemini-4-neon': { input: 3.00, output: 15.00, cachedInput: 0.15 },
+	'gemini-4-hydrogen': { input: 1.50, output: 7.50, cachedInput: 0.075 },
 	// Gemini 3.x stable
 	// 3.8, 3.7 and 3.6 Flash share one rate card, including the promo window that
 	// runs through 2026-12-31 before doubling on 2027-01-01.
@@ -101,6 +191,7 @@ const MODEL_PRICING = {
 	'gemini-3.5-flash': { input: 1.50, output: 9.00, cachedInput: 0.15 },
 	'gemini-3.5-flash-lite': { input: 0.30, output: 2.50, cachedInput: 0.03 },
 	'gemini-3.1-flash-lite': { input: 0.25, output: 1.50, cachedInput: 0.025 },
+	'gemini-nano-banana-2.1': { input: 1.50, output: 7.50 },        // text-only; image-output is $30/M
 	'gemini-3.1-flash-image': { input: 0.50, output: 3.00 },        // text-only; image-output is $60/M
 	'gemini-3.1-flash-lite-image': { input: 0.25, output: 1.50 },   // text-only; image-output billed separately
 	'gemini-3-pro-image': { input: 2.00, output: 12.00 },           // text-only; image-output is $120/M
@@ -127,7 +218,8 @@ const MODEL_PRICING = {
 	'gemini-2.0-flash-lite': { input: 0.02, output: 0.10 },
 	// Embeddings
 	'gemini-embedding-001': { input: 0.15, output: 0 },
-	'gemini-embedding-2-preview': { input: 0.20, output: 0 } // text input; image $0.45, audio $6.50, video $12.00 not modelled
+	'gemini-embedding-2': { input: 0.20, output: 0 },         // text input; image/audio/video input not modelled
+	'gemini-embedding-2-preview': { input: 0.20, output: 0 } // reroutes to gemini-embedding-2 since 2026-11-06
 };
 
 /**
@@ -141,7 +233,7 @@ const MODEL_PRICING = {
  * already does this, and alias resolution is logged at debug level.
  */
 const MODEL_ALIASES = {
-	'gemini-flash-latest': 'gemini-3.7-flash',
+	'gemini-flash-latest': 'gemini-3.8-flash',
 	'gemini-pro-latest': 'gemini-3.1-pro-preview',
 	'gemini-flash-lite-latest': 'gemini-3.5-flash-lite'
 };
@@ -259,7 +351,7 @@ function computeCost(modelId, promptTokens, responseTokens, thoughtsTokens = 0, 
 		+ (((responseTokens || 0) + (thoughtsTokens || 0)) / 1_000_000) * outputRate;
 }
 
-export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, MODEL_PRICING, MODEL_PRICING_AS_OF, MODEL_ALIASES, DEFAULT_MAX_OUTPUT_TOKENS, EFFORT_LEVELS, resolvePricing, computeCost };
+export { DEFAULT_SAFETY_SETTINGS, DEFAULT_THINKING_CONFIG, THINKING_SUPPORTED_MODELS, THINKING_CAPABILITIES, thinkingCapabilities, DEFAULT_MODEL, DEFAULT_GEMINI_API_VERSION, MODEL_PRICING, MODEL_PRICING_AS_OF, MODEL_ALIASES, DEFAULT_MAX_OUTPUT_TOKENS, EFFORT_LEVELS, resolvePricing, computeCost };
 
 // ── BaseGemini Class ─────────────────────────────────────────────────────────
 
@@ -282,7 +374,7 @@ class BaseGemini {
 	 */
 	constructor(options = {}) {
 		// ── Model ──
-		this.modelName = options.modelName || 'gemini-3.7-flash';
+		this.modelName = options.modelName || DEFAULT_MODEL;
 
 		// ── System Prompt ──
 		// Subclasses set their own default if options.systemPrompt is undefined
@@ -302,9 +394,15 @@ class BaseGemini {
 		if (!this.vertexai && !this.apiKey) {
 			throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
 		}
-		if (this.vertexai && !this.project) {
-			throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
-		}
+		// Vertex without a project: resolved from Application Default Credentials
+		// (metadata server inside GCP, gcloud config / credentials file locally) by
+		// `_ensureClient()`, which every API path awaits. Fails there if ADC has no project.
+
+		// ── API Version ──
+		// Explicit option wins; then the SDK's own GOOGLE_GENAI_API_VERSION env var;
+		// then ak-gemini's v1beta pin (Gemini API only — see DEFAULT_GEMINI_API_VERSION).
+		this.apiVersion = options.apiVersion
+			|| (!this.vertexai && !process.env.GOOGLE_GENAI_API_VERSION ? DEFAULT_GEMINI_API_VERSION : undefined);
 
 		// ── Rate Limit Retry ──
 		this.resourceExhaustedRetries = options.resourceExhaustedRetries ?? 5;
@@ -334,6 +432,9 @@ class BaseGemini {
 		// When grounding is on, surface the server's tool calls (e.g. Google Search) in the response.
 		this.includeServerSideToolInvocations = options.includeServerSideToolInvocations ?? false;
 
+		// ── Store (@google/genai 2.31+, Gemini API only) ──
+		this.store = options.store;
+
 		// ── Chat Config ──
 		this.chatConfig = {
 			temperature: 0.7,
@@ -345,6 +446,10 @@ class BaseGemini {
 
 		if (this.serviceTier) this.chatConfig['serviceTier'] = this.serviceTier;
 		if (this.includeServerSideToolInvocations) this.chatConfig['includeServerSideToolInvocations'] = true;
+		if (typeof this.store === 'boolean') {
+			if (this.vertexai) log.warn('`store` is a Gemini API option; ignored on Vertex AI.');
+			else this.chatConfig['store'] = this.store;
+		}
 
 		// ── Sampling Shortcuts ──
 		// Top-level sugar for chatConfig sampling knobs; wins over chatConfig
@@ -387,16 +492,11 @@ class BaseGemini {
 		this._configureThinking(options.thinkingConfig);
 
 		// ── GenAI Client ──
-		const clientOptions = this.vertexai
-			? {
-				vertexai: true,
-				project: this.project,
-				...(this.location && { location: this.location }),
-				...(this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions })
-			}
-			: { apiKey: this.apiKey };
-
-		this.genAIClient = new GoogleGenAI(clientOptions);
+		// Built now when everything is known; deferred to _ensureClient() when a
+		// Vertex project must be discovered from ADC (async).
+		/** @type {GoogleGenAI|null} */
+		this.genAIClient = null;
+		if (!this.vertexai || this.project) this._createClient();
 
 		// ── State ──
 		this.chatSession = null;
@@ -425,14 +525,75 @@ class BaseGemini {
 	async init(force = false) {
 		if (this.chatSession && !force) return;
 
+		await this._ensureClient();
 		log.debug(`Initializing ${this.constructor.name} chat session with model: ${this.modelName}...`);
 
 		const chatOptions = this._getChatCreateOptions();
-		this.chatSession = this.genAIClient.chats.create(chatOptions);
+		this.chatSession = /** @type {GoogleGenAI} */ (this.genAIClient).chats.create(chatOptions);
 
 		await this._healthCheckPing();
 
 		log.debug(`${this.constructor.name}: Chat session initialized.`);
+	}
+
+	/**
+	 * Builds the GoogleGenAI client from resolved auth options.
+	 * @private
+	 */
+	_createClient() {
+		/** @type {import("@google/genai").GoogleGenAIOptions} */
+		const clientOptions = this.vertexai
+			? {
+				vertexai: true,
+				project: this.project,
+				...(this.location && { location: this.location }),
+				...(this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions })
+			}
+			: { apiKey: this.apiKey };
+		if (this.apiVersion) clientOptions.apiVersion = this.apiVersion;
+		this.genAIClient = new GoogleGenAI(clientOptions);
+	}
+
+	/**
+	 * Ensures `genAIClient` exists. On Vertex with no project configured, discovers
+	 * the project from Application Default Credentials first — inside GCP that is
+	 * the metadata server, so a Cloud Run / GKE / GCE service needs no env vars.
+	 * Every method that calls the API awaits this.
+	 * @returns {Promise<GoogleGenAI>}
+	 * @protected
+	 */
+	async _ensureClient() {
+		if (this.genAIClient) return this.genAIClient;
+		if (!this._projectPromise) {
+			this._projectPromise = this._discoverProject().then(p => {
+				if (!p) throw new Error('ADC returned no project id');
+				return p;
+			}).catch(e => {
+				this._projectPromise = null;
+				throw new Error(`Vertex AI requires a project ID and none could be found. Provide options.project or GOOGLE_CLOUD_PROJECT, or run where Application Default Credentials expose one. Cause: ${e.message}`);
+			});
+		}
+		const project = await this._projectPromise;
+		if (!this.genAIClient) {
+			this.project = project;
+			log.debug(`Vertex AI project resolved from Application Default Credentials: ${project}`);
+			this._createClient();
+		}
+		return /** @type {GoogleGenAI} */ (this.genAIClient);
+	}
+
+	/**
+	 * Asks google-auth-library for the ADC project: GOOGLE_CLOUD_PROJECT-style env
+	 * vars, the credentials file, gcloud config, then the GCE/Cloud Run metadata server.
+	 * @returns {Promise<string>}
+	 * @protected
+	 */
+	async _discoverProject() {
+		const auth = new GoogleAuth({
+			scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+			...(this.googleAuthOptions || {})
+		});
+		return auth.getProjectId();
 	}
 
 	/**
@@ -443,6 +604,7 @@ class BaseGemini {
 	 * @protected
 	 */
 	async _healthCheckPing() {
+		await this._ensureClient();
 		if (!this.healthCheck) return;
 		try {
 			await this.genAIClient.models.list();
@@ -526,6 +688,7 @@ class BaseGemini {
 	_createChatSession(history = []) {
 		const opts = this._getChatCreateOptions();
 		opts.history = history;
+		if (!this.genAIClient) throw new Error(`${this.constructor.name}: client not ready. Call init() first.`);
 		return this.genAIClient.chats.create(opts);
 	}
 
@@ -573,6 +736,7 @@ class BaseGemini {
 	 * @returns {Promise<Array>} The updated chat history
 	 */
 	async seed(examples, opts = {}) {
+		await this._ensureClient();
 		await this.init();
 
 		if (!examples || !Array.isArray(examples) || examples.length === 0) {
@@ -670,7 +834,8 @@ class BaseGemini {
 			totalTokens: response.usageMetadata?.totalTokenCount || (promptTokens + responseTokens + thoughtsTokens),
 			timestamp: Date.now(),
 			groundingMetadata: response.candidates?.[0]?.groundingMetadata || null,
-			modelStatus
+			modelStatus,
+			trafficType: response.usageMetadata?.trafficType || null
 		};
 		if (modelStatus === 'DEPRECATED' && !this._deprecationWarned) {
 			log.warn(`Model "${this.modelName}" is marked DEPRECATED by Google. Plan migration.`);
@@ -805,6 +970,7 @@ class BaseGemini {
 			timestamp: meta.timestamp,
 			groundingMetadata: meta.groundingMetadata || null,
 			modelStatus: meta.modelStatus || null,
+			trafficType: meta.trafficType || null,
 			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
 		};
 	}
@@ -855,6 +1021,7 @@ class BaseGemini {
 			timestamp: Date.now(),
 			groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
 			modelStatus: response?.modelStatus || null,
+			trafficType: response?.usageMetadata?.trafficType || null,
 			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
 		};
 	}
@@ -887,7 +1054,8 @@ class BaseGemini {
 
 		contents.push({ parts: [{ text: nextMessage }] });
 
-		const resp = await this._withRetry(() => this.genAIClient.models.countTokens({
+		const client = await this._ensureClient();
+		const resp = await this._withRetry(() => client.models.countTokens({
 			model: this.modelName,
 			contents,
 		}));
@@ -942,7 +1110,8 @@ class BaseGemini {
 		const sysInstruction = config.systemInstruction !== undefined ? config.systemInstruction : this.systemPrompt;
 		if (sysInstruction) cacheConfig.systemInstruction = sysInstruction;
 
-		const cached = await this._withRetry(() => this.genAIClient.caches.create({
+		const client = await this._ensureClient();
+		const cached = await this._withRetry(() => client.caches.create({
 			model: config.model || this.modelName,
 			config: cacheConfig
 		}));
@@ -957,7 +1126,8 @@ class BaseGemini {
 	 * @returns {Promise<Object>} The cached content resource
 	 */
 	async getCache(cacheName) {
-		return await this._withRetry(() => this.genAIClient.caches.get({ name: cacheName }));
+		const client = await this._ensureClient();
+		return await this._withRetry(() => client.caches.get({ name: cacheName }));
 	}
 
 	/**
@@ -965,7 +1135,8 @@ class BaseGemini {
 	 * @returns {Promise<Object>} Pager of cached content resources
 	 */
 	async listCaches() {
-		const pager = await this._withRetry(() => this.genAIClient.caches.list());
+		const client = await this._ensureClient();
+		const pager = await this._withRetry(() => client.caches.list());
 		const results = [];
 		for await (const cache of pager) {
 			results.push(cache);
@@ -982,7 +1153,8 @@ class BaseGemini {
 	 * @returns {Promise<Object>} The updated cache resource
 	 */
 	async updateCache(cacheName, config = {}) {
-		return await this._withRetry(() => this.genAIClient.caches.update({
+		const client = await this._ensureClient();
+		return await this._withRetry(() => client.caches.update({
 			name: cacheName,
 			config: {
 				...(config.ttl && { ttl: config.ttl }),
@@ -998,7 +1170,8 @@ class BaseGemini {
 	 * @returns {Promise<void>}
 	 */
 	async deleteCache(cacheName) {
-		await this._withRetry(() => this.genAIClient.caches.delete({ name: cacheName }));
+		const client = await this._ensureClient();
+		await this._withRetry(() => client.caches.delete({ name: cacheName }));
 		log.debug(`Cache deleted: ${cacheName}`);
 		if (this.cachedContent === cacheName) {
 			this.cachedContent = null;
@@ -1092,8 +1265,6 @@ class BaseGemini {
 	 * @private
 	 */
 	_configureThinking(thinkingConfig) {
-		const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some(p => p.test(this.modelName));
-
 		if (thinkingConfig === undefined && this.effort === null) return;
 
 		if (thinkingConfig === null) {
@@ -1102,25 +1273,51 @@ class BaseGemini {
 			return;
 		}
 
-		if (!modelSupportsThinking) {
+		// Unknown model (e.g. a family released after this table): send the config
+		// as given and let the API accept or reject it. Dropping it silently is how
+		// `effort` was lost on every Gemini 4 model in 2.7.x.
+		const caps = thinkingCapabilities(this.modelName);
+		if (!caps && NO_THINKING_MODELS.test(this.modelName)) {
 			log.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig/effort.`);
 			return;
 		}
+		if (!caps) {
+			log.debug(`Model ${this.modelName} is not in THINKING_CAPABILITIES; sending thinking config unchanged.`);
+		}
 
-		const config = { ...DEFAULT_THINKING_CONFIG, ...(thinkingConfig || {}) };
+		// thinkingBudget: 0 is the long-standing default, but only for models that take a budget.
+		const base = caps && !caps.budget ? {} : DEFAULT_THINKING_CONFIG;
+		const config = { ...base, ...(thinkingConfig || {}) };
 
 		// `effort` wins over an explicit thinkingLevel/thinkingBudget — it is the
 		// cross-package knob and is set deliberately.
 		if (this.effort !== null) {
-			const level = EFFORT_TO_THINKING_LEVEL[this.effort];
-			if (level !== this.effort) {
-				log.debug(`Effort '${this.effort}' has no Gemini equivalent; using thinkingLevel '${level}'.`);
+			if (caps && !caps.levels) {
+				// Budget-only model (2.x): no thinkingLevel on the wire.
+				log.warn(`Model ${this.modelName} has no thinkingLevel; ignoring effort '${this.effort}'. Use thinkingConfig.thinkingBudget instead.`);
+			} else {
+				config.thinkingLevel = this.effort;
 			}
-			config.thinkingLevel = level;
 		}
 
-		// thinkingLevel and thinkingBudget are mutually exclusive on the wire.
+		// A budget on a level-only model (Gemini 4) is a 400. Translate it.
+		if (caps && !caps.budget && config.thinkingBudget !== undefined) {
+			if (config.thinkingLevel === undefined) {
+				const translated = budgetToThinkingLevel(config.thinkingBudget);
+				if (translated) config.thinkingLevel = translated;
+				log.debug(`Model ${this.modelName} does not accept thinkingBudget; translated ${config.thinkingBudget} to thinkingLevel '${translated ?? '(model default)'}'.`);
+			}
+			delete config.thinkingBudget;
+		}
+
 		if (config.thinkingLevel !== undefined) {
+			const requested = String(config.thinkingLevel).toLowerCase();
+			const level = clampThinkingLevel(requested, caps ? caps.levels : null);
+			if (level !== requested) {
+				log.debug(`Thinking level '${requested}' is not accepted by ${this.modelName}; using '${level}'.`);
+				config.thinkingLevel = level;
+			}
+			// thinkingLevel and thinkingBudget are mutually exclusive on the wire.
 			delete config.thinkingBudget;
 		}
 

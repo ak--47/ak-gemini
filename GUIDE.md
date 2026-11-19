@@ -53,7 +53,7 @@ import AI from 'ak-gemini';
 const t = new AI.Transformer({ ... });
 ```
 
-The default model is `gemini-3.7-flash`. Override with `modelName`:
+The default model is `gemini-3.8-flash`. Override with `modelName`:
 
 ```javascript
 new Chat({ modelName: 'gemini-2.5-pro' });
@@ -79,9 +79,9 @@ new Chat({ apiKey: 'your-key' });
 ```javascript
 new Chat({
   vertexai: true,
-  project: 'my-gcp-project',           // or GOOGLE_CLOUD_PROJECT env var
-  location: 'us-central1',             // or GOOGLE_CLOUD_LOCATION env var
-  labels: { app: 'myapp', env: 'prod' } // billing labels (Vertex AI only)
+  project: 'my-gcp-project',           // or GOOGLE_CLOUD_PROJECT env var, or ADC (metadata server inside GCP)
+  location: 'global',                  // or GOOGLE_CLOUD_LOCATION env var; new models are not on us-central1
+  labels: { app: 'myapp', env: 'prod' } // billing labels
 });
 ```
 
@@ -1238,11 +1238,13 @@ app.post('/classify', async (req, res) => {
 
 | Model | Speed | Cost | Best For |
 |---|---|---|---|
-| `gemini-2.0-flash-lite` | Fastest | Cheapest | Classification, extraction, simple tasks |
-| `gemini-2.0-flash` | Fast | Low | General purpose, good quality |
-| `gemini-3.8-flash` | Fast | Low | Newest Flash. Same rate card as 3.7. Vertex `global` endpoint only |
-| `gemini-3.7-flash` | Fast | Low | Current stable flagship (default) |
-| `gemini-3.6-flash` | Fast | Low | Previous flagship; same rate card as 3.7 |
+| `gemini-3.5-flash-lite` | Fastest | Cheapest | Classification, extraction, simple tasks |
+| `gemini-3.8-flash` | Fast | Low | Default. Newest Flash. Vertex `global`/`us` only |
+| `gemini-4-hydrogen` | Fast | Medium | Gemini 4 everyday model. Vertex `global`/`us` only |
+| `gemini-4-neon` | Medium | Medium-high | Gemini 4, balances depth and cost |
+| `gemini-4-argon` | Medium | High | Gemini 4 efficient frontier reasoning |
+| `gemini-4-carbon` | Very slow | High | Google's strongest reasoning model. 60-90 s per reply in testing |
+| `gemini-3.7-flash` | Fast | Low | Previous default. Vertex retires it 2027-01-28 |
 | `gemini-2.5-flash` | Medium | Low | Best balance of speed and quality |
 | `gemini-2.5-pro` | Slow | High | Complex reasoning, code, analysis |
 
@@ -1432,17 +1434,19 @@ const { Transformer, Chat, Embedding } = require('ak-gemini');
 
 | Option | Type | Default |
 |---|---|---|
-| `modelName` | string | `'gemini-3.7-flash'` |
+| `modelName` | string | `'gemini-3.8-flash'` |
 | `systemPrompt` | string \| null \| false | varies by class |
 | `apiKey` | string | `GEMINI_API_KEY` env var |
 | `vertexai` | boolean | `false` |
-| `project` | string | `GOOGLE_CLOUD_PROJECT` env var |
+| `project` | string | `GOOGLE_CLOUD_PROJECT` env var, then ADC |
 | `location` | string | `'global'` |
+| `apiVersion` | string | `'v1beta'` on the Gemini API |
+| `store` | boolean | unset (Gemini API only) |
 | `chatConfig` | object | `{ temperature: 0.7, topP: 0.95, topK: 64 }` |
 | `thinkingConfig` | object | `{ thinkingBudget: 0 }` |
 | `maxOutputTokens` | number \| null | `50000` |
 | `logLevel` | string | based on `NODE_ENV` |
-| `labels` | object | `{}` (Vertex AI only) |
+| `labels` | object | `{}` |
 | `enableGrounding` | boolean | `false` |
 | `groundingConfig` | object | `{}` |
 | `cachedContent` | string | `null` |

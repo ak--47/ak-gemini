@@ -4,6 +4,24 @@ Per-version upgrade notes. For the full list of changes see [CHANGELOG.md](./CHA
 
 ---
 
+## 2.7.x → 3.0.0
+
+**Major bump for two reasons: Node 22 is now required, and the default models change.** No method signature changes.
+
+| If you… | Then… |
+|---|---|
+| run Node 20 | upgrade to Node 22, or stay on ak-gemini 2.7.x |
+| rely on the default model on Vertex with `location: 'us-central1'` (or `GOOGLE_CLOUD_LOCATION=us-central1`) | the new default `gemini-3.8-flash` is a 404 there. Use `location: 'global'`, or pass `modelName: 'gemini-3.7-flash'` (retires on Vertex 2027-01-28) |
+| use `ImageGenerator` with no `modelName` | you now get `gemini-nano-banana-2.1`. The old default was a 404 on Vertex |
+| pass `effort: 'minimal'` | it now works on every model. Models that reject `minimal` get `low` |
+| use a Gemini 4 model | `effort` now applies. Do not count on `thinkingBudget`; it becomes a level |
+| use the Gemini API and context caching or `-latest` aliases | nothing to do. ak-gemini pins `v1beta`. To follow the SDK to `v1`, pass `apiVersion: 'v1'` |
+| run on Vertex inside GCP | `project` and `GOOGLE_CLOUD_PROJECT` are now optional. The project comes from the metadata server |
+| check `usage.estimatedCost` on Gemini 4 | it is now a number, not `null` |
+| call ak-gemini from Jest tests | every request fails with `fetch failed` / "Undici globalDispatcher is not available". `@google/genai` 3.x reads Node's undici dispatcher from `globalThis`, and Jest's sandbox has its own. Copy `tests/jest-environment.cjs` from this repo and set it as `testEnvironment` |
+
+---
+
 ## 2.5.0 → 2.6.0
 
 **Minor bump. No API surface is removed and no call signature breaks.** What changes is what `estimatedCost` reports — in most cases it goes *down*, because cached tokens and context tiers are now modelled correctly.

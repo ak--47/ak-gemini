@@ -19,7 +19,9 @@ import BaseGemini from './base.js';
 import log from './logger.js';
 import { writeFileSync } from 'node:fs';
 
-const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
+// Nano Banana 2.1 (GA 2026-10-06). The old default, gemini-3.1-flash-image-preview,
+// is 404 on Vertex and was shut down on the Gemini API on 2026-06-25.
+const DEFAULT_IMAGE_MODEL = 'gemini-nano-banana-2.1';
 
 export default class ImageGenerator extends BaseGemini {
 
@@ -100,7 +102,7 @@ export default class ImageGenerator extends BaseGemini {
 			}
 		}
 
-		const result = await this._withRetry(() => this.genAIClient.models.generateContent({
+		const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
 			model: this.modelName,
 			contents: [{ role: 'user', parts }],
 			config: this._buildConfig(opts)

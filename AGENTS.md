@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v2.7.0) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v3.0.0, `@google/genai` ^3.6.1, Node >=22) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -64,11 +64,13 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **`onBeforeExecution`** callback on both agents for gating/approval before execution
 - **RagAgent** supports three context input types: `remoteFiles` (Files API upload), `localFiles` (read from disk), `localData` (in-memory objects)
 - **Embedding** uses `gemini-embedding-001` by default, supports task types, dimensionality control, and cosine similarity
-- **ImageGenerator** uses `gemini-3.1-flash-image-preview` (Nano Banana 2) by default; supports `aspectRatio`, `imageSize`, `includeText`, and `inputImages` for editing; returns base64 image data
+- **ImageGenerator** uses `gemini-nano-banana-2.1` by default (3.0.0; the old `gemini-3.1-flash-image-preview` default is 404 on Vertex); supports `aspectRatio`, `imageSize`, `includeText`, and `inputImages` for editing; returns base64 image data
 - **`serviceTier`** (`STANDARD` | `FLEX` | `PRIORITY`) — cost vs latency trade for generateContent (`@google/genai` 1.47+)
 - **`includeServerSideToolInvocations`** — surface server-side tool calls (Google Search) in response when grounding is on (`@google/genai` 1.46+)
 - **`getLastUsage().modelStatus`** — surfaces Google's model lifecycle status (`DEPRECATED`, etc.) so consumers see deprecation warnings (`@google/genai` 1.47+)
-- **Default model**: `gemini-3.7-flash` (bumped from `gemini-3.6-flash` in 2.7.0 — stable, same rate card as 3.6-flash, Google's flagship Flash for coding/agentic work). `gemini-flash-latest` aliases to it. Verified live on Vertex.
+- **Default model**: `gemini-3.8-flash` (`DEFAULT_MODEL`, 3.0.0; was `gemini-3.7-flash`). Same rate card. On Vertex it is served from `global` and `us` only — `us-central1` 404s. Gemini 4 models have the same region limit. `gemini-flash-latest` aliases to it.
+- **API version**: `@google/genai` 3.0 moved the Gemini API default to `v1`, where `caches.*` and `-latest` aliases 404 (verified 2026-11-19). ak-gemini pins `v1beta` (`DEFAULT_GEMINI_API_VERSION`) unless `apiVersion` or `GOOGLE_GENAI_API_VERSION` is set. Vertex keeps the SDK default (`v1beta1`).
+- **Vertex + ADC**: `vertexai: true` with no `project` / `GOOGLE_CLOUD_PROJECT` does NOT throw. `genAIClient` stays `null` until `_ensureClient()` discovers the project via `google-auth-library` (metadata server inside GCP). **Every method that calls the API must `await this._ensureClient()` first** (or use `this._withRetry(async () => (await this._ensureClient()).models...)`). `_createChatSession()` throws "Call init() first" if the client is not ready.
 - **Google Search grounding** (`enableGrounding`) is available on all classes via BaseGemini, merges with existing tools
 - **Context caching** (`cachedContent`, `createCache()`, `useCache()`) is available on all classes via BaseGemini
 - **429 rate-limit retry** (`resourceExhaustedRetries: 5`, `resourceExhaustedDelay: 1000`) — automatic exponential backoff on RESOURCE_EXHAUSTED, separate from Transformer's validation retries (`maxRetries`)
@@ -82,11 +84,11 @@ Shared foundation. Not typically instantiated directly.
 - `seed(examples, opts?)` — Add example pairs to chat history
 - `getHistory()` / `clearHistory()` — Manage chat history
 - `getLastUsage()` — Structured usage data after API calls (includes `groundingMetadata` when grounding enabled, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
-- `resolvePricing(modelId, { at? })` / `computeCost(modelId, in, out, thoughts?, cached?, { at? })` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index). `null` means UNKNOWN, not free. `at` prices a call against a date-windowed `intro` promo (3.6/3.7-flash run at half rate through 2026-12-31)
+- `resolvePricing(modelId, { at? })` / `computeCost(modelId, in, out, thoughts?, cached?, { at? })` — pricing helpers; resolve `-latest` aliases via `MODEL_ALIASES`, return `null` for unknown models (exported from index). `null` means UNKNOWN, not free. `at` prices a call against a date-windowed `intro` promo (3.6/3.7/3.8-flash run at half rate through 2026-12-31; gemini-4-carbon/argon through 2026-11-30)
 - `_resetUsage()` / `_accumulateUsage(response)` — **the only correct way to record usage.** Call `_resetUsage()` once at the top of any method making API calls, then `_accumulateUsage()` after EVERY round-trip. Assigning `_cumulativeUsage` from the final response reports one round of a multi-round agent turn
 - `_streamUsage()` — per-round accumulator for streamed responses. `track(chunk)` every chunk, `commit()` when the round's stream is exhausted. A `stream()` that skips this yields `usage: null` or stale numbers
 - `_chunkTextParts(chunk)` — reads EVERY text part of a chunk and skips `thought` parts. Never index `parts[0]` directly, and never make text and `functionCalls` mutually exclusive with `else if` — Gemini emits both in one chunk
-- `effort` — cross-package reasoning-effort option (identical name in ak-claude); maps to `thinkingConfig.thinkingLevel` and wins over an explicit `thinkingLevel`/`thinkingBudget`. `xhigh`/`max` are ak-claude-only levels and clamp to `high`
+- `effort` — cross-package reasoning-effort option (identical name in ak-claude); maps to `thinkingConfig.thinkingLevel` and wins over an explicit `thinkingLevel`/`thinkingBudget`. Mapping is **per model** via `THINKING_CAPABILITIES` (measured 2026-11-19 — the API 400s on a level or budget a model rejects): a rejected level clamps to the nearest accepted one, `max` → highest accepted. `xhigh` is native only on `gemini-4-neon`/`hydrogen`; `minimal` is rejected by 3.7/3.8-flash and all Gemini 4. **Gemini 4 rejects `thinkingBudget` with any value** — it is translated to a level and never sent. Models not in the table get the config unchanged; image/tts/live/embedding/omni models drop it. When Google ships a new model family, probe it and add a row
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation
 - `enableGrounding` / `groundingConfig` — Google Search grounding (available on all classes)
 - `resourceExhaustedRetries` / `resourceExhaustedDelay` — 429 rate-limit retry with exponential backoff (default: 5 retries, 1000ms)
@@ -164,12 +166,12 @@ Vector embeddings via Google's text embedding models. Extends BaseGemini (statel
 Image generation via Gemini's Nano Banana models. Extends BaseGemini (stateless, like Embedding).
 - `generate(prompt, opts?)` → `{ images: [{ data, mimeType }], text, usage }`
 - `save(result, path)` → writes base64 images to disk (suffixes `_N` if >1 image)
-- Default model: `gemini-3.1-flash-image-preview` (Nano Banana 2)
+- Default model: `gemini-nano-banana-2.1` (image output $30/M)
 - Constructor options: `aspectRatio`, `imageSize`, `personGeneration`, `includeText`
 - Per-call options: same as constructor, plus `inputImages` for editing/composition
 - `_buildConfig()` does NOT spread `chatConfig` — image models reject safetySettings/temp/topK/topP/thinkingConfig
 - `getHistory()`, `clearHistory()`, `seed()`, `estimate()` are no-ops/throw
-- WARNING: image-output tokens billed at ~$60/M (distinct unit); not modelled by `estimateCost()`
+- WARNING: image-output tokens bill at $30/M (nano-banana-2.1) to $120/M (3-pro-image), a distinct unit; not modelled by `estimateCost()`
 
 ## Publishing Checklist
 
@@ -284,9 +286,10 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - Grounding tool merges with existing tools (ToolAgent/CodeAgent function declarations coexist)
 - Response includes `groundingMetadata` in `getLastUsage()` — contains `groundingChunks`, `webSearchQueries`, etc.
 - Per-message toggle available in Transformer via `send(payload, { enableGrounding: true })`
-- WARNING: costs ~$35/1k queries
+- WARNING: Gemini 3+ bills $14 per 1k search queries after 5k free/month (2.5: $35 per 1k prompts)
 
 ### Context Caching (BaseGemini)
+- **Gemini 4 models reject explicit caching** (`caches.create` → 400). 3.8-flash works.
 - `cachedContent` constructor option or `useCache(name)` to attach a cache
 - `createCache(config)` auto-populates model + systemInstruction from instance
 - Cache CRUD: `getCache()`, `listCaches()` (returns array), `updateCache()`, `deleteCache()`
@@ -302,7 +305,7 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - Task types: `RETRIEVAL_DOCUMENT`, `RETRIEVAL_QUERY`, `SEMANTIC_SIMILARITY`, `CLUSTERING`, `CLASSIFICATION`
 - `outputDimensionality` controls vector size (supported by gemini-embedding-001)
 
-### Billing Labels (Vertex AI)
+### Billing Labels (Vertex AI and Gemini API)
 - Constructor-level: `labels: { app: 'myapp', env: 'prod' }` — folded into the session config by `_getChatCreateOptions()`
 - Per-message: `send(payload, { labels: { ... } })` / `chat()` / `stream()` on every chat-session class
 - **`@google/genai` resolves a chat send as `config: params.config ?? this.config` — a per-message config REPLACES the create-time session config, it does NOT merge.** Never pass a bare `{ config: { labels } }` to `sendMessage`/`sendMessageStream`; it silently drops `systemInstruction`, `responseSchema`, `responseMimeType`, `maxOutputTokens`, `thinkingConfig`, `tools` and `cachedContent` for that request. This was the 2.6.2 bug.

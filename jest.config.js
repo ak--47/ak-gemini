@@ -1,6 +1,7 @@
 // jest.config.js
 export default {
-	testEnvironment: 'node',
+	// Custom env: copies Node's undici dispatcher into the sandbox (@google/genai 3.x needs it).
+	testEnvironment: '<rootDir>/tests/jest-environment.cjs',
 	transform: {},
 	moduleNameMapper: {	'^(\\.{1,2}/.*)\\.js$': '$1.js'	},
 	coverageDirectory: "./coverage",

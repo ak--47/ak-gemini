@@ -1,5 +1,93 @@
 # Changelog
 
+## 3.0.0
+
+`@google/genai` 2.18 → 3.6, Gemini 4 support, and Vertex AI with Application
+Default Credentials and no project configured. Major bump because the SDK now
+requires Node 22 and the default models change. No method signature changes.
+See [UPGRADING.md](./UPGRADING.md#27x--300).
+
+All behaviour below was measured live on 2026-11-19 (Vertex `global` and the
+Gemini Developer API).
+
+### Breaking
+
+- **Node `>=22`** (`engines` field added). `@google/genai` 3.0 dropped Node 20.
+- **Default model → `gemini-3.8-flash`** (was `gemini-3.7-flash`, which Google
+  reroutes to 3.8 on the Gemini API and retires on Vertex on 2027-01-28). Same
+  rate card. On Vertex it is served from `global` and `us`, **not
+  `us-central1`** (404). Region-pinned callers: pass `modelName` or
+  `location: 'global'`.
+- **`ImageGenerator` default → `gemini-nano-banana-2.1`** (was
+  `gemini-3.1-flash-image-preview`, which returns 404 on Vertex). Image output
+  bills at $30/M, half the old model.
+- **Thinking config is no longer dropped on unknown models.** A model missing
+  from `THINKING_CAPABILITIES` now receives `effort`/`thinkingConfig` as given,
+  and the API accepts or rejects it. Image, TTS, live, embedding and omni
+  models still drop it with a warning.
+
+### Fixed
+
+- **`effort` was silently dropped on every Gemini 4 model**, with a warning,
+  because `THINKING_SUPPORTED_MODELS` had no `gemini-4` pattern.
+- **`effort: 'minimal'` was a 400 on the default model** (3.7-flash), and on
+  3.8-flash and Gemini 4. It now clamps to `low` on models that reject it.
+- **`thinkingBudget` is never sent to Gemini 4 models**, which reject it with
+  any value. `thinkingConfig: {}` used to inject `thinkingBudget: 0`. A budget
+  is translated to a level (0 → lowest, ≤2048 → low, ≤8192 → medium, else
+  high; -1 → model default).
+- **Gemini API callers kept context caching and `-latest` aliases.**
+  `@google/genai` 3.0 moved the Gemini API to `v1`, where `caches.*` is a 404
+  and `gemini-flash-latest` is a 404. ak-gemini pins `v1beta`.
+
+### Added
+
+- **Vertex AI with ADC and no project.** `vertexai: true` no longer throws when
+  neither `project` nor `GOOGLE_CLOUD_PROJECT` is set. The project is read from
+  Application Default Credentials (credentials file, gcloud config, or the
+  metadata server inside GCP) on the first API call. A clear error names the
+  cause if none is found. `google-auth-library` is now a direct dependency.
+- **`THINKING_CAPABILITIES`** / **`thinkingCapabilities(model)`** — measured
+  per-model thinking levels and budget support. `effort` maps per model:
+  `xhigh` is sent natively on Gemini 4 Neon and Hydrogen and clamps to `high`
+  elsewhere; `max` maps to the model's highest level.
+- **`apiVersion`** option. Gemini API default `'v1beta'` unless
+  `GOOGLE_GENAI_API_VERSION` is set; Vertex default is the SDK's.
+- **`usage.trafficType`** (e.g. `ON_DEMAND`) from `usageMetadata`.
+- **`store`** option (Gemini API only; warned and not sent on Vertex).
+- **`DEFAULT_MODEL`**, **`DEFAULT_GEMINI_API_VERSION`** exports.
+- **Pricing:** `gemini-4-carbon` / `gemini-4-argon` ($2/$10/$0.10 through
+  2026-11-30, then $4/$20/$0.20; Vertex bills list price with 50% credits,
+  not modelled), `gemini-4-neon` ($3/$15/$0.15), `gemini-4-hydrogen`
+  ($1.50/$7.50/$0.075), `gemini-nano-banana-2.1` ($1.50/$7.50 text),
+  `gemini-embedding-2` ($0.20).
+
+### Changed
+
+- **`MODEL_PRICING_AS_OF` → `2026-11-19`.** No existing rate changed.
+- **`gemini-flash-latest` → `gemini-3.8-flash`** for pricing (the API echoes
+  3.8-flash for it).
+- Grounding cost note: Gemini 3+ bills $14 per 1,000 search queries after 5,000
+  free per month (was documented as $35/1k, which is the 2.5 rate).
+- Dependencies: `@google/genai` ^3.6.1, `google-auth-library` ^10.9.1 (new),
+  `dotenv` ^17.4.2, `pino` ^10.4.0, `pino-pretty` ^13.2.0; dev `esbuild`
+  ^0.27.7, `jest` ^30.5.2.
+
+### Known limits
+
+- **Gemini 4 has no explicit context caching.** `createCache()` returns
+  Google's 400 ("does not support explicit context caching"). Use 3.8-flash for
+  explicit caches.
+- **`gemini-4-carbon` is slow**: 67–88 s for a one-word reply in testing.
+- **`gemini-embedding-001` returns 404 on Vertex `global`.** It still works on
+  regional endpoints. The `Embedding` default is unchanged so stored vectors
+  stay compatible; pass `modelName: 'gemini-embedding-2'` to move.
+- **Jest:** `@google/genai` 3.x fails every request inside Jest's sandbox
+  ("Undici globalDispatcher is not available"). This repo's tests use
+  `tests/jest-environment.cjs` to fix it; consumers testing with Jest need the same.
+- `gemini-omni-1.2-flash` works only through the Interactions API, which
+  ak-gemini does not wrap.
+
 ## 2.7.1
 
 Pricing-table update. No code paths change, no signatures change.

@@ -123,7 +123,7 @@ class RagAgent extends BaseGemini {
 			const ext = extname(resolvedPath).toLowerCase();
 			const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
 
-			const uploaded = await this._withRetry(() => this.genAIClient.files.upload({
+			const uploaded = await this._withRetry(async () => (await this._ensureClient()).files.upload({
 				file: resolvedPath,
 				config: { displayName: basename(resolvedPath), mimeType }
 			}));
@@ -333,7 +333,7 @@ class RagAgent extends BaseGemini {
 
 		const start = Date.now();
 		while (Date.now() - start < FILE_POLL_TIMEOUT_MS) {
-			const updated = await this.genAIClient.files.get({ name: file.name });
+			const updated = await (await this._ensureClient()).files.get({ name: file.name });
 			if (updated.state === 'ACTIVE') return;
 			if (updated.state === 'FAILED') {
 				throw new Error(`File processing failed: ${file.displayName || file.name}`);

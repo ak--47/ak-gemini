@@ -9,9 +9,9 @@ describe('ImageGenerator', () => {
 	// ── Constructor ──────────────────────────────────────────────────────────
 
 	describe('Constructor', () => {
-		it('should default model to gemini-3.1-flash-image-preview', () => {
+		it('should default model to gemini-nano-banana-2.1', () => {
 			const g = new ImageGenerator({ ...BASE_OPTIONS });
-			expect(g.modelName).toBe('gemini-3.1-flash-image-preview');
+			expect(g.modelName).toBe('gemini-nano-banana-2.1');
 		});
 
 		it('should accept custom model name', () => {
@@ -207,7 +207,7 @@ describe('ImageGenerator', () => {
 			// Override the first choice with GEMINI_IMAGE_TEST_MODEL.
 			const candidates = [
 				process.env.GEMINI_IMAGE_TEST_MODEL,
-				undefined,                 // package default (gemini-3.1-flash-image-preview)
+				undefined,                 // package default (gemini-nano-banana-2.1)
 				'gemini-2.5-flash-image'   // GA fallback
 			].filter((m, i, a) => a.indexOf(m) === i);
 

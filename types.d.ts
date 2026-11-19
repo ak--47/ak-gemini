@@ -13,8 +13,9 @@ export interface ThinkingConfig {
 
 /**
  * Cross-package reasoning-effort levels (same option name in ak-claude).
- * Gemini's wire field is `thinkingConfig.thinkingLevel`; `xhigh` and `max` are
- * ak-claude-only levels and clamp to `high` here.
+ * Gemini's wire field is `thinkingConfig.thinkingLevel`. Accepted levels vary by
+ * model: a level the model rejects clamps to its nearest accepted level, and
+ * `max` (ak-claude-only) maps to the model's highest level.
  */
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -87,6 +88,8 @@ export interface ResponseMetadata {
   totalTokens: number;
   timestamp: number;
   groundingMetadata?: GroundingMetadata | null;
+  modelStatus?: string | null;
+  trafficType?: string | null;
 }
 
 export interface UsageData {
@@ -116,6 +119,8 @@ export interface UsageData {
   groundingMetadata?: GroundingMetadata | null;
   /** Model lifecycle status from Google (e.g., 'DEPRECATED'). Surfaced from @google/genai 1.47+. */
   modelStatus?: string | null;
+  /** Billing traffic type from `usageMetadata.trafficType` (e.g. 'ON_DEMAND', 'PROVISIONED_THROUGHPUT'). Last round's value. */
+  trafficType?: string | null;
   /**
    * Estimated USD cost from MODEL_PRICING (input + cached input + output + thoughts).
    * `null` means the model's pricing is UNKNOWN — it does NOT mean the call was free.
@@ -183,7 +188,7 @@ export type ServiceTier = 'STANDARD' | 'FLEX' | 'PRIORITY';
 // ── Constructor Options ──────────────────────────────────────────────────────
 
 export interface BaseGeminiOptions {
-  /** Gemini model to use (default: 'gemini-3.7-flash') */
+  /** Gemini model to use (default: 'gemini-3.8-flash'; on Vertex served from `global`/`us`, not `us-central1`) */
   modelName?: string;
   /** System prompt for the model (null or false to disable) */
   systemPrompt?: string | null | false;
@@ -213,17 +218,27 @@ export interface BaseGeminiOptions {
   apiKey?: string;
   /** Use Vertex AI instead of Gemini API */
   vertexai?: boolean;
-  /** Google Cloud project ID (required for Vertex AI) */
+  /**
+   * Google Cloud project ID for Vertex AI. Falls back to GOOGLE_CLOUD_PROJECT, then
+   * to the project of the Application Default Credentials (the metadata server
+   * inside GCP), resolved on the first API call.
+   */
   project?: string;
-  /** Google Cloud location/region */
+  /** Google Cloud location/region (default: SDK default, `global`) */
   location?: string;
+  /**
+   * API version passed to `GoogleGenAI`. Default on the Gemini API: `'v1beta'`
+   * (keeps context caching, `-latest` aliases and preview models working), unless
+   * GOOGLE_GENAI_API_VERSION is set. Default on Vertex: the SDK's (`v1beta1`).
+   */
+  apiVersion?: string;
   /** Authentication options for Vertex AI */
   googleAuthOptions?: GoogleAuthOptions;
 
-  /** Billing labels for cost segmentation (Vertex AI only) */
+  /** Billing labels for cost segmentation (Vertex AI and Gemini API) */
   labels?: Record<string, string>;
 
-  /** Enable Google Search grounding (WARNING: costs $35/1k queries) */
+  /** Enable Google Search grounding (WARNING: Gemini 3+ bills $14 per 1k search queries after 5k free/month; 2.5 bills $35 per 1k prompts) */
   enableGrounding?: boolean;
   /** Google Search grounding configuration (searchTypes, excludeDomains, timeRangeFilter) */
   groundingConfig?: Record<string, any>;
@@ -244,6 +259,9 @@ export interface BaseGeminiOptions {
 
   /** Surface server-side tool invocations (e.g. Google Search) in the response. @google/genai 1.46+ */
   includeServerSideToolInvocations?: boolean;
+
+  /** Whether Google may store the request/response (`GenerateContentConfig.store`). Gemini API only; ignored on Vertex. */
+  store?: boolean;
 }
 
 export interface TransformerOptions extends BaseGeminiOptions {
@@ -275,7 +293,7 @@ export interface TransformerOptions extends BaseGeminiOptions {
   onlyJSON?: boolean;
   /** Global async validator function for response validation */
   asyncValidator?: AsyncValidatorFunction;
-  /** Enable Google Search grounding (WARNING: costs $35/1k queries) */
+  /** Enable Google Search grounding (WARNING: Gemini 3+ bills $14 per 1k search queries after 5k free/month; 2.5 bills $35 per 1k prompts) */
   enableGrounding?: boolean;
   /** Additional grounding configuration */
   groundingConfig?: Record<string, any>;
@@ -644,6 +662,9 @@ export declare class BaseGemini {
   cachedContent: string | null;
   serviceTier: ServiceTier | null;
   includeServerSideToolInvocations: boolean;
+  /** API version passed to the client; undefined = SDK default. */
+  apiVersion: string | undefined;
+  store: boolean | undefined;
   /** Normalized `effort` option; null when unset. */
   effort: EffortLevel | null;
 
@@ -661,6 +682,8 @@ export declare class BaseGemini {
     note: string;
   }>;
 
+  /** @internal Resolves the Vertex project from ADC if needed and returns the client. */
+  protected _ensureClient(): Promise<any>;
   /** @internal Validates the `effort` option; throws on an unknown level. */
   protected _normalizeEffort(effort?: string | null): EffortLevel | null;
 
@@ -823,6 +846,23 @@ export declare const MODEL_PRICING: Record<string, ModelPricing>;
 export declare const MODEL_PRICING_AS_OF: string;
 /** Floating `-latest` alias → canonical model id, for pricing resolution. */
 export declare const MODEL_ALIASES: Record<string, string>;
+/** Per-model thinking support: accepted thinkingLevel values and whether thinkingBudget is accepted. */
+export interface ThinkingCapability {
+  pattern: RegExp;
+  /** Accepted thinkingLevel values, lowest first; null = budget-only model. */
+  levels: string[] | null;
+  budget: boolean;
+}
+/** Measured per-model thinking support, first match wins. */
+export declare const THINKING_CAPABILITIES: readonly ThinkingCapability[];
+/** Regexes of models that support thinking (derived from THINKING_CAPABILITIES). */
+export declare const THINKING_SUPPORTED_MODELS: readonly RegExp[];
+/** Returns the THINKING_CAPABILITIES entry for a model, or null if unknown. */
+export declare function thinkingCapabilities(modelName: string): ThinkingCapability | null;
+/** Default generative model id. */
+export declare const DEFAULT_MODEL: string;
+/** API version ak-gemini pins on the Gemini API ('v1beta'). */
+export declare const DEFAULT_GEMINI_API_VERSION: string;
 /** Valid values for the `effort` option. */
 export declare const EFFORT_LEVELS: readonly EffortLevel[];
 /** Resolves pricing for a model id (follows -latest aliases). `null` means UNKNOWN, not free. */

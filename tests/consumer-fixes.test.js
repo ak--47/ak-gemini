@@ -6,8 +6,8 @@
  */
 
 import { jest } from '@jest/globals';
-import { Message, Chat, Transformer, ToolAgent } from '../index.js';
-import { validateSchema, resolvePricing, computeCost, MODEL_PRICING, MODEL_ALIASES, MODEL_PRICING_AS_OF, EFFORT_LEVELS } from '../index.js';
+import { Message, Chat, Transformer, ToolAgent, ImageGenerator, BaseGemini } from '../index.js';
+import { validateSchema, resolvePricing, computeCost, MODEL_PRICING, MODEL_ALIASES, MODEL_PRICING_AS_OF, EFFORT_LEVELS, THINKING_CAPABILITIES, THINKING_SUPPORTED_MODELS, thinkingCapabilities, DEFAULT_MODEL, DEFAULT_GEMINI_API_VERSION } from '../index.js';
 
 const KEY = { apiKey: 'test-key', logLevel: 'silent' };
 
@@ -123,7 +123,7 @@ describe('consumer-fixes (ak-gemini)', () => {
 		});
 
 		it('resolves -latest aliases for pricing', () => {
-			expect(resolvePricing('gemini-flash-latest')).toEqual(resolvePricing('gemini-3.7-flash'));
+			expect(resolvePricing('gemini-flash-latest')).toEqual(resolvePricing('gemini-3.8-flash'));
 			expect(resolvePricing('gemini-flash-lite-latest')).toEqual(resolvePricing('gemini-3.5-flash-lite'));
 			expect(resolvePricing('gemini-pro-latest')).toEqual(resolvePricing('gemini-3.1-pro-preview'));
 			expect(resolvePricing('totally-made-up')).toBeNull();
@@ -741,8 +741,211 @@ describe('consumer-fixes (ak-gemini)', () => {
 			expect(resolvePricing('gemini-3.7-flash', { at: '2027-01-01' }).introUntil).toBeUndefined();
 		});
 
-		it('defaults to gemini-3.7-flash', () => {
-			expect(new Chat({ ...KEY }).modelName).toBe('gemini-3.7-flash');
+	});
+
+	// ── 3.0.0: @google/genai 3.x, Gemini 4, ADC ──
+	describe('3.0.0 update', () => {
+		const savedEnv = { ...process.env };
+		afterEach(() => { process.env = { ...savedEnv }; jest.restoreAllMocks(); });
+
+		describe('defaults', () => {
+			it('defaults to gemini-3.8-flash', () => {
+				expect(DEFAULT_MODEL).toBe('gemini-3.8-flash');
+				expect(new Chat({ ...KEY }).modelName).toBe('gemini-3.8-flash');
+			});
+
+			it('ImageGenerator defaults to gemini-nano-banana-2.1', () => {
+				expect(new ImageGenerator({ ...KEY }).modelName).toBe('gemini-nano-banana-2.1');
+			});
+		});
+
+		describe('thinking capabilities (measured 2026-11-19)', () => {
+			const level = (modelName, effort, thinkingConfig) =>
+				new Message({ ...KEY, modelName, effort, thinkingConfig }).chatConfig.thinkingConfig;
+
+			it('applies effort on Gemini 4 models (2.7.x dropped it)', () => {
+				for (const m of ['gemini-4-carbon', 'gemini-4-argon', 'gemini-4-neon', 'gemini-4-hydrogen']) {
+					expect(level(m, 'medium')).toEqual({ thinkingLevel: 'medium' });
+				}
+			});
+
+			it('sends xhigh natively only where accepted', () => {
+				expect(level('gemini-4-neon', 'xhigh').thinkingLevel).toBe('xhigh');
+				expect(level('gemini-4-hydrogen', 'xhigh').thinkingLevel).toBe('xhigh');
+				expect(level('gemini-4-carbon', 'xhigh').thinkingLevel).toBe('high');
+				expect(level('gemini-4-argon', 'xhigh').thinkingLevel).toBe('high');
+				expect(level('gemini-3.8-flash', 'xhigh').thinkingLevel).toBe('high');
+			});
+
+			it('maps max to the highest accepted level', () => {
+				expect(level('gemini-4-neon', 'max').thinkingLevel).toBe('xhigh');
+				expect(level('gemini-4-argon', 'max').thinkingLevel).toBe('high');
+				expect(level('gemini-3.6-flash', 'max').thinkingLevel).toBe('high');
+			});
+
+			it('clamps minimal up to low where minimal is rejected', () => {
+				for (const m of ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-4-hydrogen', 'gemini-4-carbon']) {
+					expect(level(m, 'minimal').thinkingLevel).toBe('low');
+				}
+				expect(level('gemini-3.6-flash', 'minimal').thinkingLevel).toBe('minimal');
+				expect(level('gemini-3.5-flash-lite', 'minimal').thinkingLevel).toBe('minimal');
+			});
+
+			it('never sends thinkingBudget to a Gemini 4 model', () => {
+				expect(level('gemini-4-neon', undefined, {})).toEqual({});
+				expect(level('gemini-4-neon', undefined, { thinkingBudget: 0 })).toEqual({ thinkingLevel: 'low' });
+				expect(level('gemini-4-neon', undefined, { thinkingBudget: 4096 })).toEqual({ thinkingLevel: 'medium' });
+				expect(level('gemini-4-neon', undefined, { thinkingBudget: 20000 })).toEqual({ thinkingLevel: 'high' });
+				expect(level('gemini-4-neon', undefined, { thinkingBudget: -1 })).toEqual({});
+				expect(level('gemini-4-neon', undefined, { thinkingBudget: 0, includeThoughts: true })).toEqual({ thinkingLevel: 'low', includeThoughts: true });
+			});
+
+			it('keeps thinkingBudget on models that accept it', () => {
+				expect(level('gemini-3.8-flash', undefined, {})).toEqual({ thinkingBudget: 0 });
+				expect(level('gemini-2.5-flash', undefined, { thinkingBudget: 1024 })).toEqual({ thinkingBudget: 1024 });
+			});
+
+			it('ignores effort on budget-only 2.x models', () => {
+				expect(level('gemini-2.5-flash', 'high', { thinkingBudget: 1024 })).toEqual({ thinkingBudget: 1024 });
+			});
+
+			it('normalizes an upper-case thinkingLevel', () => {
+				expect(level('gemini-4-carbon', undefined, { thinkingLevel: 'XHIGH' }).thinkingLevel).toBe('high');
+				expect(level('gemini-4-carbon', undefined, { thinkingLevel: 'HIGH' }).thinkingLevel).toBe('HIGH');
+			});
+
+			it('passes thinking config through unchanged on an unknown model', () => {
+				expect(level('gemini-9-future', 'xhigh')).toEqual({ thinkingLevel: 'xhigh' });
+				expect(level('gemini-9-future', undefined, { thinkingBudget: 512 })).toEqual({ thinkingBudget: 512 });
+			});
+
+			it('still drops thinking config on image models', () => {
+				expect(level('gemini-nano-banana-2.1', 'high')).toBeUndefined();
+				expect(level('gemini-3.1-flash-image-preview', 'high')).toBeUndefined();
+			});
+
+			it('exports the table and a derived THINKING_SUPPORTED_MODELS', () => {
+				expect(THINKING_SUPPORTED_MODELS).toHaveLength(THINKING_CAPABILITIES.length);
+				expect(thinkingCapabilities('gemini-4-hydrogen')).toMatchObject({ budget: false });
+				expect(thinkingCapabilities('nope')).toBeNull();
+			});
+		});
+
+		describe('API version', () => {
+			it('pins v1beta on the Gemini API by default', () => {
+				delete process.env.GOOGLE_GENAI_API_VERSION;
+				const msg = new Message({ ...KEY });
+				expect(DEFAULT_GEMINI_API_VERSION).toBe('v1beta');
+				expect(msg.apiVersion).toBe('v1beta');
+			});
+
+			it('defers to GOOGLE_GENAI_API_VERSION when set', () => {
+				process.env.GOOGLE_GENAI_API_VERSION = 'v1';
+				expect(new Message({ ...KEY }).apiVersion).toBeUndefined();
+			});
+
+			it('uses an explicit apiVersion option', () => {
+				expect(new Message({ ...KEY, apiVersion: 'v1' }).apiVersion).toBe('v1');
+			});
+
+			it('leaves Vertex on the SDK default', () => {
+				expect(new Message({ vertexai: true, project: 'p', logLevel: 'silent' }).apiVersion).toBeUndefined();
+			});
+		});
+
+		describe('Vertex AI with Application Default Credentials', () => {
+			it('builds the client at construction when a project is known', () => {
+				const msg = new Message({ vertexai: true, project: 'p', logLevel: 'silent' });
+				expect(msg.genAIClient).not.toBeNull();
+			});
+
+			it('does not throw without a project; resolves it from ADC on init()', async () => {
+				delete process.env.GOOGLE_CLOUD_PROJECT;
+				const spy = jest.spyOn(BaseGemini.prototype, '_discoverProject').mockResolvedValue('adc-project');
+				const msg = new Message({ vertexai: true, logLevel: 'silent' });
+				expect(msg.genAIClient).toBeNull();
+				await msg.init();
+				expect(msg.project).toBe('adc-project');
+				expect(msg.genAIClient).not.toBeNull();
+				await msg.init(true);
+				expect(spy).toHaveBeenCalledTimes(1);
+			});
+
+			it('resolves the project before estimate() and cache calls', async () => {
+				delete process.env.GOOGLE_CLOUD_PROJECT;
+				jest.spyOn(BaseGemini.prototype, '_discoverProject').mockResolvedValue('adc-project');
+				const chat = new Chat({ vertexai: true, logLevel: 'silent' });
+				const client = await chat._ensureClient();
+				expect(client).toBe(chat.genAIClient);
+				expect(chat.project).toBe('adc-project');
+			});
+
+			it('surfaces a clear error when ADC has no project, and retries next time', async () => {
+				delete process.env.GOOGLE_CLOUD_PROJECT;
+				const spy = jest.spyOn(BaseGemini.prototype, '_discoverProject').mockRejectedValue(new Error('Unable to detect a Project Id'));
+				const msg = new Message({ vertexai: true, logLevel: 'silent' });
+				await expect(msg.init()).rejects.toThrow(/requires a project ID.*Unable to detect/);
+				await expect(msg.init()).rejects.toThrow(/requires a project ID/);
+				expect(spy).toHaveBeenCalledTimes(2);
+			});
+		});
+
+		describe('usage', () => {
+			it('surfaces trafficType per call and on getLastUsage()', async () => {
+				const msg = new Message({ ...KEY });
+				const resp = fakeResponse('ok', 10, 2, 'gemini-3.8-flash');
+				resp.usageMetadata.trafficType = 'ON_DEMAND';
+				stubGen(msg, jest.fn(async () => resp));
+				const r = await msg.send('hi');
+				expect(r.usage.trafficType).toBe('ON_DEMAND');
+				expect(msg.getLastUsage().trafficType).toBe('ON_DEMAND');
+			});
+
+			it('counts a stream round once when the SDK merges usage across continuation hops', () => {
+				const chat = new Chat({ ...KEY });
+				chat._resetUsage();
+				const tracker = chat._streamUsage();
+				// @google/genai 2.29+ sets each chunk's usageMetadata to this hop's usage
+				// plus all previous hops, so the last chunk holds the round's total.
+				tracker.track({ modelVersion: 'gemini-3.8-flash', usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50, totalTokenCount: 150 } });
+				tracker.track({ modelVersion: 'gemini-3.8-flash', usageMetadata: { promptTokenCount: 250, candidatesTokenCount: 90, totalTokenCount: 340, initialPromptTokenCount: 100 } });
+				tracker.commit();
+				const u = chat.getLastUsage();
+				expect(u.promptTokens).toBe(250);
+				expect(u.responseTokens).toBe(90);
+				expect(u.attempts).toBe(1);
+			});
+		});
+
+		describe('store option', () => {
+			it('sets store on the Gemini API config', () => {
+				expect(new Message({ ...KEY, store: false }).chatConfig.store).toBe(false);
+			});
+
+			it('does not send store on Vertex', () => {
+				expect(new Message({ vertexai: true, project: 'p', logLevel: 'silent', store: false }).chatConfig.store).toBeUndefined();
+			});
+		});
+
+		describe('pricing (verified 2026-11-19)', () => {
+			it('prices the Gemini 4 models', () => {
+				expect(resolvePricing('gemini-4-hydrogen')).toMatchObject({ input: 1.50, output: 7.50, cachedInput: 0.075 });
+				expect(resolvePricing('gemini-4-neon')).toMatchObject({ input: 3.00, output: 15.00, cachedInput: 0.15 });
+				for (const m of ['gemini-4-carbon', 'gemini-4-argon']) {
+					expect(resolvePricing(m, { at: '2026-11-30' })).toMatchObject({ input: 2.00, output: 10.00, cachedInput: 0.10 });
+					expect(resolvePricing(m, { at: '2026-12-01' })).toMatchObject({ input: 4.00, output: 20.00, cachedInput: 0.20 });
+				}
+			});
+
+			it('prices nano-banana-2.1 and embedding-2', () => {
+				expect(resolvePricing('gemini-nano-banana-2.1')).toMatchObject({ input: 1.50, output: 7.50 });
+				expect(resolvePricing('gemini-embedding-2')).toMatchObject({ input: 0.20 });
+			});
+
+			it('maps gemini-flash-latest to gemini-3.8-flash', () => {
+				expect(MODEL_ALIASES['gemini-flash-latest']).toBe('gemini-3.8-flash');
+				expect(MODEL_PRICING_AS_OF).toBe('2026-11-19');
+			});
 		});
 	});
 });

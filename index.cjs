@@ -32,6 +32,8 @@ __export(index_exports, {
   BaseGemini: () => base_default,
   Chat: () => chat_default,
   CodeAgent: () => code_agent_default,
+  DEFAULT_GEMINI_API_VERSION: () => DEFAULT_GEMINI_API_VERSION,
+  DEFAULT_MODEL: () => DEFAULT_MODEL,
   EFFORT_LEVELS: () => EFFORT_LEVELS,
   Embedding: () => Embedding,
   HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
@@ -42,6 +44,8 @@ __export(index_exports, {
   MODEL_PRICING_AS_OF: () => MODEL_PRICING_AS_OF,
   Message: () => message_default,
   RagAgent: () => rag_agent_default,
+  THINKING_CAPABILITIES: () => THINKING_CAPABILITIES,
+  THINKING_SUPPORTED_MODELS: () => THINKING_SUPPORTED_MODELS,
   ThinkingLevel: () => import_genai2.ThinkingLevel,
   ToolAgent: () => tool_agent_default,
   Transformer: () => transformer_default,
@@ -51,6 +55,7 @@ __export(index_exports, {
   extractJSON: () => extractJSON,
   log: () => logger_default,
   resolvePricing: () => resolvePricing,
+  thinkingCapabilities: () => thinkingCapabilities,
   validateSchema: () => validateSchema
 });
 module.exports = __toCommonJS(index_exports);
@@ -58,6 +63,7 @@ module.exports = __toCommonJS(index_exports);
 // base.js
 var import_dotenv = __toESM(require("dotenv"), 1);
 var import_genai = require("@google/genai");
+var import_google_auth_library = require("google-auth-library");
 
 // logger.js
 var import_pino = __toESM(require("pino"), 1);
@@ -403,26 +409,65 @@ var DEFAULT_THINKING_CONFIG = {
 };
 var DEFAULT_MAX_OUTPUT_TOKENS = 5e4;
 var EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
-var EFFORT_TO_THINKING_LEVEL = {
-  minimal: "minimal",
-  low: "low",
-  medium: "medium",
-  high: "high",
-  xhigh: "high",
-  max: "high"
-};
-var THINKING_SUPPORTED_MODELS = [
-  /^gemini-3(\.\d+)?-pro(-preview)?$/,
-  /^gemini-3(\.\d+)?-flash(-preview)?$/,
-  /^gemini-3(\.\d+)?-flash-lite(-preview)?$/,
-  /^gemini-2\.5-pro/,
-  /^gemini-2\.5-flash(-preview)?$/,
-  /^gemini-2\.5-flash-lite(-preview)?$/,
-  /^gemini-2\.0-flash$/
+var THINKING_LEVEL_ORDER = ["minimal", "low", "medium", "high", "xhigh"];
+var LEVELS_LOW_HIGH = ["low", "medium", "high"];
+var LEVELS_LOW_XHIGH = ["low", "medium", "high", "xhigh"];
+var LEVELS_MINIMAL_HIGH = ["minimal", "low", "medium", "high"];
+var THINKING_CAPABILITIES = [
+  { pattern: /^gemini-4-(neon|hydrogen)$/, levels: LEVELS_LOW_XHIGH, budget: false },
+  { pattern: /^gemini-4-(carbon|argon)$/, levels: LEVELS_LOW_HIGH, budget: false },
+  { pattern: /^gemini-3\.[78]-flash$/, levels: LEVELS_LOW_HIGH, budget: true },
+  { pattern: /^gemini-3(\.\d+)?-pro(-preview)?$/, levels: LEVELS_LOW_HIGH, budget: true },
+  { pattern: /^gemini-3(\.\d+)?-flash(-preview)?$/, levels: LEVELS_MINIMAL_HIGH, budget: true },
+  { pattern: /^gemini-3(\.\d+)?-flash-lite(-preview)?$/, levels: LEVELS_MINIMAL_HIGH, budget: true },
+  { pattern: /^gemini-2\.5-pro/, levels: null, budget: true },
+  { pattern: /^gemini-2\.5-flash(-preview)?$/, levels: null, budget: true },
+  { pattern: /^gemini-2\.5-flash-lite(-preview)?$/, levels: null, budget: true },
+  { pattern: /^gemini-2\.0-flash$/, levels: null, budget: true }
 ];
-var MODEL_PRICING_AS_OF = "2026-09-11";
+function budgetToThinkingLevel(budget) {
+  if (budget < 0) return void 0;
+  if (budget === 0) return "minimal";
+  if (budget <= 2048) return "low";
+  if (budget <= 8192) return "medium";
+  return "high";
+}
+var NO_THINKING_MODELS = /(image|banana|tts|live|transcribe|embedding|omni)/;
+var THINKING_SUPPORTED_MODELS = THINKING_CAPABILITIES.map((c) => c.pattern);
+function thinkingCapabilities(modelName) {
+  return THINKING_CAPABILITIES.find((c) => c.pattern.test(modelName)) || null;
+}
+function clampThinkingLevel(requested, accepted) {
+  if (!accepted) return requested === "max" ? "high" : requested;
+  if (requested === "max") return accepted[accepted.length - 1];
+  if (accepted.includes(requested) || !THINKING_LEVEL_ORDER.includes(requested)) return requested;
+  const idx = THINKING_LEVEL_ORDER.indexOf(requested);
+  const lowest = THINKING_LEVEL_ORDER.indexOf(accepted[0]);
+  return idx < lowest ? accepted[0] : accepted[accepted.length - 1];
+}
+var DEFAULT_MODEL = "gemini-3.8-flash";
+var DEFAULT_GEMINI_API_VERSION = "v1beta";
+var MODEL_PRICING_AS_OF = "2026-11-19";
 var TIER_THRESHOLD = 2e5;
 var MODEL_PRICING = {
+  // Gemini 4 (GA Oct-Nov 2026). Explicit context caching is NOT supported
+  // (`caches.create` returns a 400); cachedInput prices implicit cache hits.
+  // Carbon/Argon intro is a lower list price on the Gemini API. Vertex bills the
+  // full list price and returns 50% as credits, which this table does not model.
+  "gemini-4-carbon": {
+    input: 4,
+    output: 20,
+    cachedInput: 0.2,
+    intro: { input: 2, output: 10, cachedInput: 0.1, until: "2026-11-30" }
+  },
+  "gemini-4-argon": {
+    input: 4,
+    output: 20,
+    cachedInput: 0.2,
+    intro: { input: 2, output: 10, cachedInput: 0.1, until: "2026-11-30" }
+  },
+  "gemini-4-neon": { input: 3, output: 15, cachedInput: 0.15 },
+  "gemini-4-hydrogen": { input: 1.5, output: 7.5, cachedInput: 0.075 },
   // Gemini 3.x stable
   // 3.8, 3.7 and 3.6 Flash share one rate card, including the promo window that
   // runs through 2026-12-31 before doubling on 2027-01-01.
@@ -447,6 +492,8 @@ var MODEL_PRICING = {
   "gemini-3.5-flash": { input: 1.5, output: 9, cachedInput: 0.15 },
   "gemini-3.5-flash-lite": { input: 0.3, output: 2.5, cachedInput: 0.03 },
   "gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cachedInput: 0.025 },
+  "gemini-nano-banana-2.1": { input: 1.5, output: 7.5 },
+  // text-only; image-output is $30/M
   "gemini-3.1-flash-image": { input: 0.5, output: 3 },
   // text-only; image-output is $60/M
   "gemini-3.1-flash-lite-image": { input: 0.25, output: 1.5 },
@@ -488,11 +535,13 @@ var MODEL_PRICING = {
   "gemini-2.0-flash-lite": { input: 0.02, output: 0.1 },
   // Embeddings
   "gemini-embedding-001": { input: 0.15, output: 0 },
+  "gemini-embedding-2": { input: 0.2, output: 0 },
+  // text input; image/audio/video input not modelled
   "gemini-embedding-2-preview": { input: 0.2, output: 0 }
-  // text input; image $0.45, audio $6.50, video $12.00 not modelled
+  // reroutes to gemini-embedding-2 since 2026-11-06
 };
 var MODEL_ALIASES = {
-  "gemini-flash-latest": "gemini-3.7-flash",
+  "gemini-flash-latest": "gemini-3.8-flash",
   "gemini-pro-latest": "gemini-3.1-pro-preview",
   "gemini-flash-lite-latest": "gemini-3.5-flash-lite"
 };
@@ -553,7 +602,7 @@ var BaseGemini = class {
    * @param {BaseGeminiOptions} [options={}]
    */
   constructor(options = {}) {
-    this.modelName = options.modelName || "gemini-3.7-flash";
+    this.modelName = options.modelName || DEFAULT_MODEL;
     if (options.systemPrompt !== void 0) {
       this.systemPrompt = options.systemPrompt;
     } else {
@@ -567,9 +616,7 @@ var BaseGemini = class {
     if (!this.vertexai && !this.apiKey) {
       throw new Error("Missing Gemini API key. Provide via options.apiKey or GEMINI_API_KEY env var. For Vertex AI, set vertexai: true with project and location.");
     }
-    if (this.vertexai && !this.project) {
-      throw new Error("Vertex AI requires a project ID. Provide via options.project or GOOGLE_CLOUD_PROJECT env var.");
-    }
+    this.apiVersion = options.apiVersion || (!this.vertexai && !process.env.GOOGLE_GENAI_API_VERSION ? DEFAULT_GEMINI_API_VERSION : void 0);
     this.resourceExhaustedRetries = options.resourceExhaustedRetries ?? 5;
     this.resourceExhaustedDelay = options.resourceExhaustedDelay ?? 1e3;
     this.healthCheck = options.healthCheck ?? false;
@@ -580,6 +627,7 @@ var BaseGemini = class {
     this.cachedContent = options.cachedContent || null;
     this.serviceTier = options.serviceTier || null;
     this.includeServerSideToolInvocations = options.includeServerSideToolInvocations ?? false;
+    this.store = options.store;
     this.chatConfig = {
       temperature: 0.7,
       topP: 0.95,
@@ -589,6 +637,10 @@ var BaseGemini = class {
     };
     if (this.serviceTier) this.chatConfig["serviceTier"] = this.serviceTier;
     if (this.includeServerSideToolInvocations) this.chatConfig["includeServerSideToolInvocations"] = true;
+    if (typeof this.store === "boolean") {
+      if (this.vertexai) logger_default.warn("`store` is a Gemini API option; ignored on Vertex AI.");
+      else this.chatConfig["store"] = this.store;
+    }
     for (const key of ["temperature", "topP", "topK"]) {
       if (options[key] !== void 0) this.chatConfig[key] = options[key];
     }
@@ -613,13 +665,8 @@ var BaseGemini = class {
     }
     this.effort = this._normalizeEffort(options.effort);
     this._configureThinking(options.thinkingConfig);
-    const clientOptions = this.vertexai ? {
-      vertexai: true,
-      project: this.project,
-      ...this.location && { location: this.location },
-      ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
-    } : { apiKey: this.apiKey };
-    this.genAIClient = new import_genai.GoogleGenAI(clientOptions);
+    this.genAIClient = null;
+    if (!this.vertexai || this.project) this._createClient();
     this.chatSession = null;
     this.lastResponseMetadata = null;
     this.exampleCount = 0;
@@ -642,11 +689,70 @@ var BaseGemini = class {
    */
   async init(force = false) {
     if (this.chatSession && !force) return;
+    await this._ensureClient();
     logger_default.debug(`Initializing ${this.constructor.name} chat session with model: ${this.modelName}...`);
     const chatOptions = this._getChatCreateOptions();
-    this.chatSession = this.genAIClient.chats.create(chatOptions);
+    this.chatSession = /** @type {GoogleGenAI} */
+    this.genAIClient.chats.create(chatOptions);
     await this._healthCheckPing();
     logger_default.debug(`${this.constructor.name}: Chat session initialized.`);
+  }
+  /**
+   * Builds the GoogleGenAI client from resolved auth options.
+   * @private
+   */
+  _createClient() {
+    const clientOptions = this.vertexai ? {
+      vertexai: true,
+      project: this.project,
+      ...this.location && { location: this.location },
+      ...this.googleAuthOptions && { googleAuthOptions: this.googleAuthOptions }
+    } : { apiKey: this.apiKey };
+    if (this.apiVersion) clientOptions.apiVersion = this.apiVersion;
+    this.genAIClient = new import_genai.GoogleGenAI(clientOptions);
+  }
+  /**
+   * Ensures `genAIClient` exists. On Vertex with no project configured, discovers
+   * the project from Application Default Credentials first — inside GCP that is
+   * the metadata server, so a Cloud Run / GKE / GCE service needs no env vars.
+   * Every method that calls the API awaits this.
+   * @returns {Promise<GoogleGenAI>}
+   * @protected
+   */
+  async _ensureClient() {
+    if (this.genAIClient) return this.genAIClient;
+    if (!this._projectPromise) {
+      this._projectPromise = this._discoverProject().then((p) => {
+        if (!p) throw new Error("ADC returned no project id");
+        return p;
+      }).catch((e) => {
+        this._projectPromise = null;
+        throw new Error(`Vertex AI requires a project ID and none could be found. Provide options.project or GOOGLE_CLOUD_PROJECT, or run where Application Default Credentials expose one. Cause: ${e.message}`);
+      });
+    }
+    const project = await this._projectPromise;
+    if (!this.genAIClient) {
+      this.project = project;
+      logger_default.debug(`Vertex AI project resolved from Application Default Credentials: ${project}`);
+      this._createClient();
+    }
+    return (
+      /** @type {GoogleGenAI} */
+      this.genAIClient
+    );
+  }
+  /**
+   * Asks google-auth-library for the ADC project: GOOGLE_CLOUD_PROJECT-style env
+   * vars, the credentials file, gcloud config, then the GCE/Cloud Run metadata server.
+   * @returns {Promise<string>}
+   * @protected
+   */
+  async _discoverProject() {
+    const auth = new import_google_auth_library.GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      ...this.googleAuthOptions || {}
+    });
+    return auth.getProjectId();
   }
   /**
    * Opt-in connectivity check via `models.list()` — runs only when
@@ -656,6 +762,7 @@ var BaseGemini = class {
    * @protected
    */
   async _healthCheckPing() {
+    await this._ensureClient();
     if (!this.healthCheck) return;
     try {
       await this.genAIClient.models.list();
@@ -725,6 +832,7 @@ var BaseGemini = class {
   _createChatSession(history = []) {
     const opts = this._getChatCreateOptions();
     opts.history = history;
+    if (!this.genAIClient) throw new Error(`${this.constructor.name}: client not ready. Call init() first.`);
     return this.genAIClient.chats.create(opts);
   }
   /**
@@ -768,6 +876,7 @@ var BaseGemini = class {
    * @returns {Promise<Array>} The updated chat history
    */
   async seed(examples, opts = {}) {
+    await this._ensureClient();
     await this.init();
     if (!examples || !Array.isArray(examples) || examples.length === 0) {
       logger_default.debug("No examples provided. Skipping seeding.");
@@ -852,7 +961,8 @@ ${contextText}
       totalTokens: response.usageMetadata?.totalTokenCount || promptTokens + responseTokens + thoughtsTokens,
       timestamp: Date.now(),
       groundingMetadata: response.candidates?.[0]?.groundingMetadata || null,
-      modelStatus
+      modelStatus,
+      trafficType: response.usageMetadata?.trafficType || null
     };
     if (modelStatus === "DEPRECATED" && !this._deprecationWarned) {
       logger_default.warn(`Model "${this.modelName}" is marked DEPRECATED by Google. Plan migration.`);
@@ -976,6 +1086,7 @@ ${contextText}
       timestamp: meta.timestamp,
       groundingMetadata: meta.groundingMetadata || null,
       modelStatus: meta.modelStatus || null,
+      trafficType: meta.trafficType || null,
       estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
     };
   }
@@ -1023,6 +1134,7 @@ ${contextText}
       timestamp: Date.now(),
       groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
       modelStatus: response?.modelStatus || null,
+      trafficType: response?.usageMetadata?.trafficType || null,
       estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
     };
   }
@@ -1046,7 +1158,8 @@ ${contextText}
     }
     const nextMessage = typeof nextPayload === "string" ? nextPayload : JSON.stringify(nextPayload, null, 2);
     contents.push({ parts: [{ text: nextMessage }] });
-    const resp = await this._withRetry(() => this.genAIClient.models.countTokens({
+    const client = await this._ensureClient();
+    const resp = await this._withRetry(() => client.models.countTokens({
       model: this.modelName,
       contents
     }));
@@ -1091,7 +1204,8 @@ ${contextText}
     if (config.toolConfig) cacheConfig.toolConfig = config.toolConfig;
     const sysInstruction = config.systemInstruction !== void 0 ? config.systemInstruction : this.systemPrompt;
     if (sysInstruction) cacheConfig.systemInstruction = sysInstruction;
-    const cached = await this._withRetry(() => this.genAIClient.caches.create({
+    const client = await this._ensureClient();
+    const cached = await this._withRetry(() => client.caches.create({
       model: config.model || this.modelName,
       config: cacheConfig
     }));
@@ -1104,14 +1218,16 @@ ${contextText}
    * @returns {Promise<Object>} The cached content resource
    */
   async getCache(cacheName) {
-    return await this._withRetry(() => this.genAIClient.caches.get({ name: cacheName }));
+    const client = await this._ensureClient();
+    return await this._withRetry(() => client.caches.get({ name: cacheName }));
   }
   /**
    * Lists all cached content resources.
    * @returns {Promise<Object>} Pager of cached content resources
    */
   async listCaches() {
-    const pager = await this._withRetry(() => this.genAIClient.caches.list());
+    const client = await this._ensureClient();
+    const pager = await this._withRetry(() => client.caches.list());
     const results = [];
     for await (const cache of pager) {
       results.push(cache);
@@ -1127,7 +1243,8 @@ ${contextText}
    * @returns {Promise<Object>} The updated cache resource
    */
   async updateCache(cacheName, config = {}) {
-    return await this._withRetry(() => this.genAIClient.caches.update({
+    const client = await this._ensureClient();
+    return await this._withRetry(() => client.caches.update({
       name: cacheName,
       config: {
         ...config.ttl && { ttl: config.ttl },
@@ -1142,7 +1259,8 @@ ${contextText}
    * @returns {Promise<void>}
    */
   async deleteCache(cacheName) {
-    await this._withRetry(() => this.genAIClient.caches.delete({ name: cacheName }));
+    const client = await this._ensureClient();
+    await this._withRetry(() => client.caches.delete({ name: cacheName }));
     logger_default.debug(`Cache deleted: ${cacheName}`);
     if (this.cachedContent === cacheName) {
       this.cachedContent = null;
@@ -1226,26 +1344,44 @@ ${contextText}
    * @private
    */
   _configureThinking(thinkingConfig) {
-    const modelSupportsThinking = THINKING_SUPPORTED_MODELS.some((p) => p.test(this.modelName));
     if (thinkingConfig === void 0 && this.effort === null) return;
     if (thinkingConfig === null) {
       delete this.chatConfig.thinkingConfig;
       logger_default.debug(`thinkingConfig set to null - removed from configuration`);
       return;
     }
-    if (!modelSupportsThinking) {
+    const caps = thinkingCapabilities(this.modelName);
+    if (!caps && NO_THINKING_MODELS.test(this.modelName)) {
       logger_default.warn(`Model ${this.modelName} does not support thinking features. Ignoring thinkingConfig/effort.`);
       return;
     }
-    const config = { ...DEFAULT_THINKING_CONFIG, ...thinkingConfig || {} };
+    if (!caps) {
+      logger_default.debug(`Model ${this.modelName} is not in THINKING_CAPABILITIES; sending thinking config unchanged.`);
+    }
+    const base = caps && !caps.budget ? {} : DEFAULT_THINKING_CONFIG;
+    const config = { ...base, ...thinkingConfig || {} };
     if (this.effort !== null) {
-      const level = EFFORT_TO_THINKING_LEVEL[this.effort];
-      if (level !== this.effort) {
-        logger_default.debug(`Effort '${this.effort}' has no Gemini equivalent; using thinkingLevel '${level}'.`);
+      if (caps && !caps.levels) {
+        logger_default.warn(`Model ${this.modelName} has no thinkingLevel; ignoring effort '${this.effort}'. Use thinkingConfig.thinkingBudget instead.`);
+      } else {
+        config.thinkingLevel = this.effort;
       }
-      config.thinkingLevel = level;
+    }
+    if (caps && !caps.budget && config.thinkingBudget !== void 0) {
+      if (config.thinkingLevel === void 0) {
+        const translated = budgetToThinkingLevel(config.thinkingBudget);
+        if (translated) config.thinkingLevel = translated;
+        logger_default.debug(`Model ${this.modelName} does not accept thinkingBudget; translated ${config.thinkingBudget} to thinkingLevel '${translated ?? "(model default)"}'.`);
+      }
+      delete config.thinkingBudget;
     }
     if (config.thinkingLevel !== void 0) {
+      const requested = String(config.thinkingLevel).toLowerCase();
+      const level = clampThinkingLevel(requested, caps ? caps.levels : null);
+      if (level !== requested) {
+        logger_default.debug(`Thinking level '${requested}' is not accepted by ${this.modelName}; using '${level}'.`);
+        config.thinkingLevel = level;
+      }
       delete config.thinkingBudget;
     }
     this.chatConfig.thinkingConfig = config;
@@ -1570,7 +1706,7 @@ Respond with JSON only \u2013 no comments or explanations.
     contents.push({ role: "user", parts: [{ text: payloadStr }] });
     const mergedLabels = { ...this.labels, ...opts.labels || {} };
     this._resetUsage();
-    const result = await this._withRetry(() => this.genAIClient.models.generateContent({
+    const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
       model: this.modelName,
       contents,
       config: {
@@ -1777,7 +1913,7 @@ var Message = class extends base_default {
     const payloadStr = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
     const contents = [{ role: "user", parts: [{ text: payloadStr }] }];
     const mergedLabels = { ...this.labels, ...opts.labels || {} };
-    const result = await this._withRetry(() => this.genAIClient.models.generateContent({
+    const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
       model: this.modelName,
       contents,
       config: {
@@ -3227,7 +3363,7 @@ var RagAgent = class extends base_default {
       logger_default.debug(`Uploading remote file: ${resolvedPath}`);
       const ext = (0, import_node_path2.extname)(resolvedPath).toLowerCase();
       const mimeType = MIME_TYPES[ext] || "application/octet-stream";
-      const uploaded = await this._withRetry(() => this.genAIClient.files.upload({
+      const uploaded = await this._withRetry(async () => (await this._ensureClient()).files.upload({
         file: resolvedPath,
         config: { displayName: (0, import_node_path2.basename)(resolvedPath), mimeType }
       }));
@@ -3396,7 +3532,7 @@ ${serialized}` });
     if (file.state === "ACTIVE") return;
     const start = Date.now();
     while (Date.now() - start < FILE_POLL_TIMEOUT_MS) {
-      const updated = await this.genAIClient.files.get({ name: file.name });
+      const updated = await (await this._ensureClient()).files.get({ name: file.name });
       if (updated.state === "ACTIVE") return;
       if (updated.state === "FAILED") {
         throw new Error(`File processing failed: ${file.displayName || file.name}`);
@@ -3468,7 +3604,7 @@ var Embedding = class extends base_default {
   	 */
   async embed(text, config = {}) {
     if (!this._initialized) await this.init();
-    const result = await this._withRetry(() => this.genAIClient.models.embedContent({
+    const result = await this._withRetry(async () => (await this._ensureClient()).models.embedContent({
       model: this.modelName,
       contents: text,
       config: this._buildConfig(config)
@@ -3487,7 +3623,7 @@ var Embedding = class extends base_default {
   	 */
   async embedBatch(texts, config = {}) {
     if (!this._initialized) await this.init();
-    const result = await this._withRetry(() => this.genAIClient.models.embedContent({
+    const result = await this._withRetry(async () => (await this._ensureClient()).models.embedContent({
       model: this.modelName,
       contents: texts,
       config: this._buildConfig(config)
@@ -3542,7 +3678,7 @@ var Embedding = class extends base_default {
 
 // image-generator.js
 var import_node_fs = require("node:fs");
-var DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview";
+var DEFAULT_IMAGE_MODEL = "gemini-nano-banana-2.1";
 var ImageGenerator = class extends base_default {
   /**
    * @param {import('./types.d.ts').ImageGeneratorOptions} [options={}]
@@ -3605,7 +3741,7 @@ var ImageGenerator = class extends base_default {
         parts.push({ inlineData: { data: img.data, mimeType: img.mimeType } });
       }
     }
-    const result = await this._withRetry(() => this.genAIClient.models.generateContent({
+    const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
       model: this.modelName,
       contents: [{ role: "user", parts }],
       config: this._buildConfig(opts)
@@ -3692,6 +3828,8 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   BaseGemini,
   Chat,
   CodeAgent,
+  DEFAULT_GEMINI_API_VERSION,
+  DEFAULT_MODEL,
   EFFORT_LEVELS,
   Embedding,
   HarmBlockThreshold,
@@ -3702,6 +3840,8 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   MODEL_PRICING_AS_OF,
   Message,
   RagAgent,
+  THINKING_CAPABILITIES,
+  THINKING_SUPPORTED_MODELS,
   ThinkingLevel,
   ToolAgent,
   Transformer,
@@ -3710,5 +3850,6 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   extractJSON,
   log,
   resolvePricing,
+  thinkingCapabilities,
   validateSchema
 });

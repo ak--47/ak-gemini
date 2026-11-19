@@ -18,11 +18,16 @@ describe('BaseGemini — Shared Behavior', () => {
 	});
 
 	describe('Authentication (Vertex AI)', () => {
-		it('should throw on Vertex AI without project', () => {
+		it('should resolve the project from ADC when none is configured', async () => {
 			const savedProject = process.env.GOOGLE_CLOUD_PROJECT;
 			delete process.env.GOOGLE_CLOUD_PROJECT;
 			try {
-				expect(() => new Chat({ vertexai: true })).toThrow(/project/i);
+				const chat = new Chat({ vertexai: true, location: 'global', logLevel: 'warn' });
+				expect(chat.genAIClient).toBeNull();
+				await chat.init();
+				expect(typeof chat.project).toBe('string');
+				expect(chat.project.length).toBeGreaterThan(0);
+				expect(chat.genAIClient).not.toBeNull();
 			} finally {
 				if (savedProject) process.env.GOOGLE_CLOUD_PROJECT = savedProject;
 			}
@@ -190,8 +195,8 @@ describe('BaseGemini — Shared Behavior', () => {
 		it('should ignore thinkingConfig on unsupported models', () => {
 			const chat = new Chat({
 				...BASE_OPTIONS,
-				// flash-lite 2.0 is not in THINKING_SUPPORTED_MODELS (only 2.0-flash is)
-				modelName: 'gemini-2.0-flash-lite',
+				// image models reject thinkingConfig; unknown text models now pass it through
+				modelName: 'gemini-nano-banana-2.1',
 				thinkingConfig: { thinkingBudget: 500 }
 			});
 			expect(chat.chatConfig.thinkingConfig).toBeUndefined();
