@@ -12,6 +12,7 @@ import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import { GoogleAuth } from 'google-auth-library';
 import log from './logger.js';
 import { isJSON } from './json-helpers.js';
+import { toParts } from './files.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_GEMINI_API_VERSION = 'v1beta';
 
 /** Date the pricing table below was last verified against Google's pricing page. */
-const MODEL_PRICING_AS_OF = '2026-11-19';
+const MODEL_PRICING_AS_OF = '2026-11-20';
 
 /** Context-window size at which tiered models switch to their higher rate. */
 const TIER_THRESHOLD = 200_000;
@@ -153,6 +154,9 @@ const TIER_THRESHOLD = 200_000;
  * - Image-output tokens on Nano Banana models bill at $30/M (nano-banana-2.1), $60/M (3.1 Flash Image) or $120/M (3 Pro Image).
  *   Only text-input/text-output rates are modelled here; image-output cost is NOT included in estimateCost().
  * - Audio input is more expensive on most models — listed rate covers text/image/video input.
+ * - TTS models: `output` IS the audio-output rate. The API reports audio as
+ *   candidatesTokenCount (modality AUDIO, 25 tokens per second), so estimateCost()
+ *   DOES model audio output for these rows (verified 2026-11-20).
  * - Cache STORAGE ($1.00/1M tokens/hour on Flash tiers, $4.50 on Pro) is time-based and
  *   NOT modelled here — estimatedCost only covers per-token charges.
  * - Vertex non-global endpoints cost 10% more. NOT modelled.
@@ -195,6 +199,19 @@ const MODEL_PRICING = {
 	'gemini-3.1-flash-image': { input: 0.50, output: 3.00 },        // text-only; image-output is $60/M
 	'gemini-3.1-flash-lite-image': { input: 0.25, output: 1.50 },   // text-only; image-output billed separately
 	'gemini-3-pro-image': { input: 2.00, output: 12.00 },           // text-only; image-output is $120/M
+	// Text-to-speech. input = text input; output = AUDIO output (see NOTES).
+	// Read from the live pricing page 2026-11-20.
+	'gemini-3.8-flash-tts': {
+		input: 1.00, output: 18.00,
+		intro: { input: 0.50, output: 9.00, until: '2026-12-31' }
+	},
+	'gemini-3.8-flash-lite-tts': {
+		input: 1.00, output: 12.00,
+		intro: { input: 0.50, output: 6.00, until: '2026-12-31' }
+	},
+	'gemini-3.1-flash-tts-preview': { input: 1.00, output: 20.00 },
+	'gemini-2.5-flash-preview-tts': { input: 0.50, output: 10.00 },
+	'gemini-2.5-pro-preview-tts': { input: 1.00, output: 20.00 },
 	// Gemini 3.x preview
 	'gemini-3.1-pro-preview': {
 		input: 2.00, output: 12.00, cachedInput: 0.20,
@@ -676,6 +693,59 @@ class BaseGemini {
 		return config;
 	}
 
+	/**
+	 * Builds the user turn for a send: the text prompt followed by resolved
+	 * `files`. With no files it returns the text unchanged (a string), so 3.0.0
+	 * calls send exactly what they sent before.
+	 *
+	 * Stateful (chat-session) classes pass `{ stateful: true }`: on the Gemini API
+	 * every binary uploads, so history keeps a small fileData URI instead of
+	 * re-sending inline bytes each turn; on Vertex (no uploads) bytes already in
+	 * history count toward the inline limit.
+	 *
+	 * Records the uploads as `this._lastUploadedFiles` (surfaced as
+	 * `getLastUsage().files`).
+	 *
+	 * @param {string} text
+	 * @param {any} [files] - One file input or an array
+	 * @param {{ stateful?: boolean }} [opts]
+	 * @returns {Promise<{ message: string|any[], uploaded: Array<Object> }>}
+	 * @protected
+	 */
+	async _buildUserParts(text, files, { stateful = false } = {}) {
+		const list = files == null ? [] : (Array.isArray(files) ? files : [files]);
+		if (list.length === 0) {
+			this._lastUploadedFiles = [];
+			return { message: text, uploaded: [] };
+		}
+		const client = await this._ensureClient();
+		const { parts, uploaded } = await toParts(list, client, {
+			vertexai: this.vertexai,
+			alwaysUpload: stateful,
+			inlineBytesUsed: stateful && this.vertexai ? this._inlineBytesInHistory() : 0,
+			withRetry: fn => this._withRetry(fn)
+		});
+		this._lastUploadedFiles = uploaded;
+		return { message: [{ text }, ...parts], uploaded };
+	}
+
+	/**
+	 * Decoded byte count of every inlineData part in the chat history.
+	 * @returns {number}
+	 * @protected
+	 */
+	_inlineBytesInHistory() {
+		const history = this.chatSession?.getHistory?.() ?? [];
+		let total = 0;
+		for (const turn of history) {
+			for (const part of turn?.parts ?? []) {
+				const data = part?.inlineData?.data;
+				if (data) total += Math.floor(data.length * 3 / 4);
+			}
+		}
+		return total;
+	}
+
 	// ── Chat Session Management ──────────────────────────────────────────────
 
 	/**
@@ -971,7 +1041,8 @@ class BaseGemini {
 			groundingMetadata: meta.groundingMetadata || null,
 			modelStatus: meta.modelStatus || null,
 			trafficType: meta.trafficType || null,
-			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
+			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens),
+			files: this._lastUploadedFiles || []
 		};
 	}
 
@@ -983,12 +1054,13 @@ class BaseGemini {
 	 * @param {number} responseTokens
 	 * @param {number} [thoughtsTokens=0]
 	 * @param {number} [cachedTokens=0] - Cached-content tokens (a SUBSET of promptTokens)
+	 * @param {string} [fallbackModel] - Model to price when modelVersion is unpriced (default: this.modelName)
 	 * @returns {number|null}
 	 * @protected
 	 */
-	_estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
+	_estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0, fallbackModel = this.modelName) {
 		return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
-			?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens, cachedTokens);
+			?? computeCost(fallbackModel, promptTokens, responseTokens, thoughtsTokens, cachedTokens);
 	}
 
 	/**
@@ -999,10 +1071,11 @@ class BaseGemini {
 	 * instance and can cross-talk between concurrent sends.
 	 * @param {Object} response - A single generateContent() response
 	 * @param {number} [attempts=1] - Attempts this call consumed
+	 * @param {string} [modelName] - Model this call targeted (default: this.modelName). FileAgent passes its image/speech model.
 	 * @returns {UsageData}
 	 * @protected
 	 */
-	_usageFromResponse(response, attempts = 1) {
+	_usageFromResponse(response, attempts = 1, modelName = this.modelName) {
 		const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
 		const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
 		const thoughtsTokens = response?.usageMetadata?.thoughtsTokenCount || 0;
@@ -1017,12 +1090,13 @@ class BaseGemini {
 			totalTokens,
 			attempts,
 			modelVersion,
-			requestedModel: this.modelName,
+			requestedModel: modelName,
+			model: modelName,
 			timestamp: Date.now(),
 			groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
 			modelStatus: response?.modelStatus || null,
 			trafficType: response?.usageMetadata?.trafficType || null,
-			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
+			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens, modelName)
 		};
 	}
 

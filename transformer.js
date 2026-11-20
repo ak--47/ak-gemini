@@ -203,6 +203,20 @@ class Transformer extends BaseGemini {
 		// Prepare the payload
 		const originalPayload = this._preparePayload(payload);
 
+		// Resolve files once, outside the retry loop: a format or size error must
+		// throw immediately, and retries must not re-attach files already in history.
+		let firstMessage;
+		try {
+			({ message: firstMessage } = await this._buildUserParts(originalPayload, opts.files, { stateful: true }));
+		} catch (error) {
+			if (opts._restoreGrounding) await opts._restoreGrounding();
+			throw error;
+		}
+		// The SDK records a turn in history only when the call succeeds. If attempt 0
+		// failed (500, timeout, blocked), the files never reached history, and a
+		// retry must carry them again or the model answers without the documents.
+		const historyLenBefore = this.chatSession.getHistory(true)?.length ?? 0;
+
 		// Extract per-message labels
 		const messageOptions = {};
 		if (opts.labels) messageOptions.labels = opts.labels;
@@ -219,7 +233,7 @@ class Transformer extends BaseGemini {
 			try {
 				let transformedPayload;
 				if (attempt === 0) {
-					transformedPayload = await this.rawSend(originalPayload, messageOptions);
+					transformedPayload = await this._rawSendMessage(firstMessage, messageOptions);
 				} else if (lastModelOutput !== null) {
 					// Validation failure: the model produced parseable output that the
 					// validator rejected. Repair the payload it actually returned.
@@ -230,8 +244,13 @@ class Transformer extends BaseGemini {
 					// ORIGINAL INPUT labelled "BAD PAYLOAD" (double-encoded, since
 					// _preparePayload already stringified it) — re-send the task with a
 					// format nudge instead.
-					transformedPayload = await this.rawSend(
-						`${originalPayload}\n\n${EXTRACTION_RETRY_NUDGE}`,
+					const retryText = `${originalPayload}\n\n${EXTRACTION_RETRY_NUDGE}`;
+					const filesInHistory = (this.chatSession.getHistory(true)?.length ?? 0) > historyLenBefore;
+					// _rawSendMessage, not rawSend: rawSend would reset getLastUsage().files.
+					transformedPayload = await this._rawSendMessage(
+						Array.isArray(firstMessage) && !filesInHistory
+							? [{ text: retryText }, ...firstMessage.slice(1)]
+							: retryText,
 						messageOptions
 					);
 				}
@@ -299,10 +318,25 @@ class Transformer extends BaseGemini {
 			? payload
 			: JSON.stringify(payload, null, 2);
 
+		const { message } = await this._buildUserParts(actualPayload, messageOptions.files, { stateful: true });
+		return this._rawSendMessage(message, messageOptions);
+	}
+
+	/**
+	 * Sends an already-built user turn (string or Part[]) and parses the JSON
+	 * response. Shared by rawSend() and send(), which resolves `files` once,
+	 * before its retry loop, so a format error is not retried.
+	 *
+	 * @param {string|Array<Object>} message
+	 * @param {Object} [messageOptions={}]
+	 * @returns {Promise<Object>}
+	 * @private
+	 */
+	async _rawSendMessage(message, messageOptions = {}) {
 		try {
 			// Only set a per-message config when there is something to override — it
 			// REPLACES the session config in @google/genai. See _getSendConfig().
-			const sendParams = { message: actualPayload };
+			const sendParams = { message };
 			const config = this._getSendConfig(messageOptions.labels);
 			if (config) sendParams.config = config;
 
@@ -421,7 +455,8 @@ Respond with JSON only – no comments or explanations.
 			contents.push(...exampleHistory);
 		}
 
-		contents.push({ role: 'user', parts: [{ text: payloadStr }] });
+		const { message: userMessage } = await this._buildUserParts(payloadStr, opts.files);
+		contents.push({ role: 'user', parts: typeof userMessage === 'string' ? [{ text: userMessage }] : userMessage });
 
 		const mergedLabels = { ...this.labels, ...(opts.labels || {}) };
 

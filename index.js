@@ -7,6 +7,7 @@
  * - Message — Stateless one-off messages to AI
  * - ToolAgent — AI agent with user-provided tools
  * - CodeAgent — AI agent that writes and executes code (stub)
+ * - FileAgent — Write files (text, images, WAV) from a prompt; read files with a prompt
  * - BaseGemini — Base class for building custom wrappers
  *
  * @example
@@ -28,11 +29,13 @@ export { default as CodeAgent } from './code-agent.js';
 export { default as RagAgent } from './rag-agent.js';
 export { default as Embedding } from './embedding.js';
 export { default as ImageGenerator } from './image-generator.js';
+export { default as FileAgent } from './file-agent.js';
 export { default as BaseGemini } from './base.js';
 export { MODEL_PRICING, MODEL_PRICING_AS_OF, MODEL_ALIASES, EFFORT_LEVELS, THINKING_CAPABILITIES, THINKING_SUPPORTED_MODELS, thinkingCapabilities, DEFAULT_MODEL, DEFAULT_GEMINI_API_VERSION, resolvePricing, computeCost } from './base.js';
 export { default as log } from './logger.js';
 export { ThinkingLevel, HarmCategory, HarmBlockThreshold } from '@google/genai';
 export { extractJSON, attemptJSONRecovery, validateSchema } from './json-helpers.js';
+export { UnsupportedFormatError, READ_FORMATS, WRITE_FORMATS, writeFormatsFor, pcmToWav } from './files.js';
 
 // ── Default Export (namespace object) ──
 
@@ -44,5 +47,6 @@ import CodeAgent from './code-agent.js';
 import RagAgent from './rag-agent.js';
 import Embedding from './embedding.js';
 import ImageGenerator from './image-generator.js';
+import FileAgent from './file-agent.js';
 
-export default { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator };
+export default { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, FileAgent };

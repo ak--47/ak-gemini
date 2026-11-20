@@ -16,29 +16,10 @@ import { resolve, basename, extname } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import BaseGemini from './base.js';
 import log from './logger.js';
+import { MIME_TYPES, LEGACY_MIME_TYPES, uploadFile, waitForFileActive } from './files.js';
 
-/** @type {Record<string, string>} */
-const MIME_TYPES = {
-	// Text
-	'.txt': 'text/plain', '.md': 'text/plain', '.csv': 'text/csv',
-	'.html': 'text/html', '.htm': 'text/html', '.xml': 'text/xml',
-	'.json': 'application/json', '.js': 'text/javascript', '.mjs': 'text/javascript',
-	'.ts': 'text/plain', '.css': 'text/css', '.yaml': 'text/plain', '.yml': 'text/plain',
-	'.py': 'text/x-python', '.rb': 'text/plain', '.sh': 'text/plain',
-	// Documents
-	'.pdf': 'application/pdf',
-	'.doc': 'application/msword',
-	'.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-	// Images
-	'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-	'.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
-	// Audio
-	'.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
-	'.flac': 'audio/flac', '.aac': 'audio/aac',
-	// Video
-	'.mp4': 'video/mp4', '.webm': 'video/webm', '.avi': 'video/x-msvideo',
-	'.mov': 'video/quicktime', '.mkv': 'video/x-matroska',
-};
+/** Resolved paths already warned about (one warning per file per process). */
+const _warnedRemoteFiles = new Set();
 
 /**
  * @typedef {import('./types').RagAgentOptions} RagAgentOptions
@@ -50,9 +31,6 @@ const MIME_TYPES = {
 const DEFAULT_SYSTEM_PROMPT =
 	'You are a helpful AI assistant. Answer questions based on the provided documents and data. ' +
 	'When referencing information, mention which document or data source it comes from.';
-
-const FILE_POLL_INTERVAL_MS = 2000;
-const FILE_POLL_TIMEOUT_MS = 60_000;
 
 /**
  * AI agent that answers questions grounded in user-provided documents and data.
@@ -121,11 +99,15 @@ class RagAgent extends BaseGemini {
 			log.debug(`Uploading remote file: ${resolvedPath}`);
 
 			const ext = extname(resolvedPath).toLowerCase();
-			const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
+			// Lenient by design (3.0.0 behaviour): unknown types still upload.
+			const mimeType = LEGACY_MIME_TYPES[ext] || MIME_TYPES[ext] || 'application/octet-stream';
+			if (!MIME_TYPES[ext] && !_warnedRemoteFiles.has(resolvedPath)) {
+				_warnedRemoteFiles.add(resolvedPath);
+				log.warn(`RagAgent.remoteFiles: "${basename(resolvedPath)}" (${ext || 'no extension'}) is not a format Gemini reads natively; uploading anyway. The strict "files" option would reject it.`);
+			}
 
-			const uploaded = await this._withRetry(async () => (await this._ensureClient()).files.upload({
-				file: resolvedPath,
-				config: { displayName: basename(resolvedPath), mimeType }
+			const uploaded = await this._withRetry(async () => uploadFile(await this._ensureClient(), resolvedPath, {
+				displayName: basename(resolvedPath), mimeType
 			}));
 
 			await this._waitForFileActive(uploaded);
@@ -201,6 +183,7 @@ class RagAgent extends BaseGemini {
 	 * @param {string} message - The user's question
 	 * @param {Object} [opts={}] - Per-message options
 	 * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+	 * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
 	 * @returns {Promise<RagResponse>}
 	 */
 	async chat(message, opts = {}) {
@@ -208,9 +191,10 @@ class RagAgent extends BaseGemini {
 
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
+		const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
 		this._resetUsage();
 		const response = await this._withRetry(() => this.chatSession.sendMessage({
-			message,
+			message: userMessage,
 			...(sendConfig && { config: sendConfig })
 		}));
 		this._accumulateUsage(response);
@@ -236,10 +220,11 @@ class RagAgent extends BaseGemini {
 		let fullText = '';
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
+		const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
 		this._resetUsage();
 		const usage = this._streamUsage();
 		const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
-			message,
+			message: userMessage,
 			...(sendConfig && { config: sendConfig })
 		}));
 
@@ -329,18 +314,7 @@ class RagAgent extends BaseGemini {
 	 * @private
 	 */
 	async _waitForFileActive(file) {
-		if (file.state === 'ACTIVE') return;
-
-		const start = Date.now();
-		while (Date.now() - start < FILE_POLL_TIMEOUT_MS) {
-			const updated = await (await this._ensureClient()).files.get({ name: file.name });
-			if (updated.state === 'ACTIVE') return;
-			if (updated.state === 'FAILED') {
-				throw new Error(`File processing failed: ${file.displayName || file.name}`);
-			}
-			await new Promise(r => setTimeout(r, FILE_POLL_INTERVAL_MS));
-		}
-		throw new Error(`File processing timed out after ${FILE_POLL_TIMEOUT_MS / 1000}s: ${file.displayName || file.name}`);
+		await waitForFileActive(await this._ensureClient(), file);
 	}
 }
 

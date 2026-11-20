@@ -36,6 +36,7 @@ __export(index_exports, {
   DEFAULT_MODEL: () => DEFAULT_MODEL,
   EFFORT_LEVELS: () => EFFORT_LEVELS,
   Embedding: () => Embedding,
+  FileAgent: () => file_agent_default,
   HarmBlockThreshold: () => import_genai2.HarmBlockThreshold,
   HarmCategory: () => import_genai2.HarmCategory,
   ImageGenerator: () => ImageGenerator,
@@ -43,20 +44,25 @@ __export(index_exports, {
   MODEL_PRICING: () => MODEL_PRICING,
   MODEL_PRICING_AS_OF: () => MODEL_PRICING_AS_OF,
   Message: () => message_default,
+  READ_FORMATS: () => READ_FORMATS,
   RagAgent: () => rag_agent_default,
   THINKING_CAPABILITIES: () => THINKING_CAPABILITIES,
   THINKING_SUPPORTED_MODELS: () => THINKING_SUPPORTED_MODELS,
   ThinkingLevel: () => import_genai2.ThinkingLevel,
   ToolAgent: () => tool_agent_default,
   Transformer: () => transformer_default,
+  UnsupportedFormatError: () => UnsupportedFormatError,
+  WRITE_FORMATS: () => WRITE_FORMATS,
   attemptJSONRecovery: () => attemptJSONRecovery,
   computeCost: () => computeCost,
   default: () => index_default,
   extractJSON: () => extractJSON,
   log: () => logger_default,
+  pcmToWav: () => pcmToWav,
   resolvePricing: () => resolvePricing,
   thinkingCapabilities: () => thinkingCapabilities,
-  validateSchema: () => validateSchema
+  validateSchema: () => validateSchema,
+  writeFormatsFor: () => writeFormatsFor
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -397,6 +403,334 @@ function extractJSON(text) {
   throw new Error(`Could not extract valid JSON from model response. Response preview: ${text.substring(0, 200)}...`);
 }
 
+// files.js
+var import_promises = require("node:fs/promises");
+var import_node_path = require("node:path");
+var TEXT_MIME_TYPES = {
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".csv": "text/csv",
+  ".json": "application/json",
+  ".yaml": "application/yaml",
+  ".yml": "application/yaml",
+  ".xml": "text/xml",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".ts": "text/plain",
+  ".css": "text/css",
+  ".py": "text/x-python",
+  ".rb": "text/plain",
+  ".sh": "text/plain",
+  ".svg": "image/svg+xml"
+};
+var BINARY_MIME_TYPES = {
+  ".pdf": "application/pdf",
+  // Images
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  // Audio
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
+  ".aiff": "audio/aiff",
+  ".aac": "audio/aac",
+  ".ogg": "audio/ogg",
+  ".flac": "audio/flac",
+  // Video
+  ".mp4": "video/mp4",
+  ".mpeg": "video/mpeg",
+  ".mpg": "video/mpeg",
+  ".mov": "video/quicktime",
+  ".avi": "video/x-msvideo",
+  ".flv": "video/x-flv",
+  ".webm": "video/webm",
+  ".wmv": "video/wmv",
+  ".3gp": "video/3gpp"
+};
+var MIME_TYPES = Object.freeze({ ...TEXT_MIME_TYPES, ...BINARY_MIME_TYPES });
+var TEXT_EXTENSIONS = new Set(Object.keys(TEXT_MIME_TYPES));
+var LEGACY_MIME_TYPES = Object.freeze({
+  ".txt": "text/plain",
+  ".md": "text/plain",
+  ".csv": "text/csv",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".xml": "text/xml",
+  ".json": "application/json",
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".ts": "text/plain",
+  ".css": "text/css",
+  ".yaml": "text/plain",
+  ".yml": "text/plain",
+  ".py": "text/x-python",
+  ".rb": "text/plain",
+  ".sh": "text/plain",
+  ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".flac": "audio/flac",
+  ".aac": "audio/aac",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".avi": "video/x-msvideo",
+  ".mov": "video/quicktime",
+  ".mkv": "video/x-matroska"
+});
+var READ_FORMATS = Object.freeze(Object.keys(MIME_TYPES));
+var TEXT_MIMES = new Set(Object.values(TEXT_MIME_TYPES));
+var BINARY_MIMES = new Set(Object.values(BINARY_MIME_TYPES));
+var WRITE_FORMATS = Object.freeze({
+  text: Object.freeze(["txt", "md", "csv", "json", "yaml", "yml", "html", "xml", "svg"]),
+  image: Object.freeze({
+    vertex: Object.freeze(["png", "jpg", "jpeg"]),
+    gemini: Object.freeze(["jpg", "jpeg"])
+  }),
+  audio: Object.freeze(["wav"])
+});
+function writeFormatsFor(vertexai) {
+  return [...WRITE_FORMATS.text, ...WRITE_FORMATS.image[vertexai ? "vertex" : "gemini"], ...WRITE_FORMATS.audio];
+}
+var INLINE_LIMIT_BYTES = Object.freeze({ gemini: 1e8, vertex: 256e6 });
+var HTTPS_URI_SUPPORT = Object.freeze({ gemini: true, vertex: true });
+var UnsupportedFormatError = class extends Error {
+  /**
+   * @param {string} format - Extension without the dot (or a MIME type)
+   * @param {'read'|'write'} direction
+   * @param {{ vertexai?: boolean, who?: string }} [opts]
+   */
+  constructor(format, direction, { vertexai = false, who = "FileAgent" } = {}) {
+    const backend = vertexai ? "vertex" : "gemini";
+    const shown = format === "" ? "a file with no extension" : format.includes("/") ? `"${format}"` : `".${format}"`;
+    let message;
+    let supported;
+    if (direction === "write") {
+      supported = writeFormatsFor(vertexai);
+      message = `Cannot write ${shown}. ${who} (${vertexai ? "Vertex" : "Gemini API"}) writes: ${supported.map((f) => "." + f).join(" ")}`;
+      if (!vertexai && WRITE_FORMATS.image.vertex.includes(format) && !WRITE_FORMATS.image.gemini.includes(format)) {
+        const extra = WRITE_FORMATS.image.vertex.filter((f) => !WRITE_FORMATS.image.gemini.includes(f));
+        message += ` The Gemini API writes images as ${WRITE_FORMATS.image.gemini.map((f) => "." + f).join(" ")} only; Vertex also writes ${extra.map((f) => "." + f).join(" ")}.`;
+      }
+    } else {
+      supported = [...READ_FORMATS];
+      message = `Cannot read ${shown}. ak-gemini reads: ${supported.join(" ")}`;
+    }
+    super(message);
+    this.name = "UnsupportedFormatError";
+    this.format = format;
+    this.direction = direction;
+    this.supported = supported;
+    this.backend = backend;
+  }
+};
+function extOf(nameOrUri) {
+  let p = nameOrUri;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(nameOrUri)) {
+    try {
+      p = new URL(nameOrUri).pathname;
+    } catch {
+    }
+  }
+  return (0, import_node_path.extname)(p).toLowerCase();
+}
+function mimeFromName(nameOrUri) {
+  return MIME_TYPES[extOf(nameOrUri)] || null;
+}
+function baseMime(mime) {
+  return String(mime).split(";")[0].trim().toLowerCase();
+}
+async function uploadFile(client, file, { mimeType, displayName }) {
+  return client.files.upload({ file, config: { displayName, mimeType } });
+}
+async function waitForFileActive(client, file, { intervalMs = 2e3, timeoutMs = 6e4 } = {}) {
+  if (file.state === "ACTIVE") return;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const updated = await client.files.get({ name: file.name });
+    if (updated.state === "ACTIVE") return;
+    if (updated.state === "FAILED") {
+      throw new Error(`File processing failed: ${file.displayName || file.name}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`File processing timed out after ${timeoutMs / 1e3}s: ${file.displayName || file.name}`);
+}
+async function classify(input, vertexai) {
+  if (typeof input === "string") {
+    if (/^gs:\/\//i.test(input) || /^https?:\/\//i.test(input)) return classifyUri(input, void 0, vertexai);
+    const path2 = (0, import_node_path.resolve)(input);
+    const name = (0, import_node_path.basename)(path2);
+    const ext = extOf(path2);
+    const st = await (0, import_promises.stat)(path2);
+    if (TEXT_EXTENSIONS.has(ext)) {
+      return { kind: "text", part: { text: `--- File: ${name} ---
+${await (0, import_promises.readFile)(path2, "utf-8")}` } };
+    }
+    const mimeType = BINARY_MIME_TYPES[ext];
+    if (!mimeType) throw new UnsupportedFormatError(ext.replace(/^\./, ""), "read", { vertexai });
+    return { kind: "binary", path: path2, name, mimeType, size: st.size };
+  }
+  if (Buffer.isBuffer(input) || input instanceof Uint8Array) {
+    throw new Error("A MIME type is required for raw bytes. Pass { data, mimeType } instead of a bare Buffer.");
+  }
+  if (input && typeof input === "object") {
+    if (typeof input.uri === "string") return classifyUri(input.uri, input.mimeType, vertexai);
+    if (input.data !== void 0) {
+      if (!input.mimeType) throw new Error("A MIME type is required: pass { data, mimeType }.");
+      const mime = baseMime(input.mimeType);
+      if (typeof input.data === "string" && !/^[A-Za-z0-9+/_-]*={0,2}$/.test(input.data.replace(/\s+/g, ""))) {
+        throw new Error('A string in { data } must be base64. For plain text pass a Buffer (Buffer.from(text)); strip any "data:...;base64," prefix.');
+      }
+      const buf = typeof input.data === "string" ? Buffer.from(input.data, "base64") : Buffer.from(input.data);
+      if (TEXT_MIMES.has(mime) || mime.startsWith("text/")) {
+        return { kind: "text", part: { text: `--- File: ${input.name || "data"} ---
+${buf.toString("utf-8")}` } };
+      }
+      if (!BINARY_MIMES.has(mime)) throw new UnsupportedFormatError(mime, "read", { vertexai });
+      return { kind: "binary", buffer: buf, name: input.name || "data", mimeType: mime, size: buf.length };
+    }
+  }
+  throw new Error(`Unrecognized file input: ${JSON.stringify(input)?.slice(0, 100)}. Pass a path, a gs:// or https:// URI, { uri, mimeType }, or { data, mimeType }.`);
+}
+function classifyUri(uri, explicitMime, vertexai) {
+  if (/^gs:\/\//i.test(uri) && !vertexai) {
+    throw new Error(`gs:// URIs work only on Vertex AI (${uri}). On the Gemini API pass a local path, an https:// URL, or { data, mimeType }.`);
+  }
+  if (/^https?:\/\//i.test(uri) && !HTTPS_URI_SUPPORT[vertexai ? "vertex" : "gemini"]) {
+    throw new Error(`https:// URIs are not accepted as file data on this backend (${uri}).`);
+  }
+  let mimeType;
+  if (explicitMime) {
+    mimeType = baseMime(explicitMime);
+    if (!BINARY_MIMES.has(mimeType) && !TEXT_MIMES.has(mimeType)) throw new UnsupportedFormatError(mimeType, "read", { vertexai });
+  } else {
+    mimeType = mimeFromName(uri);
+    if (!mimeType) throw new UnsupportedFormatError(extOf(uri).replace(/^\./, ""), "read", { vertexai });
+  }
+  return { kind: "uri", part: { fileData: { fileUri: uri, mimeType } } };
+}
+async function toParts(files, client, opts = {}) {
+  const {
+    vertexai = false,
+    alwaysUpload = false,
+    inlineBytesUsed = 0,
+    withRetry = (fn) => fn(),
+    inlineLimit = INLINE_LIMIT_BYTES[vertexai ? "vertex" : "gemini"]
+  } = opts;
+  const list = files == null ? [] : Array.isArray(files) ? files : [files];
+  const items = [];
+  for (const input of list) items.push(await classify(input, vertexai));
+  const binaries = items.filter((i) => i.kind === "binary");
+  if (vertexai) {
+    const total = inlineBytesUsed + binaries.reduce((s, b) => s + b.size, 0);
+    if (total > inlineLimit) {
+      throw new Error(
+        `Inline files total ${total} bytes${inlineBytesUsed ? ` (including ${inlineBytesUsed} already in this conversation)` : ""}, over the Vertex inline limit of ${inlineLimit} bytes. Vertex cannot upload files; pass a gs:// URI instead.`
+      );
+    }
+  } else {
+    for (const b of binaries) if (alwaysUpload || b.size > inlineLimit) b.upload = true;
+    let total = inlineBytesUsed + binaries.filter((b) => !b.upload).reduce((s, b) => s + b.size, 0);
+    const remaining = binaries.filter((b) => !b.upload).sort((a, b) => b.size - a.size);
+    while (total > inlineLimit && remaining.length) {
+      const b = (
+        /** @type {any} */
+        remaining.shift()
+      );
+      b.upload = true;
+      total -= b.size;
+    }
+  }
+  const parts = [];
+  const uploaded = [];
+  for (const item of items) {
+    if (item.kind !== "binary") {
+      parts.push(item.part);
+      continue;
+    }
+    if (item.upload) {
+      const source = item.path ?? new Blob([item.buffer], { type: item.mimeType });
+      let f;
+      try {
+        f = await withRetry(() => uploadFile(client, source, { mimeType: item.mimeType, displayName: item.name }));
+        await waitForFileActive(client, f);
+      } catch (error) {
+        error.uploaded = f ? [...uploaded, { name: f.name, uri: f.uri, mimeType: f.mimeType || item.mimeType, displayName: f.displayName || item.name, sizeBytes: f.sizeBytes }] : [...uploaded];
+        throw error;
+      }
+      uploaded.push({ name: f.name, uri: f.uri, mimeType: f.mimeType || item.mimeType, displayName: f.displayName || item.name, sizeBytes: f.sizeBytes });
+      parts.push({ fileData: { fileUri: f.uri, mimeType: f.mimeType || item.mimeType } });
+    } else {
+      const buf = item.buffer ?? await (0, import_promises.readFile)(item.path);
+      parts.push({ inlineData: { data: buf.toString("base64"), mimeType: item.mimeType } });
+    }
+  }
+  return { parts, uploaded };
+}
+function pcmToWav(pcm, { sampleRate, channels = 1, bitsPerSample = 16 }) {
+  const blockAlign = channels * bitsPerSample / 8;
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0, "ascii");
+  h.writeUInt32LE(36 + pcm.length, 4);
+  h.write("WAVE", 8, "ascii");
+  h.write("fmt ", 12, "ascii");
+  h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20);
+  h.writeUInt16LE(channels, 22);
+  h.writeUInt32LE(sampleRate, 24);
+  h.writeUInt32LE(sampleRate * blockAlign, 28);
+  h.writeUInt16LE(blockAlign, 32);
+  h.writeUInt16LE(bitsPerSample, 34);
+  h.write("data", 36, "ascii");
+  h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
+}
+function parsePcmMime(mime) {
+  const m = String(mime).toLowerCase();
+  if (!/^audio\/(l16|pcm)\b/.test(m)) throw new Error(`Unexpected audio MIME type "${mime}"; expected audio/L16 PCM.`);
+  const rate = m.match(/rate=(\d+)/);
+  if (!rate) throw new Error(`Audio MIME type "${mime}" has no sample rate.`);
+  const ch = m.match(/channels=(\d+)/);
+  return { sampleRate: Number(rate[1]), channels: ch ? Number(ch[1]) : 1 };
+}
+function wavToPcm(wav) {
+  if (wav.length < 12 || wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 8, 12) !== "WAVE") {
+    throw new Error("Audio bytes are not a WAV file (missing RIFF/WAVE header).");
+  }
+  let fmt = null;
+  let off = 12;
+  while (off + 8 <= wav.length) {
+    const id = wav.toString("ascii", off, off + 4);
+    let size = wav.readUInt32LE(off + 4);
+    const body = off + 8;
+    if (id === "fmt ") {
+      const format = wav.readUInt16LE(body);
+      if (format !== 1) throw new Error(`WAV audio format ${format} is not PCM.`);
+      fmt = { channels: wav.readUInt16LE(body + 2), sampleRate: wav.readUInt32LE(body + 4), bitsPerSample: wav.readUInt16LE(body + 14) };
+    } else if (id === "data") {
+      if (!fmt) throw new Error("WAV file has a data chunk before its fmt chunk.");
+      if (size > wav.length - body) size = wav.length - body;
+      return { pcm: wav.subarray(body, body + size), ...fmt };
+    }
+    off = body + size + size % 2;
+  }
+  throw new Error("WAV file has no data chunk.");
+}
+
 // base.js
 import_dotenv.default.config({ quiet: true });
 var { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
@@ -447,7 +781,7 @@ function clampThinkingLevel(requested, accepted) {
 }
 var DEFAULT_MODEL = "gemini-3.8-flash";
 var DEFAULT_GEMINI_API_VERSION = "v1beta";
-var MODEL_PRICING_AS_OF = "2026-11-19";
+var MODEL_PRICING_AS_OF = "2026-11-20";
 var TIER_THRESHOLD = 2e5;
 var MODEL_PRICING = {
   // Gemini 4 (GA Oct-Nov 2026). Explicit context caching is NOT supported
@@ -500,6 +834,21 @@ var MODEL_PRICING = {
   // text-only; image-output billed separately
   "gemini-3-pro-image": { input: 2, output: 12 },
   // text-only; image-output is $120/M
+  // Text-to-speech. input = text input; output = AUDIO output (see NOTES).
+  // Read from the live pricing page 2026-11-20.
+  "gemini-3.8-flash-tts": {
+    input: 1,
+    output: 18,
+    intro: { input: 0.5, output: 9, until: "2026-12-31" }
+  },
+  "gemini-3.8-flash-lite-tts": {
+    input: 1,
+    output: 12,
+    intro: { input: 0.5, output: 6, until: "2026-12-31" }
+  },
+  "gemini-3.1-flash-tts-preview": { input: 1, output: 20 },
+  "gemini-2.5-flash-preview-tts": { input: 0.5, output: 10 },
+  "gemini-2.5-pro-preview-tts": { input: 1, output: 20 },
   // Gemini 3.x preview
   "gemini-3.1-pro-preview": {
     input: 2,
@@ -821,6 +1170,57 @@ var BaseGemini = class {
     config.labels = { ...config.labels || {}, ...perMessageLabels };
     return config;
   }
+  /**
+   * Builds the user turn for a send: the text prompt followed by resolved
+   * `files`. With no files it returns the text unchanged (a string), so 3.0.0
+   * calls send exactly what they sent before.
+   *
+   * Stateful (chat-session) classes pass `{ stateful: true }`: on the Gemini API
+   * every binary uploads, so history keeps a small fileData URI instead of
+   * re-sending inline bytes each turn; on Vertex (no uploads) bytes already in
+   * history count toward the inline limit.
+   *
+   * Records the uploads as `this._lastUploadedFiles` (surfaced as
+   * `getLastUsage().files`).
+   *
+   * @param {string} text
+   * @param {any} [files] - One file input or an array
+   * @param {{ stateful?: boolean }} [opts]
+   * @returns {Promise<{ message: string|any[], uploaded: Array<Object> }>}
+   * @protected
+   */
+  async _buildUserParts(text, files, { stateful = false } = {}) {
+    const list = files == null ? [] : Array.isArray(files) ? files : [files];
+    if (list.length === 0) {
+      this._lastUploadedFiles = [];
+      return { message: text, uploaded: [] };
+    }
+    const client = await this._ensureClient();
+    const { parts, uploaded } = await toParts(list, client, {
+      vertexai: this.vertexai,
+      alwaysUpload: stateful,
+      inlineBytesUsed: stateful && this.vertexai ? this._inlineBytesInHistory() : 0,
+      withRetry: (fn) => this._withRetry(fn)
+    });
+    this._lastUploadedFiles = uploaded;
+    return { message: [{ text }, ...parts], uploaded };
+  }
+  /**
+   * Decoded byte count of every inlineData part in the chat history.
+   * @returns {number}
+   * @protected
+   */
+  _inlineBytesInHistory() {
+    const history = this.chatSession?.getHistory?.() ?? [];
+    let total = 0;
+    for (const turn of history) {
+      for (const part of turn?.parts ?? []) {
+        const data = part?.inlineData?.data;
+        if (data) total += Math.floor(data.length * 3 / 4);
+      }
+    }
+    return total;
+  }
   // ── Chat Session Management ──────────────────────────────────────────────
   /**
    * Creates a new chat session with the given history.
@@ -1087,7 +1487,8 @@ ${contextText}
       groundingMetadata: meta.groundingMetadata || null,
       modelStatus: meta.modelStatus || null,
       trafficType: meta.trafficType || null,
-      estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
+      estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens),
+      files: this._lastUploadedFiles || []
     };
   }
   /**
@@ -1098,11 +1499,12 @@ ${contextText}
    * @param {number} responseTokens
    * @param {number} [thoughtsTokens=0]
    * @param {number} [cachedTokens=0] - Cached-content tokens (a SUBSET of promptTokens)
+   * @param {string} [fallbackModel] - Model to price when modelVersion is unpriced (default: this.modelName)
    * @returns {number|null}
    * @protected
    */
-  _estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0) {
-    return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens) ?? computeCost(this.modelName, promptTokens, responseTokens, thoughtsTokens, cachedTokens);
+  _estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens = 0, cachedTokens = 0, fallbackModel = this.modelName) {
+    return computeCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens) ?? computeCost(fallbackModel, promptTokens, responseTokens, thoughtsTokens, cachedTokens);
   }
   /**
    * Builds a usage object directly from a single API response, WITHOUT reading
@@ -1112,10 +1514,11 @@ ${contextText}
    * instance and can cross-talk between concurrent sends.
    * @param {Object} response - A single generateContent() response
    * @param {number} [attempts=1] - Attempts this call consumed
+   * @param {string} [modelName] - Model this call targeted (default: this.modelName). FileAgent passes its image/speech model.
    * @returns {UsageData}
    * @protected
    */
-  _usageFromResponse(response, attempts = 1) {
+  _usageFromResponse(response, attempts = 1, modelName = this.modelName) {
     const promptTokens = response?.usageMetadata?.promptTokenCount || 0;
     const responseTokens = response?.usageMetadata?.candidatesTokenCount || 0;
     const thoughtsTokens = response?.usageMetadata?.thoughtsTokenCount || 0;
@@ -1130,12 +1533,13 @@ ${contextText}
       totalTokens,
       attempts,
       modelVersion,
-      requestedModel: this.modelName,
+      requestedModel: modelName,
+      model: modelName,
       timestamp: Date.now(),
       groundingMetadata: response?.candidates?.[0]?.groundingMetadata || null,
       modelStatus: response?.modelStatus || null,
       trafficType: response?.usageMetadata?.trafficType || null,
-      estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens)
+      estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, thoughtsTokens, cachedTokens, modelName)
     };
   }
   // ── Token Estimation ─────────────────────────────────────────────────────
@@ -1410,7 +1814,7 @@ ${contextText}
 var base_default = BaseGemini;
 
 // transformer.js
-var import_promises = __toESM(require("fs/promises"), 1);
+var import_promises2 = __toESM(require("fs/promises"), 1);
 var import_path = __toESM(require("path"), 1);
 var DEFAULT_SYSTEM_INSTRUCTIONS = `
 You are an expert JSON transformation engine. Your task is to accurately convert data payloads from one format to another.
@@ -1471,7 +1875,7 @@ var Transformer = class extends base_default {
         logger_default.debug(`No examples provided, loading from file: ${this.examplesFile}`);
         try {
           const filePath = import_path.default.resolve(this.examplesFile);
-          const raw = await import_promises.default.readFile(filePath, "utf-8");
+          const raw = await import_promises2.default.readFile(filePath, "utf-8");
           examples = JSON.parse(raw);
         } catch (err) {
           throw new Error(`Could not load examples from file: ${this.examplesFile}. ${err.message}`);
@@ -1536,6 +1940,14 @@ var Transformer = class extends base_default {
       };
     }
     const originalPayload = this._preparePayload(payload);
+    let firstMessage;
+    try {
+      ({ message: firstMessage } = await this._buildUserParts(originalPayload, opts.files, { stateful: true }));
+    } catch (error) {
+      if (opts._restoreGrounding) await opts._restoreGrounding();
+      throw error;
+    }
+    const historyLenBefore = this.chatSession.getHistory(true)?.length ?? 0;
     const messageOptions = {};
     if (opts.labels) messageOptions.labels = opts.labels;
     this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, thoughtsTokens: 0, cachedTokens: 0, totalTokens: 0, attempts: 0 };
@@ -1545,14 +1957,16 @@ var Transformer = class extends base_default {
       try {
         let transformedPayload;
         if (attempt === 0) {
-          transformedPayload = await this.rawSend(originalPayload, messageOptions);
+          transformedPayload = await this._rawSendMessage(firstMessage, messageOptions);
         } else if (lastModelOutput !== null) {
           transformedPayload = await this.rebuild(lastModelOutput, lastError.message, messageOptions);
         } else {
-          transformedPayload = await this.rawSend(
-            `${originalPayload}
+          const retryText = `${originalPayload}
 
-${EXTRACTION_RETRY_NUDGE}`,
+${EXTRACTION_RETRY_NUDGE}`;
+          const filesInHistory = (this.chatSession.getHistory(true)?.length ?? 0) > historyLenBefore;
+          transformedPayload = await this._rawSendMessage(
+            Array.isArray(firstMessage) && !filesInHistory ? [{ text: retryText }, ...firstMessage.slice(1)] : retryText,
             messageOptions
           );
         }
@@ -1603,8 +2017,22 @@ ${EXTRACTION_RETRY_NUDGE}`,
       throw new Error("Chat session not initialized.");
     }
     const actualPayload = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    const { message } = await this._buildUserParts(actualPayload, messageOptions.files, { stateful: true });
+    return this._rawSendMessage(message, messageOptions);
+  }
+  /**
+   * Sends an already-built user turn (string or Part[]) and parses the JSON
+   * response. Shared by rawSend() and send(), which resolves `files` once,
+   * before its retry loop, so a format error is not retried.
+   *
+   * @param {string|Array<Object>} message
+   * @param {Object} [messageOptions={}]
+   * @returns {Promise<Object>}
+   * @private
+   */
+  async _rawSendMessage(message, messageOptions = {}) {
     try {
-      const sendParams = { message: actualPayload };
+      const sendParams = { message };
       const config = this._getSendConfig(messageOptions.labels);
       if (config) sendParams.config = config;
       const result = await this._withRetry(() => this.chatSession.sendMessage(sendParams));
@@ -1703,7 +2131,8 @@ Respond with JSON only \u2013 no comments or explanations.
       const exampleHistory = history.slice(0, this.exampleCount);
       contents.push(...exampleHistory);
     }
-    contents.push({ role: "user", parts: [{ text: payloadStr }] });
+    const { message: userMessage } = await this._buildUserParts(payloadStr, opts.files);
+    contents.push({ role: "user", parts: typeof userMessage === "string" ? [{ text: userMessage }] : userMessage });
     const mergedLabels = { ...this.labels, ...opts.labels || {} };
     this._resetUsage();
     const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
@@ -1819,11 +2248,13 @@ var Chat = class extends base_default {
    * @param {string} message - The user's message
    * @param {Object} [opts={}] - Per-message options
    * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
    * @returns {Promise<ChatResponse>} Response with text and usage data
    */
   async send(message, opts = {}) {
     if (!this.chatSession) await this.init();
-    const sendParams = { message };
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
+    const sendParams = { message: userMessage };
     const config = this._getSendConfig(opts.labels);
     if (config) sendParams.config = config;
     this._resetUsage();
@@ -1844,7 +2275,8 @@ var Chat = class extends base_default {
   async *stream(message, opts = {}) {
     if (!this.chatSession) await this.init();
     let fullText = "";
-    const sendParams = { message };
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
+    const sendParams = { message: userMessage };
     const config = this._getSendConfig(opts.labels);
     if (config) sendParams.config = config;
     this._resetUsage();
@@ -1906,12 +2338,14 @@ var Message = class extends base_default {
    * @param {Object|string} payload - The message or data to send
    * @param {Object} [opts={}] - Per-message options
    * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
    * @returns {Promise<MessageResponse>} Response with text, optional data, and usage
    */
   async send(payload, opts = {}) {
     if (!this._initialized) await this.init();
     const payloadStr = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
-    const contents = [{ role: "user", parts: [{ text: payloadStr }] }];
+    const { message: userMessage, uploaded } = await this._buildUserParts(payloadStr, opts.files);
+    const contents = [{ role: "user", parts: typeof userMessage === "string" ? [{ text: userMessage }] : userMessage }];
     const mergedLabels = { ...this.labels, ...opts.labels || {} };
     const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
       model: this.modelName,
@@ -1921,7 +2355,7 @@ var Message = class extends base_default {
         ...this.vertexai && Object.keys(mergedLabels).length > 0 && { labels: mergedLabels }
       }
     }));
-    const usage = this._usageFromResponse(result);
+    const usage = { ...this._usageFromResponse(result), files: uploaded };
     this._captureMetadata(result);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -2030,6 +2464,7 @@ var ToolAgent = class extends base_default {
    * @param {string} message - The user's message
    * @param {Object} [opts={}] - Per-message options
    * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
    * @returns {Promise<AgentResponse>} Response with text, toolCalls, and usage
    */
   async chat(message, opts = {}) {
@@ -2037,9 +2472,10 @@ var ToolAgent = class extends base_default {
     this._stopped = false;
     const allToolCalls = [];
     const sendConfig = this._getSendConfig(opts.labels);
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
     this._resetUsage();
     let response = await this._withRetry(() => this.chatSession.sendMessage({
-      message,
+      message: userMessage,
       ...sendConfig && { config: sendConfig }
     }));
     this._accumulateUsage(response);
@@ -2116,9 +2552,10 @@ var ToolAgent = class extends base_default {
     const allToolCalls = [];
     let fullText = "";
     const sendConfig = this._getSendConfig(opts.labels);
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
     this._resetUsage();
     let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
-      message,
+      message: userMessage,
       ...sendConfig && { config: sendConfig }
     }));
     for (let round = 0; round < this.maxToolRounds; round++) {
@@ -2253,8 +2690,8 @@ var tool_agent_default = ToolAgent;
 
 // code-agent.js
 var import_node_child_process = require("node:child_process");
-var import_promises2 = require("node:fs/promises");
-var import_node_path = require("node:path");
+var import_promises3 = require("node:fs/promises");
+var import_node_path2 = require("node:path");
 var import_node_crypto = require("node:crypto");
 var MAX_OUTPUT_CHARS = 5e4;
 var MAX_FILE_TREE_LINES = 500;
@@ -2325,7 +2762,7 @@ var CodeAgent = class extends base_default {
     this.onBeforeExecution = options.onBeforeExecution || null;
     this.onCodeExecution = options.onCodeExecution || null;
     this.importantFiles = options.importantFiles || [];
-    this.writeDir = options.writeDir || (0, import_node_path.join)(this.workingDirectory, "tmp");
+    this.writeDir = options.writeDir || (0, import_node_path2.join)(this.workingDirectory, "tmp");
     this.keepArtifacts = options.keepArtifacts ?? false;
     this.comments = options.comments ?? false;
     this.maxRetries = options.maxRetries ?? 3;
@@ -2476,8 +2913,8 @@ var CodeAgent = class extends base_default {
     this._skillRegistry.clear();
     for (const filePath of this.skills) {
       try {
-        const content = await (0, import_promises2.readFile)(filePath, "utf-8");
-        let name = (0, import_node_path.basename)(filePath).replace(/\.md$/i, "");
+        const content = await (0, import_promises3.readFile)(filePath, "utf-8");
+        let name = (0, import_node_path2.basename)(filePath).replace(/\.md$/i, "");
         const fmMatch = content.match(/^---\s*\n[\s\S]*?^name:\s*(.+)$/m);
         if (fmMatch) name = fmMatch[1].trim();
         this._skillRegistry.set(name, { name, content, path: filePath });
@@ -2493,12 +2930,12 @@ var CodeAgent = class extends base_default {
    * @private
    */
   async _resolvePython() {
-    const tryBinary = (bin) => new Promise((resolve2) => {
+    const tryBinary = (bin) => new Promise((resolve3) => {
       (0, import_node_child_process.execFile)(bin, ["--version"], { timeout: 5e3 }, (err, stdout, stderr) => {
-        if (err) return resolve2(null);
+        if (err) return resolve3(null);
         const output = (stdout || "") + (stderr || "");
-        if (output.includes("Python 3.")) return resolve2(bin);
-        resolve2(null);
+        if (output.includes("Python 3.")) return resolve3(bin);
+        resolve3(null);
       });
     });
     if (this.pythonPath) {
@@ -2526,21 +2963,21 @@ var CodeAgent = class extends base_default {
    * @private
    */
   async _setupVenv() {
-    await (0, import_promises2.mkdir)(this.writeDir, { recursive: true });
-    this._venvPath = (0, import_node_path.join)(this.writeDir, ".venv");
+    await (0, import_promises3.mkdir)(this.writeDir, { recursive: true });
+    this._venvPath = (0, import_node_path2.join)(this.writeDir, ".venv");
     const isWin = process.platform === "win32";
-    const venvBin = isWin ? (0, import_node_path.join)(this._venvPath, "Scripts") : (0, import_node_path.join)(this._venvPath, "bin");
-    const venvPython = (0, import_node_path.join)(venvBin, isWin ? "python.exe" : "python");
+    const venvBin = isWin ? (0, import_node_path2.join)(this._venvPath, "Scripts") : (0, import_node_path2.join)(this._venvPath, "bin");
+    const venvPython = (0, import_node_path2.join)(venvBin, isWin ? "python.exe" : "python");
     try {
-      await (0, import_promises2.readFile)(venvPython);
+      await (0, import_promises3.readFile)(venvPython);
     } catch {
       logger_default.debug(`Creating Python venv at ${this._venvPath}`);
-      await new Promise((resolve2, reject) => {
+      await new Promise((resolve3, reject) => {
         (0, import_node_child_process.execFile)(this._pythonBinary, ["-m", "venv", this._venvPath], {
           timeout: 3e4
         }, (err) => {
           if (err) return reject(new Error(`CodeAgent: failed to create venv: ${err.message}`));
-          resolve2();
+          resolve3();
         });
       });
     }
@@ -2572,15 +3009,15 @@ var CodeAgent = class extends base_default {
     let packages = [];
     if (this.language === "python") {
       try {
-        const reqPath = (0, import_node_path.join)(this.workingDirectory, "requirements.txt");
-        const content = await (0, import_promises2.readFile)(reqPath, "utf-8");
+        const reqPath = (0, import_node_path2.join)(this.workingDirectory, "requirements.txt");
+        const content = await (0, import_promises3.readFile)(reqPath, "utf-8");
         packages = content.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !l.startsWith("-")).map((l) => l.split(/[>=<!\[;\s]/)[0]);
       } catch {
       }
       if (packages.length === 0) {
         try {
-          const ppPath = (0, import_node_path.join)(this.workingDirectory, "pyproject.toml");
-          const content = await (0, import_promises2.readFile)(ppPath, "utf-8");
+          const ppPath = (0, import_node_path2.join)(this.workingDirectory, "pyproject.toml");
+          const content = await (0, import_promises3.readFile)(ppPath, "utf-8");
           const depMatch = content.match(/dependencies\s*=\s*\[([\s\S]*?)\]/);
           if (depMatch) {
             packages = (depMatch[1].match(/"([^"]+)"/g) || []).map((s) => s.replace(/"/g, "").split(/[>=<!\[;\s]/)[0]);
@@ -2590,8 +3027,8 @@ var CodeAgent = class extends base_default {
       }
     } else {
       try {
-        const pkgPath = (0, import_node_path.join)(this.workingDirectory, "package.json");
-        const pkg = JSON.parse(await (0, import_promises2.readFile)(pkgPath, "utf-8"));
+        const pkgPath = (0, import_node_path2.join)(this.workingDirectory, "package.json");
+        const pkg = JSON.parse(await (0, import_promises3.readFile)(pkgPath, "utf-8"));
         packages = [
           ...Object.keys(pkg.dependencies || {}),
           ...Object.keys(pkg.devDependencies || {})
@@ -2609,8 +3046,8 @@ var CodeAgent = class extends base_default {
           continue;
         }
         try {
-          const fullPath = (0, import_node_path.isAbsolute)(resolved) ? resolved : (0, import_node_path.join)(this.workingDirectory, resolved);
-          const content = await (0, import_promises2.readFile)(fullPath, "utf-8");
+          const fullPath = (0, import_node_path2.isAbsolute)(resolved) ? resolved : (0, import_node_path2.join)(this.workingDirectory, resolved);
+          const content = await (0, import_promises3.readFile)(fullPath, "utf-8");
           importantFileContents.push({ path: resolved, content });
         } catch (e) {
           logger_default.warn(`importantFiles: could not read "${resolved}": ${e.message}`);
@@ -2624,11 +3061,11 @@ var CodeAgent = class extends base_default {
    * @private
    */
   _resolveImportantFile(filename, fileTreeLines) {
-    if ((0, import_node_path.isAbsolute)(filename)) return filename;
+    if ((0, import_node_path2.isAbsolute)(filename)) return filename;
     const exact = fileTreeLines.find((line) => line === filename);
     if (exact) return exact;
     const partial = fileTreeLines.find(
-      (line) => line.endsWith("/" + filename) || line.endsWith(import_node_path.sep + filename)
+      (line) => line.endsWith("/" + filename) || line.endsWith(import_node_path2.sep + filename)
     );
     return partial || null;
   }
@@ -2636,14 +3073,14 @@ var CodeAgent = class extends base_default {
    * @private
    */
   async _getFileTreeGit() {
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       (0, import_node_child_process.execFile)("git", ["ls-files"], {
         cwd: this.workingDirectory,
         timeout: 5e3,
         maxBuffer: 5 * 1024 * 1024
       }, (err, stdout) => {
         if (err) return reject(err);
-        resolve2(stdout.trim());
+        resolve3(stdout.trim());
       });
     });
   }
@@ -2654,16 +3091,16 @@ var CodeAgent = class extends base_default {
     if (depth >= maxDepth) return "";
     const entries = [];
     try {
-      const items = await (0, import_promises2.readdir)(dir, { withFileTypes: true });
+      const items = await (0, import_promises3.readdir)(dir, { withFileTypes: true });
       for (const item of items) {
         if (IGNORE_DIRS.has(item.name)) continue;
         if (item.name.startsWith(".") && depth === 0 && item.isDirectory()) continue;
-        const relativePath = (0, import_node_path.join)(dir, item.name).replace(this.workingDirectory + "/", "");
+        const relativePath = (0, import_node_path2.join)(dir, item.name).replace(this.workingDirectory + "/", "");
         if (item.isFile()) {
           entries.push(relativePath);
         } else if (item.isDirectory()) {
           entries.push(relativePath + "/");
-          const subEntries = await this._getFileTreeReaddir((0, import_node_path.join)(dir, item.name), depth + 1, maxDepth);
+          const subEntries = await this._getFileTreeReaddir((0, import_node_path2.join)(dir, item.name), depth + 1, maxDepth);
           if (subEntries) entries.push(subEntries);
         }
       }
@@ -2781,15 +3218,15 @@ ${this.envOverview}`;
         logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
       }
     }
-    await (0, import_promises2.mkdir)(this.writeDir, { recursive: true });
+    await (0, import_promises3.mkdir)(this.writeDir, { recursive: true });
     const slug = this._slugify(purpose);
     const ext = this.language === "python" ? ".py" : ".mjs";
-    const tempFile = (0, import_node_path.join)(this.writeDir, `agent-${slug}-${Date.now()}${ext}`);
+    const tempFile = (0, import_node_path2.join)(this.writeDir, `agent-${slug}-${Date.now()}${ext}`);
     try {
-      await (0, import_promises2.writeFile)(tempFile, code, "utf-8");
+      await (0, import_promises3.writeFile)(tempFile, code, "utf-8");
       const binary = this.language === "python" ? this._pythonBinary : "node";
       const execEnv = this.language === "python" && this._venvEnv ? this._venvEnv : process.env;
-      const result = await new Promise((resolve2) => {
+      const result = await new Promise((resolve3) => {
         const child = (0, import_node_child_process.execFile)(binary, [tempFile], {
           cwd: this.workingDirectory,
           timeout: this.timeout,
@@ -2798,13 +3235,13 @@ ${this.envOverview}`;
         }, (err, stdout, stderr) => {
           this._activeProcess = null;
           if (err) {
-            resolve2({
+            resolve3({
               stdout: err.stdout || stdout || "",
               stderr: (err.stderr || stderr || "") + (err.killed ? "\n[EXECUTION TIMED OUT]" : ""),
               exitCode: err.code || 1
             });
           } else {
-            resolve2({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
+            resolve3({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
           }
         });
         this._activeProcess = child;
@@ -2839,7 +3276,7 @@ ${this.envOverview}`;
     } finally {
       if (!this.keepArtifacts) {
         try {
-          await (0, import_promises2.unlink)(tempFile);
+          await (0, import_promises3.unlink)(tempFile);
         } catch {
         }
       }
@@ -2865,7 +3302,7 @@ ${this.envOverview}`;
       }
     }
     const execEnv = this.language === "python" && this._venvEnv ? this._venvEnv : process.env;
-    const result = await new Promise((resolve2) => {
+    const result = await new Promise((resolve3) => {
       const child = (0, import_node_child_process.execFile)("bash", ["-c", command], {
         cwd: this.workingDirectory,
         timeout: this.timeout,
@@ -2874,13 +3311,13 @@ ${this.envOverview}`;
       }, (err, stdout, stderr) => {
         this._activeProcess = null;
         if (err) {
-          resolve2({
+          resolve3({
             stdout: err.stdout || stdout || "",
             stderr: (err.stderr || stderr || "") + (err.killed ? "\n[EXECUTION TIMED OUT]" : ""),
             exitCode: err.code || 1
           });
         } else {
-          resolve2({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
+          resolve3({ stdout: stdout || "", stderr: stderr || "", exitCode: 0 });
         }
       });
       this._activeProcess = child;
@@ -3050,6 +3487,7 @@ ${this.envOverview}`;
    * @param {string} message - The user's message
    * @param {Object} [opts={}] - Per-message options
    * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
    * @returns {Promise<CodeAgentResponse>}
    */
   async chat(message, opts = {}) {
@@ -3058,9 +3496,10 @@ ${this.envOverview}`;
     const toolCalls = [];
     let consecutiveFailures = 0;
     const sendConfig = this._getSendConfig(opts.labels);
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
     this._resetUsage();
     let response = await this._withRetry(() => this.chatSession.sendMessage({
-      message,
+      message: userMessage,
       ...sendConfig && { config: sendConfig }
     }));
     this._accumulateUsage(response);
@@ -3146,9 +3585,10 @@ ${this.envOverview}`;
     let fullText = "";
     let consecutiveFailures = 0;
     const sendConfig = this._getSendConfig(opts.labels);
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
     this._resetUsage();
     let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
-      message,
+      message: userMessage,
       ...sendConfig && { config: sendConfig }
     }));
     for (let round = 0; round < this.maxRounds; round++) {
@@ -3284,53 +3724,10 @@ ${this.envOverview}`;
 var code_agent_default = CodeAgent;
 
 // rag-agent.js
-var import_node_path2 = require("node:path");
-var import_promises3 = require("node:fs/promises");
-var MIME_TYPES = {
-  // Text
-  ".txt": "text/plain",
-  ".md": "text/plain",
-  ".csv": "text/csv",
-  ".html": "text/html",
-  ".htm": "text/html",
-  ".xml": "text/xml",
-  ".json": "application/json",
-  ".js": "text/javascript",
-  ".mjs": "text/javascript",
-  ".ts": "text/plain",
-  ".css": "text/css",
-  ".yaml": "text/plain",
-  ".yml": "text/plain",
-  ".py": "text/x-python",
-  ".rb": "text/plain",
-  ".sh": "text/plain",
-  // Documents
-  ".pdf": "application/pdf",
-  ".doc": "application/msword",
-  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  // Images
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".svg": "image/svg+xml",
-  // Audio
-  ".mp3": "audio/mpeg",
-  ".wav": "audio/wav",
-  ".ogg": "audio/ogg",
-  ".flac": "audio/flac",
-  ".aac": "audio/aac",
-  // Video
-  ".mp4": "video/mp4",
-  ".webm": "video/webm",
-  ".avi": "video/x-msvideo",
-  ".mov": "video/quicktime",
-  ".mkv": "video/x-matroska"
-};
+var import_node_path3 = require("node:path");
+var import_promises4 = require("node:fs/promises");
+var _warnedRemoteFiles = /* @__PURE__ */ new Set();
 var DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Answer questions based on the provided documents and data. When referencing information, mention which document or data source it comes from.";
-var FILE_POLL_INTERVAL_MS = 2e3;
-var FILE_POLL_TIMEOUT_MS = 6e4;
 var RagAgent = class extends base_default {
   /**
    * @param {RagAgentOptions} [options={}]
@@ -3359,13 +3756,17 @@ var RagAgent = class extends base_default {
     if (this._initialized && !force) return;
     this._uploadedRemoteFiles = [];
     for (const filePath of this.remoteFiles) {
-      const resolvedPath = (0, import_node_path2.resolve)(filePath);
+      const resolvedPath = (0, import_node_path3.resolve)(filePath);
       logger_default.debug(`Uploading remote file: ${resolvedPath}`);
-      const ext = (0, import_node_path2.extname)(resolvedPath).toLowerCase();
-      const mimeType = MIME_TYPES[ext] || "application/octet-stream";
-      const uploaded = await this._withRetry(async () => (await this._ensureClient()).files.upload({
-        file: resolvedPath,
-        config: { displayName: (0, import_node_path2.basename)(resolvedPath), mimeType }
+      const ext = (0, import_node_path3.extname)(resolvedPath).toLowerCase();
+      const mimeType = LEGACY_MIME_TYPES[ext] || MIME_TYPES[ext] || "application/octet-stream";
+      if (!MIME_TYPES[ext] && !_warnedRemoteFiles.has(resolvedPath)) {
+        _warnedRemoteFiles.add(resolvedPath);
+        logger_default.warn(`RagAgent.remoteFiles: "${(0, import_node_path3.basename)(resolvedPath)}" (${ext || "no extension"}) is not a format Gemini reads natively; uploading anyway. The strict "files" option would reject it.`);
+      }
+      const uploaded = await this._withRetry(async () => uploadFile(await this._ensureClient(), resolvedPath, {
+        displayName: (0, import_node_path3.basename)(resolvedPath),
+        mimeType
       }));
       await this._waitForFileActive(uploaded);
       this._uploadedRemoteFiles.push({
@@ -3376,15 +3777,15 @@ var RagAgent = class extends base_default {
     }
     this._localFileContents = [];
     for (const filePath of this.localFiles) {
-      const resolvedPath = (0, import_node_path2.resolve)(filePath);
+      const resolvedPath = (0, import_node_path3.resolve)(filePath);
       logger_default.debug(`Reading local file: ${resolvedPath}`);
-      const content = await (0, import_promises3.readFile)(resolvedPath, "utf-8");
+      const content = await (0, import_promises4.readFile)(resolvedPath, "utf-8");
       this._localFileContents.push({
-        name: (0, import_node_path2.basename)(resolvedPath),
+        name: (0, import_node_path3.basename)(resolvedPath),
         content,
         path: resolvedPath
       });
-      logger_default.debug(`Local file read: ${(0, import_node_path2.basename)(resolvedPath)} (${content.length} chars)`);
+      logger_default.debug(`Local file read: ${(0, import_node_path3.basename)(resolvedPath)} (${content.length} chars)`);
     }
     this.chatConfig.systemInstruction = /** @type {string} */
     this.systemPrompt;
@@ -3420,14 +3821,16 @@ ${serialized}` });
    * @param {string} message - The user's question
    * @param {Object} [opts={}] - Per-message options
    * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+   * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
    * @returns {Promise<RagResponse>}
    */
   async chat(message, opts = {}) {
     if (!this._initialized) await this.init();
     const sendConfig = this._getSendConfig(opts.labels);
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
     this._resetUsage();
     const response = await this._withRetry(() => this.chatSession.sendMessage({
-      message,
+      message: userMessage,
       ...sendConfig && { config: sendConfig }
     }));
     this._accumulateUsage(response);
@@ -3448,10 +3851,11 @@ ${serialized}` });
     if (!this._initialized) await this.init();
     let fullText = "";
     const sendConfig = this._getSendConfig(opts.labels);
+    const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
     this._resetUsage();
     const usage = this._streamUsage();
     const streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
-      message,
+      message: userMessage,
       ...sendConfig && { config: sendConfig }
     }));
     for await (const chunk of streamResponse) {
@@ -3529,17 +3933,7 @@ ${serialized}` });
    * @private
    */
   async _waitForFileActive(file) {
-    if (file.state === "ACTIVE") return;
-    const start = Date.now();
-    while (Date.now() - start < FILE_POLL_TIMEOUT_MS) {
-      const updated = await (await this._ensureClient()).files.get({ name: file.name });
-      if (updated.state === "ACTIVE") return;
-      if (updated.state === "FAILED") {
-        throw new Error(`File processing failed: ${file.displayName || file.name}`);
-      }
-      await new Promise((r) => setTimeout(r, FILE_POLL_INTERVAL_MS));
-    }
-    throw new Error(`File processing timed out after ${FILE_POLL_TIMEOUT_MS / 1e3}s: ${file.displayName || file.name}`);
+    await waitForFileActive(await this._ensureClient(), file);
   }
 };
 var rag_agent_default = RagAgent;
@@ -3679,6 +4073,33 @@ var Embedding = class extends base_default {
 // image-generator.js
 var import_node_fs = require("node:fs");
 var DEFAULT_IMAGE_MODEL = "gemini-nano-banana-2.1";
+function buildImageConfig(defaults, overrides = {}, { outputMimeType } = {}) {
+  const includeText = overrides.includeText ?? defaults.includeText ?? false;
+  const config = { responseModalities: includeText ? ["IMAGE", "TEXT"] : ["IMAGE"] };
+  const imageConfig = {};
+  const aspectRatio = overrides.aspectRatio || defaults.aspectRatio;
+  const imageSize = overrides.imageSize || defaults.imageSize;
+  const personGeneration = overrides.personGeneration || defaults.personGeneration;
+  if (aspectRatio) imageConfig.aspectRatio = aspectRatio;
+  if (imageSize) imageConfig.imageSize = imageSize;
+  if (personGeneration) imageConfig.personGeneration = personGeneration;
+  if (outputMimeType) imageConfig.outputMimeType = outputMimeType;
+  if (Object.keys(imageConfig).length > 0) config.imageConfig = imageConfig;
+  return config;
+}
+function parseImageResponse(result) {
+  const images = [];
+  let text = "";
+  const responseParts = result?.candidates?.[0]?.content?.parts || [];
+  for (const part of responseParts) {
+    if (part.inlineData?.data) {
+      images.push({ data: part.inlineData.data, mimeType: part.inlineData.mimeType });
+    } else if (part.text) {
+      text += part.text;
+    }
+  }
+  return { images, text: text || null };
+}
 var ImageGenerator = class extends base_default {
   /**
    * @param {import('./types.d.ts').ImageGeneratorOptions} [options={}]
@@ -3713,17 +4134,7 @@ var ImageGenerator = class extends base_default {
    * @private
    */
   _buildConfig(overrides = {}) {
-    const includeText = overrides.includeText ?? this.includeText;
-    const config = { responseModalities: includeText ? ["IMAGE", "TEXT"] : ["IMAGE"] };
-    const imageConfig = {};
-    const aspectRatio = overrides.aspectRatio || this.aspectRatio;
-    const imageSize = overrides.imageSize || this.imageSize;
-    const personGeneration = overrides.personGeneration || this.personGeneration;
-    if (aspectRatio) imageConfig.aspectRatio = aspectRatio;
-    if (imageSize) imageConfig.imageSize = imageSize;
-    if (personGeneration) imageConfig.personGeneration = personGeneration;
-    if (Object.keys(imageConfig).length > 0) config.imageConfig = imageConfig;
-    return config;
+    return buildImageConfig(this, overrides);
   }
   /**
    * Generate one or more images from a text prompt.
@@ -3736,9 +4147,24 @@ var ImageGenerator = class extends base_default {
   async generate(prompt, opts = {}) {
     if (!this._initialized) await this.init();
     const parts = [{ text: prompt }];
+    let uploaded = [];
     if (Array.isArray(opts.inputImages)) {
-      for (const img of opts.inputImages) {
-        parts.push({ inlineData: { data: img.data, mimeType: img.mimeType } });
+      const isLegacy = (img) => img && typeof img === "object" && typeof img.data === "string" && img.mimeType;
+      const inputs = (
+        /** @type {any[]} */
+        opts.inputImages
+      );
+      const strict = inputs.filter((img) => !isLegacy(img));
+      let resolved = [];
+      if (strict.length) {
+        ({ parts: resolved, uploaded } = await toParts(strict, await this._ensureClient(), {
+          vertexai: this.vertexai,
+          withRetry: (fn) => this._withRetry(fn)
+        }));
+      }
+      let next = 0;
+      for (const img of inputs) {
+        parts.push(isLegacy(img) ? { inlineData: { data: img.data, mimeType: img.mimeType } } : resolved[next++]);
       }
     }
     const result = await this._withRetry(async () => (await this._ensureClient()).models.generateContent({
@@ -3746,7 +4172,7 @@ var ImageGenerator = class extends base_default {
       contents: [{ role: "user", parts }],
       config: this._buildConfig(opts)
     }));
-    const usage = this._usageFromResponse(result);
+    const usage = { ...this._usageFromResponse(result), files: uploaded };
     this._captureMetadata(result);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
@@ -3756,23 +4182,13 @@ var ImageGenerator = class extends base_default {
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
-    const images = [];
-    let text = "";
-    const responseParts = result.candidates?.[0]?.content?.parts || [];
-    for (const part of responseParts) {
-      if (part.inlineData?.data) {
-        images.push({
-          data: part.inlineData.data,
-          mimeType: part.inlineData.mimeType || "image/png"
-        });
-      } else if (part.text) {
-        text += part.text;
-      }
-    }
+    const parsed = parseImageResponse(result);
+    const images = parsed.images.map((img) => ({ data: img.data, mimeType: img.mimeType || "image/png" }));
+    const text = parsed.text;
     if (images.length === 0) {
       logger_default.warn("ImageGenerator: no images returned. Check prompt or safety filters.");
     }
-    return { images, text: text || null, usage };
+    return { images, text, usage };
   }
   /**
    * Convenience: write one or all images to disk.
@@ -3820,9 +4236,299 @@ var ImageGenerator = class extends base_default {
   }
 };
 
+// file-agent.js
+var import_promises5 = require("node:fs/promises");
+var import_node_path4 = require("node:path");
+var DEFAULT_IMAGE_MODEL2 = "gemini-nano-banana-2.1";
+var DEFAULT_SPEECH_MODEL = "gemini-3.8-flash-tts";
+var DEFAULT_VOICE = "Kore";
+var WRITE_MIME_TYPES = {
+  txt: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+  json: "application/json",
+  yaml: "application/yaml",
+  yml: "application/yaml",
+  html: "text/html",
+  xml: "text/xml",
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  wav: "audio/wav"
+};
+var sameFormat = (a, b) => a === b || ["jpg", "jpeg"].includes(a) && ["jpg", "jpeg"].includes(b);
+function stripFence(text) {
+  const m = text.match(/^\s*```[\w+.-]*[^\S\n]*\n([\s\S]*?)\n?```\s*$/);
+  if (!m || /^\s*```/m.test(m[1])) return text;
+  return m[1];
+}
+var FileAgent = class extends base_default {
+  /**
+   * @param {import('./types').FileAgentOptions} [options={}]
+   */
+  constructor(options = {}) {
+    super(options);
+    this.imageModel = options.imageModel || DEFAULT_IMAGE_MODEL2;
+    this.speechModel = options.speechModel || DEFAULT_SPEECH_MODEL;
+    this.voice = options.voice || DEFAULT_VOICE;
+    this.languageCode = options.languageCode || null;
+    this.aspectRatio = options.aspectRatio || null;
+    this.imageSize = options.imageSize || null;
+    this.personGeneration = options.personGeneration || null;
+    logger_default.debug(`FileAgent created (text=${this.modelName}, image=${this.imageModel}, speech=${this.speechModel})`);
+  }
+  /**
+   * Stateless: no chat session.
+   * @param {boolean} [force=false]
+   */
+  async init(force = false) {
+    if (this._initialized && !force) return;
+    await this._healthCheckPing();
+    this._initialized = true;
+  }
+  /**
+   * Produce a file from a prompt.
+   * @param {string|Array<{ speaker: string, text: string, style?: string }>} prompt
+   * @param {import('./types').FileWriteOptions} opts
+   * @returns {Promise<import('./types').FileWriteResult>}
+   */
+  async write(prompt, opts = {}) {
+    const { format, kind } = this._resolveFormat(opts);
+    if (Array.isArray(prompt)) {
+      if (kind !== "audio") throw new Error(`FileAgent.write(): a SpeechTurn[] prompt works only for .wav. Pass a string prompt for .${format}.`);
+      const files = opts.files == null ? [] : [].concat(opts.files);
+      if (files.length) throw new Error("FileAgent.write(): files cannot be combined with a SpeechTurn[] prompt. Speech models read only the script.");
+    }
+    if (!this._initialized) await this.init();
+    let out;
+    if (kind === "text") out = await this._writeText(
+      /** @type {string} */
+      prompt,
+      format,
+      opts
+    );
+    else if (kind === "image") out = await this._writeImage(
+      /** @type {string} */
+      prompt,
+      format,
+      opts
+    );
+    else out = await this._writeAudio(prompt, opts);
+    const mimeType = WRITE_MIME_TYPES[format];
+    this._lastFileUsage = out.usage;
+    if (opts.path) {
+      await (0, import_promises5.mkdir)((0, import_node_path4.dirname)(opts.path), { recursive: true });
+      await (0, import_promises5.writeFile)(opts.path, out.data);
+    }
+    return { data: out.data, mimeType, format, path: opts.path || null, text: out.text, usage: out.usage };
+  }
+  /**
+   * Read files with a prompt (one stateless call).
+   * @param {import('./types').FileInput|import('./types').FileInput[]} files
+   * @param {string} prompt
+   * @param {import('./types').FileReadOptions} [opts={}]
+   * @returns {Promise<{ text: string, data?: any, usage: import('./types').UsageData }>}
+   */
+  async read(files, prompt, opts = {}) {
+    if (!this._initialized) await this.init();
+    const { message, uploaded } = await this._buildUserParts(prompt, files);
+    const structured = !!(opts.responseSchema || opts.responseMimeType === "application/json");
+    const config = {
+      ...this._getChatCreateOptions().config,
+      ...opts.responseSchema && { responseSchema: opts.responseSchema },
+      ...structured && { responseMimeType: opts.responseMimeType || "application/json" },
+      ...this._labelsConfig(opts.labels)
+    };
+    const result = await this._generate(this.modelName, message, config);
+    const usage = { ...this._usageFromResponse(result), files: uploaded };
+    this._lastFileUsage = usage;
+    const text = result.text || "";
+    const response = { text, usage };
+    if (structured) {
+      try {
+        response.data = extractJSON(text);
+      } catch (e) {
+        logger_default.warn(`FileAgent.read(): could not parse structured response: ${e.message}`);
+        response.data = null;
+      }
+    }
+    return response;
+  }
+  // ── Routes ───────────────────────────────────────────────────────────────
+  /** @private */
+  async _writeText(prompt, format, opts) {
+    const { message, uploaded } = await this._buildUserParts(
+      `${prompt}
+
+Write the complete contents of a .${format} file. Reply with the file contents only: no commentary and no code fences.`,
+      opts.files
+    );
+    const json = format === "json";
+    const config = {
+      ...this._getChatCreateOptions().config,
+      ...json && { responseMimeType: "application/json" },
+      ...json && opts.responseSchema && { responseSchema: opts.responseSchema },
+      ...this._labelsConfig(opts.labels)
+    };
+    const result = await this._generate(this.modelName, message, config);
+    const usage = { ...this._usageFromResponse(result), files: uploaded };
+    const text = stripFence(result.text || "");
+    if (json) {
+      try {
+        JSON.parse(text);
+      } catch (e) {
+        const err = new Error(`FileAgent: the model output is not valid JSON (${e.message}).`);
+        err.raw = text;
+        throw err;
+      }
+    }
+    return { data: Buffer.from(text, "utf8"), text, usage };
+  }
+  /** @private */
+  async _writeImage(prompt, format, opts) {
+    const wanted = WRITE_MIME_TYPES[format];
+    const { message, uploaded } = await this._buildUserParts(prompt, opts.files);
+    const config = {
+      ...buildImageConfig(this, opts, { outputMimeType: this.vertexai ? wanted : void 0 }),
+      ...this._labelsConfig(opts.labels)
+    };
+    const result = await this._generate(this.imageModel, message, config);
+    const usage = { ...this._usageFromResponse(result, 1, this.imageModel), files: uploaded };
+    const { images, text } = parseImageResponse(result);
+    if (images.length === 0) {
+      const cand = result?.candidates?.[0];
+      const reason = cand?.finishReason ? ` (${cand.finishReason})` : "";
+      const detail = cand?.finishMessage || (text ? `Model text: ${text}` : "Check the prompt or safety filters.");
+      throw new Error(`FileAgent: the image model returned no image${reason}. ${detail}`);
+    }
+    const got = images[0].mimeType;
+    if (!got) throw new Error(`FileAgent: the image model returned no MIME type; refusing to write it as ${wanted}.`);
+    if (got.toLowerCase() !== wanted) {
+      throw new Error(`FileAgent: asked for ${wanted} (.${format}) but the image model returned ${got}. Nothing was written.`);
+    }
+    return { data: Buffer.from(images[0].data, "base64"), text, usage };
+  }
+  /** @private */
+  async _writeAudio(prompt, opts) {
+    let speechConfig;
+    if (opts.speakers?.length) {
+      speechConfig = { multiSpeakerVoiceConfig: { speakerVoiceConfigs: opts.speakers.map((s) => ({
+        speaker: s.speaker,
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: s.voice } }
+      })) } };
+    } else {
+      speechConfig = { voiceConfig: { prebuiltVoiceConfig: { voiceName: opts.voice || this.voice } } };
+    }
+    const languageCode = opts.languageCode || this.languageCode;
+    if (languageCode) speechConfig.languageCode = languageCode;
+    let message;
+    let uploaded = [];
+    if (Array.isArray(prompt)) {
+      message = prompt.map((t) => ({ text: t.text, speechMetadata: { speaker: t.speaker, ...t.style && { style: t.style } } }));
+    } else {
+      ({ message, uploaded } = await this._buildUserParts(prompt, opts.files));
+    }
+    const config = { responseModalities: ["AUDIO"], speechConfig, ...this._labelsConfig(opts.labels) };
+    const result = await this._generate(this.speechModel, message, config);
+    const usage = { ...this._usageFromResponse(result, 1, this.speechModel), files: uploaded };
+    const parts = (result?.candidates?.[0]?.content?.parts || []).filter((p) => p.inlineData?.data);
+    if (parts.length === 0) throw new Error("FileAgent: the speech model returned no audio.");
+    const chunks = parts.map((p) => {
+      const mime = String(p.inlineData.mimeType || "");
+      const bytes = Buffer.from(p.inlineData.data, "base64");
+      if (/^audio\/(wav|x-wav|wave)\b/i.test(mime)) return wavToPcm(bytes);
+      const fmt = parsePcmMime(mime);
+      return { pcm: bytes, sampleRate: fmt.sampleRate, channels: fmt.channels, bitsPerSample: 16 };
+    });
+    const { sampleRate, channels, bitsPerSample } = chunks[0];
+    if (chunks.some((c) => c.sampleRate !== sampleRate || c.channels !== channels || c.bitsPerSample !== bitsPerSample)) {
+      throw new Error("FileAgent: the speech model returned audio parts in different formats.");
+    }
+    const pcm = chunks.length === 1 ? chunks[0].pcm : Buffer.concat(chunks.map((c) => c.pcm));
+    const text = (result?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("") || null;
+    return { data: pcmToWav(pcm, { sampleRate, channels, bitsPerSample }), text, usage };
+  }
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  /**
+   * Decide the output format from `format` and/or `path`. Runs before any API
+   * call or disk write.
+   * @param {{ format?: string, path?: string }} opts
+   * @returns {{ format: string, kind: 'text'|'image'|'audio' }}
+   * @private
+   */
+  _resolveFormat(opts) {
+    const norm = (f) => String(f).toLowerCase().replace(/^\./, "");
+    const fromFormat = opts.format != null ? norm(opts.format) : void 0;
+    const fromPath = opts.path != null ? norm((0, import_node_path4.extname)(opts.path)) : void 0;
+    if (fromFormat === void 0 && fromPath === void 0) {
+      throw new Error("FileAgent.write() needs { format } or { path }");
+    }
+    if (fromFormat !== void 0 && fromPath !== void 0 && !sameFormat(fromFormat, fromPath)) {
+      throw new Error(fromPath === "" ? `format "${fromFormat}" does not match path "${opts.path}" (no extension)` : `format "${fromFormat}" does not match path extension ".${fromPath}"`);
+    }
+    const format = (
+      /** @type {string} */
+      fromFormat ?? fromPath
+    );
+    if (!writeFormatsFor(this.vertexai).includes(format)) {
+      throw new UnsupportedFormatError(format, "write", { vertexai: this.vertexai, who: "FileAgent" });
+    }
+    const kind = WRITE_FORMATS.text.includes(format) ? "text" : WRITE_FORMATS.audio.includes(format) ? "audio" : "image";
+    return { format, kind };
+  }
+  /** @private */
+  _labelsConfig(perCallLabels) {
+    const labels = { ...this.labels, ...perCallLabels || {} };
+    return this.vertexai && Object.keys(labels).length > 0 ? { labels } : {};
+  }
+  /**
+   * One generateContent call with the 429 retry.
+   * @param {string} model
+   * @param {string|any[]} message - text or Part[]
+   * @param {Record<string, any>} config
+   * @private
+   */
+  async _generate(model, message, config) {
+    const parts = typeof message === "string" ? [{ text: message }] : message;
+    return this._withRetry(async () => (await this._ensureClient()).models.generateContent({
+      model,
+      contents: [{ role: "user", parts }],
+      config
+    }));
+  }
+  /**
+   * Usage of the last write() or read() on this instance. Prefer the per-call
+   * `result.usage` under concurrency.
+   * @returns {import('./types').UsageData|null}
+   */
+  getLastUsage() {
+    return this._lastFileUsage || null;
+  }
+  // ── No-ops (stateless) ───────────────────────────────────────────────────
+  /** @returns {any[]} */
+  getHistory() {
+    return [];
+  }
+  async clearHistory() {
+  }
+  async seed() {
+    logger_default.warn("FileAgent is stateless \u2014 seed() has no effect.");
+    return [];
+  }
+  /**
+   * @param {any} _nextPayload
+   * @returns {Promise<{ inputTokens: number }>}
+   */
+  async estimate(_nextPayload) {
+    throw new Error("FileAgent is stateless \u2014 use estimate() on Chat or Transformer.");
+  }
+};
+var file_agent_default = FileAgent;
+
 // index.js
 var import_genai2 = require("@google/genai");
-var index_default = { Transformer: transformer_default, Chat: chat_default, Message: message_default, ToolAgent: tool_agent_default, CodeAgent: code_agent_default, RagAgent: rag_agent_default, Embedding, ImageGenerator };
+var index_default = { Transformer: transformer_default, Chat: chat_default, Message: message_default, ToolAgent: tool_agent_default, CodeAgent: code_agent_default, RagAgent: rag_agent_default, Embedding, ImageGenerator, FileAgent: file_agent_default };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   BaseGemini,
@@ -3832,6 +4538,7 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   DEFAULT_MODEL,
   EFFORT_LEVELS,
   Embedding,
+  FileAgent,
   HarmBlockThreshold,
   HarmCategory,
   ImageGenerator,
@@ -3839,17 +4546,22 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   MODEL_PRICING,
   MODEL_PRICING_AS_OF,
   Message,
+  READ_FORMATS,
   RagAgent,
   THINKING_CAPABILITIES,
   THINKING_SUPPORTED_MODELS,
   ThinkingLevel,
   ToolAgent,
   Transformer,
+  UnsupportedFormatError,
+  WRITE_FORMATS,
   attemptJSONRecovery,
   computeCost,
   extractJSON,
   log,
+  pcmToWav,
   resolvePricing,
   thinkingCapabilities,
-  validateSchema
+  validateSchema,
+  writeFormatsFor
 });

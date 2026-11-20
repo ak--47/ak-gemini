@@ -95,6 +95,7 @@ class Message extends BaseGemini {
 	 * @param {Object|string} payload - The message or data to send
 	 * @param {Object} [opts={}] - Per-message options
 	 * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+	 * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
 	 * @returns {Promise<MessageResponse>} Response with text, optional data, and usage
 	 */
 	async send(payload, opts = {}) {
@@ -104,7 +105,8 @@ class Message extends BaseGemini {
 			? payload
 			: JSON.stringify(payload, null, 2);
 
-		const contents = [{ role: 'user', parts: [{ text: payloadStr }] }];
+		const { message: userMessage, uploaded } = await this._buildUserParts(payloadStr, opts.files);
+		const contents = [{ role: 'user', parts: typeof userMessage === 'string' ? [{ text: userMessage }] : userMessage }];
 
 		const mergedLabels = { ...this.labels, ...(opts.labels || {}) };
 
@@ -123,7 +125,7 @@ class Message extends BaseGemini {
 		// Compute per-call usage synchronously from THIS response before any other
 		// concurrent send() can mutate instance state. result.usage is safe under
 		// concurrency; getLastUsage() (instance state, updated below) is not.
-		const usage = this._usageFromResponse(result);
+		const usage = { ...this._usageFromResponse(result), files: uploaded };
 
 		this._captureMetadata(result);
 

@@ -231,6 +231,68 @@ const answer = await rag.chat(query);
 
 ---
 
+## Files — Read and Write
+
+### Reading: the `files` option
+
+Every send method takes a per-call `files` option: `Message.send()`, `Chat.send()` / `stream()`, `Transformer.send()` / `rawSend()`, and `chat()` / `stream()` on `ToolAgent`, `CodeAgent` and `RagAgent`. The files go into the user turn after your text.
+
+```javascript
+const msg = new Message({ vertexai: true });
+const r = await msg.send('What is the total on this invoice?', { files: ['./invoice.pdf'] });
+
+await chat.send('Compare these', { files: [
+  './photo.png',                                   // local path
+  'gs://my-bucket/report.pdf',                     // Vertex only
+  'https://example.com/chart.png',                 // both backends
+  { data: buffer, mimeType: 'image/jpeg' },        // bytes
+  { uri: 'https://example.com/blob', mimeType: 'application/pdf' }
+] });
+```
+
+- Text files (`.txt .md .csv .json .yaml .yml .xml .html .htm .js .mjs .ts .css .py .rb .sh .svg`) go in as labelled text.
+- Binary files (`.pdf`, images `.png .jpg .jpeg .webp .heic .heif`, audio `.wav .mp3 .aiff .aac .ogg .flac`, video `.mp4 .mpeg .mpg .mov .avi .flv .webm .wmv .3gp`) go inline, or upload through the Files API.
+- Any other format throws `UnsupportedFormatError`. The error lists every supported format. Office files (`.docx`, `.xlsx`, `.pptx`) are not supported.
+- **Inline limit:** 100 MB per request on the Gemini API (larger files upload) and 256 MB on Vertex. **Vertex cannot upload**, so a larger file on Vertex must be a `gs://` URI.
+- **Chat classes on the Gemini API always upload binaries**, so history keeps a short file URI instead of re-sending the bytes every turn. Uploads appear in `usage.files`; ak-gemini does not delete them (they expire after 48 h).
+- `RagAgent.remoteFiles` keeps its 3.0.0 behaviour: unknown types still upload, with a one-time warning.
+
+### Writing: `FileAgent`
+
+```javascript
+import { FileAgent } from 'ak-gemini';
+const fa = new FileAgent({ vertexai: true });
+
+// Path mode: the format comes from the extension; ak-gemini writes the file
+await fa.write('a product photo of a red mug', { path: './out/mug.png' });
+
+// Bytes mode: you write it
+const { data, mimeType } = await fa.write('quarterly summary as CSV', { format: 'csv' });
+
+// With input files
+await fa.write('translate this to Spanish', { path: './es.md', files: ['./en.md'] });
+
+// Speech
+await fa.write('Welcome to the show.', { path: './intro.wav', voice: 'Puck' });
+await fa.write([{ speaker: 'A', text: 'Hi.' }, { speaker: 'B', text: 'Hello!', style: 'cheerful' }],
+  { path: './dialog.wav', speakers: [{ speaker: 'A', voice: 'Puck' }, { speaker: 'B', voice: 'Kore' }] });
+
+// Read convenience
+const { text, data: parsed } = await fa.read(['./invoice.pdf'], 'extract the total', { responseSchema });
+```
+
+`write()` returns `{ data, mimeType, format, path, text, usage }`. `usage.model` names the model that ran.
+
+| Kind | Formats | Model (option, default) |
+|---|---|---|
+| text | `txt md csv json yaml yml html xml svg` | `modelName`, `gemini-3.8-flash` |
+| image | Vertex: `png jpg jpeg`. Gemini API: `jpg jpeg` | `imageModel`, `gemini-nano-banana-2.1` |
+| audio | `wav` | `speechModel`, `gemini-3.8-flash-tts` |
+
+The Gemini API image model returns JPEG and ignores a requested format, so the Gemini API writes `.jpg` only. If a model ever returns a different format than you asked for, `write()` throws and writes nothing. `json` output must parse.
+
+---
+
 ## Stopping Agents
 
 Both `ToolAgent` and `CodeAgent` support a `stop()` method to cancel execution mid-loop. This is useful for implementing user-facing cancel buttons or safety limits.
@@ -517,8 +579,9 @@ All classes accept `BaseGeminiOptions`:
 
 ```javascript
 // Named exports
-import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, BaseGemini, log } from 'ak-gemini';
+import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, FileAgent, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery } from 'ak-gemini';
+import { UnsupportedFormatError, READ_FORMATS, WRITE_FORMATS, writeFormatsFor, pcmToWav } from 'ak-gemini';
 
 // Default export (namespace)
 import AI from 'ak-gemini';

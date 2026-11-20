@@ -66,14 +66,16 @@ class Chat extends BaseGemini {
 	 * @param {string} message - The user's message
 	 * @param {Object} [opts={}] - Per-message options
 	 * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+	 * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
 	 * @returns {Promise<ChatResponse>} Response with text and usage data
 	 */
 	async send(message, opts = {}) {
 		if (!this.chatSession) await this.init();
 
+		const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
 		// Only set a per-message config when there is something to override — it
 		// REPLACES the session config in @google/genai. See _getSendConfig().
-		const sendParams = { message };
+		const sendParams = { message: userMessage };
 		const config = this._getSendConfig(opts.labels);
 		if (config) sendParams.config = config;
 
@@ -98,7 +100,8 @@ class Chat extends BaseGemini {
 		if (!this.chatSession) await this.init();
 
 		let fullText = '';
-		const sendParams = { message };
+		const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
+		const sendParams = { message: userMessage };
 		const config = this._getSendConfig(opts.labels);
 		if (config) sendParams.config = config;
 

@@ -127,6 +127,40 @@ export interface UsageData {
    * Cache STORAGE (per token-hour) and image-output tokens are not modelled.
    */
   estimatedCost?: number | null;
+  /**
+   * Files this call uploaded through the Files API (Gemini API only). ak-gemini
+   * never deletes them; they expire after 48 h. Empty when nothing uploaded.
+   */
+  files?: UploadedFileInfo[];
+  /** Model this call targeted. On per-call `result.usage` (Message, ImageGenerator, FileAgent, stateless Transformer); FileAgent sets its text, image or speech model. */
+  model?: string;
+}
+
+/**
+ * One file for the per-call `files` option:
+ * - a local path (text extensions become labelled text parts; binaries go inline or upload)
+ * - a `gs://` URI (Vertex only) or an `https://` URL, sent as fileData
+ * - `{ uri, mimeType }` to give a URI's MIME type explicitly
+ * - `{ data, mimeType, name? }` with a Buffer, Uint8Array or base64 string
+ */
+export type FileInput =
+  | string
+  | { uri: string; mimeType?: string }
+  | { data: Buffer | Uint8Array | string; mimeType: string; name?: string };
+
+/** A file uploaded through the Files API. */
+export interface UploadedFileInfo {
+  name: string;
+  uri: string;
+  mimeType: string;
+  displayName: string;
+  sizeBytes?: string;
+}
+
+/** Per-call options shared by every send method. */
+export interface FilesOption {
+  /** Files sent after the prompt in the user turn. Strict: an unsupported format throws UnsupportedFormatError. */
+  files?: FileInput | FileInput[];
 }
 
 export interface TransformationExample {
@@ -361,8 +395,8 @@ export interface ImageGenerateOptions {
   imageSize?: ImageSize;
   personGeneration?: PersonGeneration;
   includeText?: boolean;
-  /** Reference images for editing / multi-image composition (base64) */
-  inputImages?: Array<{ data: string; mimeType: string }>;
+  /** Images to edit or compose. Base64 `{ data, mimeType }` objects (3.0.0) or any FileInput (path, URI, Buffer object). */
+  inputImages?: Array<FileInput>;
 }
 
 export interface GeneratedImage {
@@ -544,7 +578,7 @@ export interface CodeAgentStreamEvent {
 
 // ── Per-Message Options ──────────────────────────────────────────────────────
 
-export interface SendOptions {
+export interface SendOptions extends FilesOption {
   /** Per-message billing labels */
   labels?: Record<string, string>;
   /** Send without affecting chat history (Transformer only) */
@@ -709,7 +743,7 @@ export declare class Transformer extends BaseGemini {
   retryDelay: number;
   seed(examples?: TransformationExample[]): Promise<any[]>;
   send(payload: Record<string, unknown> | string, opts?: SendOptions, validatorFn?: AsyncValidatorFunction | null): Promise<Record<string, unknown>>;
-  rawSend(payload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> }): Promise<Record<string, unknown>>;
+  rawSend(payload: Record<string, unknown> | string, messageOptions?: { labels?: Record<string, string> } & FilesOption): Promise<Record<string, unknown>>;
   rebuild(lastPayload: Record<string, unknown>, serverError: string): Promise<Record<string, unknown>>;
   reset(): Promise<void>;
   updateSystemPrompt(newPrompt: string): Promise<void>;
@@ -718,15 +752,15 @@ export declare class Transformer extends BaseGemini {
 export declare class Chat extends BaseGemini {
   constructor(options?: ChatOptions);
 
-  send(message: string, opts?: { labels?: Record<string, string> }): Promise<ChatResponse>;
-  stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<ChatStreamEvent, void, unknown>;
+  send(message: string, opts?: { labels?: Record<string, string> } & FilesOption): Promise<ChatResponse>;
+  stream(message: string, opts?: { labels?: Record<string, string> } & FilesOption): AsyncGenerator<ChatStreamEvent, void, unknown>;
 }
 
 export declare class Message extends BaseGemini {
   constructor(options?: MessageOptions);
 
   init(force?: boolean): Promise<void>;
-  send(payload: Record<string, unknown> | string, opts?: { labels?: Record<string, string> }): Promise<MessageResponse>;
+  send(payload: Record<string, unknown> | string, opts?: { labels?: Record<string, string> } & FilesOption): Promise<MessageResponse>;
 }
 
 export declare class ToolAgent extends BaseGemini {
@@ -741,8 +775,8 @@ export declare class ToolAgent extends BaseGemini {
   writeDir: string | null;
   parallelToolCalls: boolean | number;
 
-  chat(message: string, opts?: { labels?: Record<string, string> }): Promise<AgentResponse>;
-  stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<AgentStreamEvent, void, unknown>;
+  chat(message: string, opts?: { labels?: Record<string, string> } & FilesOption): Promise<AgentResponse>;
+  stream(message: string, opts?: { labels?: Record<string, string> } & FilesOption): AsyncGenerator<AgentStreamEvent, void, unknown>;
   /** Stop the agent before the next tool execution round */
   stop(): void;
 }
@@ -758,8 +792,8 @@ export declare class RagAgent extends BaseGemini {
   localData: LocalDataEntry[];
 
   init(force?: boolean): Promise<void>;
-  chat(message: string, opts?: { labels?: Record<string, string> }): Promise<RagResponse>;
-  stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<RagStreamEvent, void, unknown>;
+  chat(message: string, opts?: { labels?: Record<string, string> } & FilesOption): Promise<RagResponse>;
+  stream(message: string, opts?: { labels?: Record<string, string> } & FilesOption): AsyncGenerator<RagStreamEvent, void, unknown>;
   /** Add remote files uploaded via Files API (triggers reinitialize) */
   addRemoteFiles(paths: string[]): Promise<void>;
   /** Add local text files read from disk (triggers reinitialize) */
@@ -795,8 +829,8 @@ export declare class CodeAgent extends BaseGemini {
   toolExecutor: ((toolName: string, args: Record<string, any>) => Promise<any>) | null;
 
   init(force?: boolean): Promise<void>;
-  chat(message: string, opts?: { labels?: Record<string, string> }): Promise<CodeAgentResponse>;
-  stream(message: string, opts?: { labels?: Record<string, string> }): AsyncGenerator<CodeAgentStreamEvent, void, unknown>;
+  chat(message: string, opts?: { labels?: Record<string, string> } & FilesOption): Promise<CodeAgentResponse>;
+  stream(message: string, opts?: { labels?: Record<string, string> } & FilesOption): AsyncGenerator<CodeAgentStreamEvent, void, unknown>;
   dump(): Array<{ fileName: string; purpose: string | null; script: string; filePath: string | null; tool: string }>;
   stop(): void;
 }
@@ -832,6 +866,107 @@ export declare class ImageGenerator extends BaseGemini {
   /** Write generated images to disk (suffixes `_N` before extension if >1 image) */
   save(result: ImageGenerationResult, filePath: string): string[];
 }
+
+// ── FileAgent ────────────────────────────────────────────────────────────────
+
+export interface FileAgentOptions extends BaseGeminiOptions {
+  /** Image model for .png/.jpg/.jpeg (default: 'gemini-nano-banana-2.1') */
+  imageModel?: string;
+  /** TTS model for .wav (default: 'gemini-3.8-flash-tts') */
+  speechModel?: string;
+  /** Default prebuilt voice for .wav (default: 'Kore') */
+  voice?: string;
+  /** Default speech language code (e.g. 'en-US') */
+  languageCode?: string;
+  aspectRatio?: ImageAspectRatio;
+  imageSize?: ImageSize;
+  personGeneration?: PersonGeneration;
+}
+
+/** One line of a multi-speaker .wav script. */
+export interface SpeechTurn {
+  /** Must match a `speakers[].speaker` name */
+  speaker: string;
+  text: string;
+  /** Delivery instruction, e.g. 'excited, fast-paced' */
+  style?: string;
+}
+
+export interface FileWriteOptions extends FilesOption {
+  /** Output format (extension without the dot). Required unless `path` is given. */
+  format?: string;
+  /** Write here. The format comes from the extension. Parent folders are created; an existing file is overwritten. */
+  path?: string;
+  /** JSON Schema for `format: 'json'` */
+  responseSchema?: Record<string, any>;
+  /** Prebuilt voice for .wav */
+  voice?: string;
+  /** Speech language code for .wav */
+  languageCode?: string;
+  /** Multi-speaker .wav: voice per speaker. Pass the prompt as SpeechTurn[]. */
+  speakers?: Array<{ speaker: string; voice: string }>;
+  aspectRatio?: ImageAspectRatio;
+  imageSize?: ImageSize;
+  personGeneration?: PersonGeneration;
+  /** Per-call billing labels (Vertex) */
+  labels?: Record<string, string>;
+}
+
+export interface FileWriteResult {
+  /** The file bytes */
+  data: Buffer;
+  mimeType: string;
+  /** Format written (extension without the dot) */
+  format: string;
+  /** Path written, or null in bytes mode */
+  path: string | null;
+  /** Text output: the file text for text formats, any accompanying text otherwise */
+  text: string | null;
+  usage: UsageData;
+}
+
+export interface FileReadOptions {
+  responseSchema?: Record<string, any>;
+  responseMimeType?: string;
+  labels?: Record<string, string>;
+}
+
+export declare class FileAgent extends BaseGemini {
+  constructor(options?: FileAgentOptions);
+  imageModel: string;
+  speechModel: string;
+  voice: string;
+  languageCode: string | null;
+  init(force?: boolean): Promise<void>;
+  /** Produce a file. Unsupported formats throw UnsupportedFormatError before any API call. */
+  write(prompt: string | SpeechTurn[], opts: FileWriteOptions): Promise<FileWriteResult>;
+  /** Read files with a prompt (one stateless call). */
+  read(files: FileInput | FileInput[], prompt: string, opts?: FileReadOptions): Promise<{ text: string; data?: any; usage: UsageData }>;
+}
+
+/** Thrown when a file format cannot be read or written. */
+export declare class UnsupportedFormatError extends Error {
+  constructor(format: string, direction: 'read' | 'write', opts?: { vertexai?: boolean; who?: string });
+  /** Extension without the dot ('' for none), or a MIME type */
+  format: string;
+  direction: 'read' | 'write';
+  /** Every supported format for this direction and backend */
+  supported: string[];
+  backend: 'vertex' | 'gemini';
+}
+
+/** Extensions the strict `files` option reads (with the dot). */
+export declare const READ_FORMATS: readonly string[];
+/** Formats FileAgent writes, per kind; images depend on the backend. */
+export declare const WRITE_FORMATS: {
+  readonly text: readonly string[];
+  readonly image: { readonly vertex: readonly string[]; readonly gemini: readonly string[] };
+  readonly audio: readonly string[];
+};
+/** Flat list of formats FileAgent writes on one backend. */
+export declare function writeFormatsFor(vertexai: boolean): string[];
+/** Wrap 16-bit little-endian PCM in a 44-byte WAV header. */
+export declare function pcmToWav(pcm: Buffer, fmt: { sampleRate: number; channels?: number; bitsPerSample?: number }): Buffer;
 
 // ── Module Exports ───────────────────────────────────────────────────────────
 
@@ -890,6 +1025,7 @@ declare const _default: {
   RagAgent: typeof RagAgent;
   Embedding: typeof Embedding;
   ImageGenerator: typeof ImageGenerator;
+  FileAgent: typeof FileAgent;
 };
 
 export default _default;

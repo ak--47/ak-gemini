@@ -1,5 +1,60 @@
 # Changelog
 
+## 3.1.0 — 2026-11-20
+
+File read and write primitives. No breaking changes; no new dependencies.
+Everything below was measured live on 2026-11-20 on Vertex `global` and the
+Gemini API.
+
+### Added
+
+- **`files` per-call option** on every send method (`Message`, `Chat`,
+  `Transformer`, `ToolAgent`, `CodeAgent`, `RagAgent`). Accepts paths, `gs://`
+  URIs (Vertex), `https://` URLs, `{ uri, mimeType }` and
+  `{ data, mimeType, name? }`. Strict: unsupported formats throw.
+- **`FileAgent`**: `write(prompt, { format | path })` produces text files, images
+  and WAV audio; `read(files, prompt)` is a one-call read. Routes text to
+  `modelName`, images to `imageModel` (`gemini-nano-banana-2.1`), and `.wav` to
+  `speechModel` (`gemini-3.8-flash-tts`). Multi-speaker speech via `speakers` and
+  a `SpeechTurn[]` prompt.
+- **`UnsupportedFormatError`**, `READ_FORMATS`, `WRITE_FORMATS`,
+  `writeFormatsFor()`, `pcmToWav()` exports.
+- **`usage.files`** lists Files API uploads; **`usage.model`** names the model.
+- **TTS pricing**: `gemini-3.8-flash-tts` ($0.50 / $9.00 audio through
+  2026-12-31, then $1 / $18), `gemini-3.8-flash-lite-tts` ($0.50 / $6.00, then
+  $1 / $12), `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`,
+  `gemini-2.5-pro-preview-tts`. Audio output bills as `candidatesTokenCount`, so
+  `estimatedCost` includes it. `MODEL_PRICING_AS_OF` → `2026-11-20`.
+
+### Changed
+
+- `ImageGenerator.inputImages` also accepts paths, URIs and Buffer objects.
+  Base64 `{ data, mimeType }` objects pass through unchanged.
+- `RagAgent.remoteFiles` logs a one-time warning for a format Gemini does not
+  read natively (`.docx`, `.gif`, unknown). It still uploads it, as in 3.0.0.
+  `.heic .heif .aiff .mpeg .mpg .flv .wmv .3gp` now upload with their real MIME
+  type instead of `application/octet-stream`.
+- When an upload (or its wait for ACTIVE) fails, the error carries
+  `err.uploaded`: every file uploaded so far, so you can delete them.
+- `Transformer.send()`: if the first send fails before the model answers, the
+  retry sends the files again. Otherwise the model would answer without them.
+- `{ data }` strings must be base64. Plain text or a `data:` URL throws; pass a
+  Buffer for text.
+
+### Measured facts
+
+- Inline limit: Gemini API documents 100 MB (150 MiB was accepted); Vertex caps
+  one inline part at 256,000,000 bytes. ak-gemini uses 100 MB and 256 MB.
+- `files.upload()` does not exist on Vertex. Large Vertex files need `gs://`.
+- `https://` URLs work as `fileData` on both backends.
+- The Gemini API image model returns `image/jpeg` and the SDK rejects
+  `outputMimeType` there. Vertex honours `image/png` and `image/jpeg`; `image/webp`
+  is a 400.
+- `gemini-3.8-flash-tts` returns a complete `audio/wav` file;
+  `gemini-3.1-flash-tts-preview` returns `audio/l16; rate=24000; channels=1`.
+  `FileAgent` handles both. 3.8 TTS multi-speaker needs `speechMetadata.speaker`
+  on every text part.
+
 ## 3.0.0
 
 `@google/genai` 2.18 → 3.6, Gemini 4 support, and Vertex AI with Application

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-gemini** (v3.0.0, `@google/genai` ^3.6.1, Node >=22) is a modular wrapper around Google's `@google/genai` SDK. It provides 7 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
+**ak-gemini** (v3.1.0, `@google/genai` ^3.6.1, Node >=22) is a modular wrapper around Google's `@google/genai` SDK. It provides 9 class exports for different AI interaction patterns, all extending a shared `BaseGemini` base class.
 
 ## Architecture
 
@@ -21,7 +21,9 @@ ak-gemini/
   code-agent.js         ← CodeAgent class (agent that writes and executes code)
   rag-agent.js          ← RagAgent class (document Q&A via remote files, local files, and in-memory data)
   embedding.js          ← Embedding class (vector embeddings via gemini-embedding-001)
-  image-generator.js    ← ImageGenerator class (Nano Banana image generation)
+  image-generator.js    ← ImageGenerator class (Nano Banana image generation) + buildImageConfig/parseImageResponse helpers
+  files.js              ← File primitives: MIME_TYPES, READ/WRITE_FORMATS, UnsupportedFormatError, toParts(), upload/poll, WAV helpers
+  file-agent.js         ← FileAgent class (write text/image/WAV files; read files)
   json-helpers.js       ← Pure functions: extractJSON, attemptJSONRecovery, etc.
   logger.js             ← Pino-based logging with configurable levels
   types.d.ts            ← TypeScript definitions for all classes and interfaces
@@ -52,6 +54,7 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 | `RagAgent` | `chat(message)` / `stream(message)` | Document Q&A via remote files, local files, and in-memory data |
 | `Embedding` | `embed(text)` / `embedBatch(texts)` | Vector embeddings via gemini-embedding-001 |
 | `ImageGenerator` | `generate(prompt)` / `save(result, path)` | Image generation via Gemini 3.x image models (Nano Banana 2) |
+| `FileAgent` | `write(prompt, { format \| path })` / `read(files, prompt)` | Produce text, image or WAV files; routes by format to three models |
 
 ### Key Design Decisions
 
@@ -74,7 +77,8 @@ All classes extend `BaseGemini` which provides: auth, client init, chat session 
 - **Google Search grounding** (`enableGrounding`) is available on all classes via BaseGemini, merges with existing tools
 - **Context caching** (`cachedContent`, `createCache()`, `useCache()`) is available on all classes via BaseGemini
 - **429 rate-limit retry** (`resourceExhaustedRetries: 5`, `resourceExhaustedDelay: 1000`) — automatic exponential backoff on RESOURCE_EXHAUSTED, separate from Transformer's validation retries (`maxRetries`)
-- Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding }`
+- Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, FileAgent }`
+- **`files` per-call option (3.1.0)** on every send method, through ONE path: `BaseGemini._buildUserParts(text, files, { stateful })` → `toParts()` in `files.js`. No files → returns the text string unchanged (3.0.0 calls send byte-identical requests). Strict: unknown formats throw `UnsupportedFormatError` listing the supported set; never fall back, never relabel a MIME, never send `application/octet-stream`
 
 ## Key Classes & APIs
 
@@ -173,6 +177,29 @@ Image generation via Gemini's Nano Banana models. Extends BaseGemini (stateless,
 - `getHistory()`, `clearHistory()`, `seed()`, `estimate()` are no-ops/throw
 - WARNING: image-output tokens bill at $30/M (nano-banana-2.1) to $120/M (3-pro-image), a distinct unit; not modelled by `estimateCost()`
 
+### Files (`files.js`) — 3.1.0
+- `toParts(files, client, { vertexai, alwaysUpload, inlineBytesUsed, inlineLimit, withRetry })` → `{ parts, uploaded }`. Classifies EVERY input (stat, MIME) before any network call, so a missing path or bad format throws before any upload
+- Text extensions → `{ text: '--- File: <name> ---\n<utf8>' }` (same as `RagAgent.localFiles`). Binaries → `inlineData`, or `fileData` after upload
+- `INLINE_LIMIT_BYTES = { gemini: 100_000_000, vertex: 256_000_000 }` applied to the request TOTAL (measured 2026-11-20: Vertex states a 256,000,000-byte per-part cap; Gemini API docs say 100 MB, 150 MiB was accepted). Gemini API uploads the largest binaries until the rest fits; **Vertex cannot upload** (`files.upload()` throws) and over-limit throws naming `gs://`
+- Chat-session classes pass `stateful: true`: on the Gemini API every binary uploads so history holds a small URI; on Vertex, inline bytes already in history (`_inlineBytesInHistory()`) count toward the limit
+- `gs://` throws on the Gemini API. `https://` works as `fileData` on both backends (`HTTPS_URI_SUPPORT`)
+- Uploads land in `usage.files` (`getLastUsage().files`, set by `_buildUserParts` via `_lastUploadedFiles`); never deleted by ak-gemini (48 h expiry)
+- `LEGACY_MIME_TYPES` exists ONLY for `RagAgent.remoteFiles`, which stays lenient (uploads `.docx`/unknown, warns once per path). Do not route it through `toParts`
+- `Transformer.send()` resolves files once BEFORE its retry loop (`_rawSendMessage`), so format errors are not retried. The SDK records a turn only when the call succeeds, so the extraction-retry branch re-attaches the resolved file parts when curated history did not grow (attempt 0 failed). Use `_rawSendMessage` there, not `rawSend` (which resets `_lastUploadedFiles`)
+- A failed upload/poll throws with `err.uploaded` (all uploads so far). `{ data }` strings must be base64 (Node's decoder never throws, so plain text would become garbage)
+- `ImageGenerator.inputImages`: base64 `{ data, mimeType }` objects pass through untouched; all other entries go through ONE `toParts()` call; uploads land in `result.usage.files`
+- Inline accounting counts RAW bytes. Unverified whether Vertex's 256,000,000-byte cap counts base64 size; if so, a single ~200 MB file passes the client check and gets a server 400
+
+### FileAgent (`file-agent.js`) — 3.1.0
+Stateless like Message. `seed()` warns; `getHistory()` → `[]`; `estimate()` throws.
+- `write(prompt, { format?, path?, files?, responseSchema?, voice?, languageCode?, speakers?, aspectRatio?, imageSize?, labels? })` → `{ data: Buffer, mimeType, format, path, text, usage }`. Format/path validated before any call; `jpg`≡`jpeg`; a mismatch or missing extension throws. Path mode `mkdir -p` + overwrite
+- `read(files, prompt, { responseSchema?, responseMimeType?, labels? })` → `{ text, data?, usage }`
+- Text route: `modelName`; appends a "file contents only" instruction to the prompt; strips one wrapping code fence; `json` uses JSON mode and must `JSON.parse` (error carries `.raw`)
+- Image route: `imageModel` (`gemini-nano-banana-2.1`). **Gemini API returns `image/jpeg` and the SDK rejects `outputMimeType`** → Gemini API writes `jpg/jpeg` only. Vertex sends `outputMimeType`; honours png/jpeg, 400s on webp. Returned MIME ≠ requested → throw, nothing written. Zero images → throw
+- Audio route: `speechModel` (`gemini-3.8-flash-tts`, default voice `Kore`). **3.8 TTS returns a full `audio/wav`; 3.1 preview returns `audio/l16; rate=…; channels=…`.** Every part → PCM (`wavToPcm` / `parsePcmMime`) → one `pcmToWav`. Multi-speaker: `speakers: [{ speaker, voice }]` + prompt as `[{ speaker, text, style? }]` (3.8 TTS 400s unless each text part has `speechMetadata.speaker`)
+- `usage.model` names the model that ran (`_usageFromResponse(response, attempts, modelName)`). `FileAgent.getLastUsage()` returns the last call's per-call usage object
+- TTS rows in `MODEL_PRICING`: `output` = audio rate; audio bills as `candidatesTokenCount`, so `estimateCost` covers it
+
 ## Publishing Checklist
 
 - **When adding new `.js` files**, always add them to the `files` array in `package.json`. This controls what gets published to npm — missing entries cause `ERR_MODULE_NOT_FOUND` for consumers.
@@ -212,6 +239,7 @@ new Transformer({ vertexai: true, project: 'my-gcp-project' });
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, Embedding, ImageGenerator, BaseGemini, log } from 'ak-gemini';
 import { extractJSON, attemptJSONRecovery, validateSchema } from 'ak-gemini';
 import { MODEL_PRICING, MODEL_PRICING_AS_OF, MODEL_ALIASES, EFFORT_LEVELS, resolvePricing, computeCost } from 'ak-gemini';
+import { FileAgent, UnsupportedFormatError, READ_FORMATS, WRITE_FORMATS, writeFormatsFor, pcmToWav } from 'ak-gemini';
 
 // Default export (namespace object)
 import AI from 'ak-gemini';
@@ -223,11 +251,11 @@ const { Transformer, Chat } = require('ak-gemini');
 
 ## Testing Strategy
 
-- **Two test tiers:** (1) live-API suites (`*.test.js`) use real Gemini API calls — no mocks; (2) `consumer-fixes.test.js` is offline/mocked (stubs the SDK client on the instance) and safe to run anytime for the 2.5.0 fix logic
+- **Two test tiers:** (1) live-API suites (`*.test.js`) use real Gemini API calls — no mocks; (2) `consumer-fixes.test.js` and `files.test.js` (3.1.0 file primitives) are offline/mocked (stubs the SDK client on the instance) and safe to run anytime for the 2.5.0 fix logic
 - **Do NOT run tests during development** — they are slow (real API calls) and expensive. Use `npm run typecheck` and `npm run build:cjs` to verify changes.
 - Test timeout: 30 seconds (AI calls take 5-15 seconds)
 - Rate limiting (429 errors) can cause flaky failures — retry after waiting
-- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `embedding.test.js`, `json-helpers.test.js`, `consumer-fixes.test.js` (offline/mocked)
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `embedding.test.js`, `json-helpers.test.js`, `file-agent.test.js` (live, 3.1.0 files), `consumer-fixes.test.js` + `files.test.js` (offline/mocked)
 
 ## Key Design Patterns
 

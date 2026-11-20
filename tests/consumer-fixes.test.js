@@ -944,7 +944,7 @@ describe('consumer-fixes (ak-gemini)', () => {
 
 			it('maps gemini-flash-latest to gemini-3.8-flash', () => {
 				expect(MODEL_ALIASES['gemini-flash-latest']).toBe('gemini-3.8-flash');
-				expect(MODEL_PRICING_AS_OF).toBe('2026-11-19');
+				expect(MODEL_PRICING_AS_OF).toBe('2026-11-20');
 			});
 		});
 	});

@@ -18,10 +18,58 @@
 import BaseGemini from './base.js';
 import log from './logger.js';
 import { writeFileSync } from 'node:fs';
+import { toParts } from './files.js';
 
 // Nano Banana 2.1 (GA 2026-10-06). The old default, gemini-3.1-flash-image-preview,
 // is 404 on Vertex and was shut down on the Gemini API on 2026-06-25.
 const DEFAULT_IMAGE_MODEL = 'gemini-nano-banana-2.1';
+
+/**
+ * Build a FRESH image-generation config. Gemini image models reject
+ * safetySettings/temp/topK/topP/thinkingConfig, so this never spreads chatConfig.
+ * @param {{ aspectRatio?: string|null, imageSize?: string|null, personGeneration?: string|null, includeText?: boolean }} defaults
+ * @param {{ aspectRatio?: string, imageSize?: string, personGeneration?: string, includeText?: boolean }} [overrides]
+ * @param {{ outputMimeType?: string }} [extra] - `outputMimeType` is Vertex-only
+ * @returns {Record<string, any>}
+ */
+export function buildImageConfig(defaults, overrides = {}, { outputMimeType } = {}) {
+	const includeText = overrides.includeText ?? defaults.includeText ?? false;
+	/** @type {Record<string, any>} */
+	const config = { responseModalities: includeText ? ['IMAGE', 'TEXT'] : ['IMAGE'] };
+
+	/** @type {Record<string, any>} */
+	const imageConfig = {};
+	const aspectRatio = overrides.aspectRatio || defaults.aspectRatio;
+	const imageSize = overrides.imageSize || defaults.imageSize;
+	const personGeneration = overrides.personGeneration || defaults.personGeneration;
+	if (aspectRatio) imageConfig.aspectRatio = aspectRatio;
+	if (imageSize) imageConfig.imageSize = imageSize;
+	if (personGeneration) imageConfig.personGeneration = personGeneration;
+	if (outputMimeType) imageConfig.outputMimeType = outputMimeType;
+	if (Object.keys(imageConfig).length > 0) config.imageConfig = imageConfig;
+
+	return config;
+}
+
+/**
+ * Pull images and text out of an image-model response. The MIME type is the
+ * one the API returned (possibly undefined); callers decide any default.
+ * @param {any} result
+ * @returns {{ images: Array<{ data: string, mimeType: string }>, text: string|null }}
+ */
+export function parseImageResponse(result) {
+	const images = [];
+	let text = '';
+	const responseParts = result?.candidates?.[0]?.content?.parts || [];
+	for (const part of responseParts) {
+		if (part.inlineData?.data) {
+			images.push({ data: part.inlineData.data, mimeType: part.inlineData.mimeType });
+		} else if (part.text) {
+			text += part.text;
+		}
+	}
+	return { images, text: text || null };
+}
 
 export default class ImageGenerator extends BaseGemini {
 
@@ -68,19 +116,7 @@ export default class ImageGenerator extends BaseGemini {
 	 * @private
 	 */
 	_buildConfig(overrides = {}) {
-		const includeText = overrides.includeText ?? this.includeText;
-		const config = { responseModalities: includeText ? ['IMAGE', 'TEXT'] : ['IMAGE'] };
-
-		const imageConfig = {};
-		const aspectRatio = overrides.aspectRatio || this.aspectRatio;
-		const imageSize = overrides.imageSize || this.imageSize;
-		const personGeneration = overrides.personGeneration || this.personGeneration;
-		if (aspectRatio) imageConfig.aspectRatio = aspectRatio;
-		if (imageSize) imageConfig.imageSize = imageSize;
-		if (personGeneration) imageConfig.personGeneration = personGeneration;
-		if (Object.keys(imageConfig).length > 0) config.imageConfig = imageConfig;
-
-		return config;
+		return buildImageConfig(this, overrides);
 	}
 
 	/**
@@ -96,9 +132,24 @@ export default class ImageGenerator extends BaseGemini {
 
 		/** @type {any[]} */
 		const parts = [{ text: prompt }];
+		/** @type {any[]} */
+		let uploaded = [];
 		if (Array.isArray(opts.inputImages)) {
-			for (const img of opts.inputImages) {
-				parts.push({ inlineData: { data: img.data, mimeType: img.mimeType } });
+			const isLegacy = img => img && typeof img === 'object' && typeof img.data === 'string' && img.mimeType;
+			const inputs = /** @type {any[]} */ (opts.inputImages);
+			// Paths, URIs, Buffers: ONE strict-resolver call, so every input is checked
+			// (and the inline total summed) before any upload.
+			const strict = inputs.filter(img => !isLegacy(img));
+			let resolved = [];
+			if (strict.length) {
+				({ parts: resolved, uploaded } = await toParts(strict, await this._ensureClient(), {
+					vertexai: this.vertexai, withRetry: fn => this._withRetry(fn)
+				}));
+			}
+			let next = 0;
+			for (const img of inputs) {
+				// 3.0.0 shape: base64 object passes through untouched.
+				parts.push(isLegacy(img) ? { inlineData: { data: img.data, mimeType: img.mimeType } } : resolved[next++]);
 			}
 		}
 
@@ -109,7 +160,7 @@ export default class ImageGenerator extends BaseGemini {
 		}));
 
 		// Per-call usage computed synchronously from THIS response (concurrency-safe).
-		const usage = this._usageFromResponse(result);
+		const usage = { ...this._usageFromResponse(result), files: uploaded };
 
 		this._captureMetadata(result);
 		this._cumulativeUsage = {
@@ -121,25 +172,15 @@ export default class ImageGenerator extends BaseGemini {
 			attempts: 1
 		};
 
-		const images = [];
-		let text = '';
-		const responseParts = result.candidates?.[0]?.content?.parts || [];
-		for (const part of responseParts) {
-			if (part.inlineData?.data) {
-				images.push({
-					data: part.inlineData.data,
-					mimeType: part.inlineData.mimeType || 'image/png'
-				});
-			} else if (part.text) {
-				text += part.text;
-			}
-		}
+		const parsed = parseImageResponse(result);
+		const images = parsed.images.map(img => ({ data: img.data, mimeType: img.mimeType || 'image/png' }));
+		const text = parsed.text;
 
 		if (images.length === 0) {
 			log.warn('ImageGenerator: no images returned. Check prompt or safety filters.');
 		}
 
-		return { images, text: text || null, usage };
+		return { images, text, usage };
 	}
 
 	/**

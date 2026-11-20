@@ -132,6 +132,7 @@ class ToolAgent extends BaseGemini {
 	 * @param {string} message - The user's message
 	 * @param {Object} [opts={}] - Per-message options
 	 * @param {Record<string, string>} [opts.labels] - Per-message billing labels
+	 * @param {import('./types').FileInput|import('./types').FileInput[]} [opts.files] - Files sent after the message (strict)
 	 * @returns {Promise<AgentResponse>} Response with text, toolCalls, and usage
 	 */
 	async chat(message, opts = {}) {
@@ -141,10 +142,11 @@ class ToolAgent extends BaseGemini {
 		const allToolCalls = [];
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
+		const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
 
 		this._resetUsage();
 		let response = await this._withRetry(() => this.chatSession.sendMessage({
-			message,
+			message: userMessage,
 			...(sendConfig && { config: sendConfig })
 		}));
 		this._accumulateUsage(response);
@@ -234,10 +236,11 @@ class ToolAgent extends BaseGemini {
 		let fullText = '';
 		// undefined unless there are per-message label overrides; see _getSendConfig()
 		const sendConfig = this._getSendConfig(opts.labels);
+		const { message: userMessage } = await this._buildUserParts(message, opts.files, { stateful: true });
 
 		this._resetUsage();
 		let streamResponse = await this._withRetry(() => this.chatSession.sendMessageStream({
-			message,
+			message: userMessage,
 			...(sendConfig && { config: sendConfig })
 		}));
 
